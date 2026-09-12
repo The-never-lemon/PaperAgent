@@ -31,7 +31,7 @@ Paper-Agent 2.0 是相对旧版 1.x 的一次**全新重写**。它保留了旧�
 <p align="center">
   <img src="https://github.com/user-attachments/assets/a88a2823-9724-4a7a-aee4-fafbfef068a6" width="720" alt="Paper-Agent 会话工作台" />
   <br>
-  <em>输入研究主题，实时追踪检索 → 阅读 → 分析 → 大纲 → 写作全流程进度</em>
+  <em>输入研究主题，实时追踪检索论文、精读论文、生成综述等各环节进度（综述内部的分析、大纲、逐节写作以同一张卡片的实时状态文字呈现）</em>
 </p>
 
 <p align="center">
@@ -50,9 +50,9 @@ Paper-Agent 2.0 是相对旧版 1.x 的一次**全新重写**。它保留了旧�
 |------|---------|-----------------|
 | 初步了解陌生研究方向 | 手动搜索多个来源，逐个打开论文判断相关度，**耗时费力** | 从 arXiv / OpenAlex / Semantic Scholar 自动检索，按主题和约束去重、筛选、整理 |
 | 论文阅读与资料积累 | 读完一篇记一篇笔记，资料散落在各处，**容易丢失和重复** | 先读摘要判断相关性，再按条件下载全文、解析、切分，逐块精读并把全文与笔记留在本地 |
-| 撰写领域综述 | 边读边写，反复调整结构，**常常写到一半推倒重来** | 从子主题分析和全局分析生成结构化大纲，再逐节按证据写作 |
-| 管理长流程任务 | 每跑一步都担心进度、状态和重启后丢失，**不敢中途停下** | 会话、运行状态、阶段产物和实时进度都在工作台可见，可随时保存与恢复 |
-| 控制模型成本 | 全程用一个模型档位，**不清楚每个环节花了多少 token** | 每个阶段、每个 Agent 的实际 token 用量都可见，便于按需调整 |
+| 撰写领域综述 | 边读边写，反复调整结构，**常常写到一半推倒重来** | 先从论文整体分析、再做全局综合，据此生成结构化大纲，然后逐节按证据写作 |
+| 管理长流程任务 | 每跑一步都担心进度、状态和重启后丢失，**不敢中途停下** | 会话、运行状态、阶段产物和实时进度都在工作台可见；刷新后历史与实时流可接回，进程中断的任务会被标记为「已中断」，可基于工作区已保存的产物继续下一轮调研 |
+| 控制模型成本 | 全程用一个模型档位，**不清楚每个环节花了多少 token** | 精读、追问、综述等子 Agent 的 token 用量会累加到对应工具卡片；主对话按轮次上报，多轮对话下看到的是最近一轮的用量 |
 
 > **Paper-Agent 不只是论文摘要工具，而是一个完整的 AI 研究助理——它找得到论文、读得懂全文、理得清脉络、写得出综述。**
 
@@ -62,9 +62,9 @@ Paper-Agent 2.0 是相对旧版 1.x 的一次**全新重写**。它保留了旧�
 
 | | 特性 | 一句话说明 |
 |--|------|-----------|
-| 🔍 | **多来源论文检索** | 内置 arXiv、OpenAlex、Semantic Scholar 连接器，统一为 `PaperDocument`，按年份、来源、数量和排除词筛选并去重评分；配好嵌入模型后还会做一轮语义重排 |
-| 📖 | **从摘要到全文的渐进式阅读** | 先读摘要判断相关性，满足条件的论文走下载 → PDF 转 Markdown → 分块 → 逐块精读并汇总；依赖不可用时保存恢复现场 |
-| 🔬 | **分层研究分析** | `AnalyseAgent` 先按子主题逐篇分析，再做全局综合，形成研究现状、共识、争议、空白、时间演化与展望等结构化内容 |
+| 🔍 | **多来源论文检索** | 内置 arXiv、OpenAlex、Semantic Scholar 连接器，统一为 `PaperDocument`，按年份、来源、数量和排除词筛选并去重评分；配好嵌入模型后，还会把主题与候选论文的语义相似度作为排序的最后一档参考（命中源数、概念组匹配、引用数、年份都相同时才起作用） |
+| 📖 | **从摘要到全文的渐进式阅读** | 先读摘要判断相关性，满足条件的论文走下载 → PDF 转 Markdown → 分块 → 逐块精读并汇总；全文下载或转换失败时自动降级为「基于摘要的精读」，并把失败原因告知用户 |
+| 🔬 | **分层研究分析** | `AnalyseAgent` 先把工作区全部论文的结构化摘要做一次整体分析，再做一次全局综合，形成研究现状、共识、争议、空白、时间演化与展望等结构化内容 |
 | ✍️ | **证据约束下的综述写作** | `WritingOutlineAgent` 生成大纲与证据映射，`WritingAgent` 逐节写作、证据不足时检索补充、完成后审查并限次修改 |
 | 📡 | **实时会话工作台** | SSE 实时推送检索、阅读、分析、大纲与逐节写作进度，SQLite + 文件系统持久化，刷新后历史可恢复 |
 | 🎛️ | **可视化模型配置** | 在浏览器中管理 Provider 协议、API 地址、密钥、各 Agent 档位与 embedding 参数，一键测试连通性，保存即生效 |
@@ -84,6 +84,10 @@ flowchart TB
         LLM --> T4[ask_paper]
         LLM --> T5[generate_review]
         LLM --> T6[expand_by_citations]
+        LLM --> T7[list_papers]
+        LLM --> T8[get_paper_details]
+        LLM --> T9[remove_papers]
+        LLM --> T10[download_paper]
     end
     
     subgraph SubAgents["子 Agent（agent-as-tool）"]
@@ -105,8 +109,11 @@ flowchart TB
     end
     
     T1 --> Sources
-    T6 --> Sources
+    T6 --> OA
+    T6 --> SS
 ```
+
+> 主对话共注册 10 个工具（上图全部列出）。引文扩展（`expand_by_citations`）只对实现了该接口的 OpenAlex 与 Semantic Scholar 生效，arXiv 连接器未实现，会按空结果处理。
 
 ---
 
@@ -121,7 +128,7 @@ flowchart TB
 | LLM 适配 | OpenAI 兼容协议、Anthropic Messages 协议 |
 | 论文来源 | arXiv、OpenAlex、Semantic Scholar |
 | 全文处理 | `pypdf`、Markdown 转换、文本分块 |
-| 语义重排 | 任意 OpenAI 兼容的 embedding 接口；未配置则退回纯词面排序 |
+| 语义重排 | 任意 OpenAI 兼容的 embedding 接口；作为检索排序的最后一档参考，未配置则该档不参与 |
 | 会话存储 | SQLite + 本地 JSON/Markdown 文件 |
 | 前端 | Vue 3、TypeScript、Vite、Vue Router、Lucide |
 
@@ -141,14 +148,14 @@ Paper-Agent/
 ├── front/                          # Vue 3 + TypeScript 前端
 │   ├── src/api/                    # 会话与设置 API 客户端
 │   ├── src/components/             # 工作台、状态和会话组件
-│   ├── src/views/                  # 会话工作台、系统设置页
+│   ├── src/views/                  # 会话工作台、系统配置页
 │   └── vite.config.ts              # 开发服务器、代理和端口配置
 ├── src/
 │   ├── agents/                     # Agent 定义、模型调用和写作工具
 │   ├── api/                        # FastAPI 应用与路由
-│   ├── graph/                      # LangGraph 主流程和各阶段节点
+│   ├── graph/                      # 运行期基础设施：运行上下文、取消控制、节点事件上报
 │   ├── llm/                        # Provider 适配、配置解析和统一响应
-│   ├── models/                     # 会话、协议和阅读领域模型
+│   ├── models/                     # 会话、阅读与工作区领域模型
 │   ├── paper_retrieval/            # 论文模型、检索服务和来源连接器
 │   ├── repositories/               # SQLite、JSON 与阶段产物持久化
 │   ├── services/                   # 会话、运行、设置和工作流服务
@@ -176,7 +183,7 @@ npm run front:install
 
 ### 2. 创建本地模型配置
 
-推荐通过 Web 工作台的「系统设置」页面修改和测试配置。也可以手动拷贝 `config/model.example.json` 为 `config/model.json`，至少确认：
+推荐通过 Web 工作台的「系统配置」页面修改和测试配置。也可以手动拷贝 `config/model.example.json` 为 `config/model.json`，至少确认：
 
 1. `providers` 中存在一个可用 Provider，并填写 `api_base`；
 2. `api_key` 或 `api_key_env` 能提供有效密钥；
@@ -197,7 +204,7 @@ uv run python main.py
 npm run front:dev
 ```
 
-打开 <http://127.0.0.1:5173/>，先进入「模型设置」测试模型，再进入会话工作台创建研究任务。
+打开 <http://127.0.0.1:5173/>，先进入「系统配置」测试模型，再进入会话工作台创建研究任务。
 
 前端默认只监听本机，并代理 `/api`、`/webui` 请求到 `127.0.0.1:8000`。如需局域网其他设备访问：
 
@@ -205,14 +212,21 @@ npm run front:dev
 npm run front:dev:network
 ```
 
-### 5. 当作单进程工具运行（不需要 Node）
+### 5. 只用一个端口运行（不需要 Node）
 
 上面第 4 步的双服务模式是给开发用的。如果只是想把整个应用跑起来自己用，可以先构建一次前端，
-之后由后端直接托管界面，**一个进程、一个端口**，也不需要 Node：
+之后由后端直接托管界面，**不需要 Node，也不需要 5173 端口**：
 
 ```powershell
 npm run front:build
 uv run python main.py
+```
+
+注意 `main.py` 是带 `reload=True` 启动的（开发时改代码自动重启，会额外拉一个监视进程）。
+想要真正的单进程运行，用分发用的那个启动器，它显式关掉了 reload：
+
+```powershell
+uv run python scripts/launch.py
 ```
 
 然后访问 <http://127.0.0.1:8000/> 即可（不是 5173）。后端会挂载 `front/dist` 并接管前端路由，
@@ -234,20 +248,22 @@ uv run python scripts/package.py    # 生成 Paper-Agent-<日期>.zip
 
 ## 🔧 模型配置
 
-系统支持配置多个 Provider，但只内置一个模型档位 `default_agent`，所有子 Agent 都用它；主对话另有一个可选档位 `research_agent`。
+系统支持配置多个 Provider。内置档位只有 `default_agent` 一个，AgentSpec 中声明了档位的子 Agent 都指向它；主对话另有可选档位 `research_agent`（未配置时回退 `default_agent`）。
 
 - 配置主文件：`config/model.json`（含密钥，不入库），示例见 `config/model.example.json`，系统参数见 `config/system.yaml`
 
-| Agent | 使用档位 | 主要职责 |
+| Agent | 运行时实际使用的档位 | 主要职责 |
 | --- | --- | --- |
 | `researchAgent`（主对话） | `research_agent`，未配置时回退 `default_agent` | 多轮对话、工具调用与任务分派 |
-| `SearchAgent` | `default_agent` | 从研究主题生成关键词、子主题和检索约束 |
-| `ReadAgent` | `default_agent` | 阅读摘要，判断相关性并整理笔记 |
-| `AnalyseAgent` | `default_agent` | 分析子主题，并综合研究现状与趋势 |
-| `WritingOutlineAgent` | `default_agent` | 生成正文大纲和证据映射 |
-| `WritingAgent` | `default_agent` | 逐节写作、调用资料工具和审查修改 |
+| `deepReadAgent` / `paperQaAgent` | 复用主对话的档位快照 | 全文精读、基于全文的追问 |
+| `AnalyseAgent` | 复用主对话的档位快照 | 分析论文，并综合研究现状与趋势 |
+| `WritingOutlineAgent` | 复用主对话的档位快照 | 生成正文大纲和证据映射 |
+| `WritingAgent` | 复用主对话的档位快照 | 逐节写作、调用资料工具和审查修改 |
+| `ReadAgent` | 复用主对话的档位快照 | 阅读摘要，判断相关性并整理笔记 |
 
-`default_agent` 是唯一必需的档位，缺失时配置无法工作。想给主对话单独用另一个模型，就再补一个 `research_agent` 档位即可。
+`default_agent` 是唯一必需的档位，缺失时配置无法工作。
+
+> 说明：`AgentSpec` 里声明的 `llm_profile` 在当前装配路径下不生效——对话中被当作工具调用的子 Agent 直接复用主对话的模型快照，因此配了 `research_agent` 时它们跑的也是 `research_agent` 的模型。
 
 ### Provider 后端
 
@@ -271,7 +287,9 @@ uv run python scripts/package.py    # 生成 Paper-Agent-<日期>.zip
 
 ### 系统参数
 
-`config/system.yaml` 主要影响阅读节点：缓存目录、连接/下载超时、最大文件大小、文本分块等参数均可在此调整。
+`config/system.yaml` 存放系统级默认值和阅读参数：`defaults.llm` 是所有 Agent 档位未声明字段时的兜底生成参数，`defaults.embedding` 是嵌入档位默认值，`paper_retrieval` 是检索数据源密钥，`read` 是阅读与下载参数（缓存目录、连接/下载超时、最大文件大小）。
+
+> `read.chunk_size` / `read.chunk_overlap` 目前只是配置项：实际分块固定按每 1200 字符、按 PDF 页切分且不重叠，改这两项不会生效。
 
 ---
 
