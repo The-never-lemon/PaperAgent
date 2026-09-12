@@ -465,7 +465,7 @@ def build_research_tool_registry(context: ResearchToolContext) -> ToolRegistry:
     阶段 1：注册 search_papers / list_papers（handler 已实现）。
     阶段 2：已实现 get_paper_details / evaluate_papers / remove_papers。
     阶段 3：已实现 download_paper / deep_read_paper / ask_paper。
-    阶段 4：已实现 generate_review（至此九个工具全部注册）。
+    阶段 4：已实现 generate_review；另有 expand_by_citations（至此十个工具全部注册）。
     未注册的工具不会出现在模型的可用工具列表里，从根上避免模型调用半成品。
     """
 
