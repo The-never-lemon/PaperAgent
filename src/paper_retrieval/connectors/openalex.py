@@ -217,7 +217,11 @@ class OpenAlexPaperConnector(PaperSearchConnector):
     async def _resolve_work_id(
         self, external_ref: str, client: httpx.AsyncClient | None
     ) -> str | None:
-        """把 external_ref 转成 OpenAlex work id。"""
+        """把 external_ref 转成 OpenAlex work id。
+
+        中文注释：
+        认三种形式——DOI:xxx、ARXIV:xxx、以及 OpenAlex 自己的 W 开头 id。
+        """
 
         own_client = client is None
         c = client or httpx.AsyncClient(timeout=self._timeout_seconds)
@@ -226,6 +230,19 @@ class OpenAlexPaperConnector(PaperSearchConnector):
                 # DOI 查询：GET /works/https://doi.org/xxx
                 doi = external_ref[4:]
                 url = f"{self._endpoint}/https://doi.org/{doi}"
+                resp = await c.get(url)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data.get("id")
+            elif external_ref.startswith("ARXIV:"):
+                # 中文注释：OpenAlex 没有「按 arXiv 编号查」的接口——实测
+                # /works/arxiv:2407.01527 和 filter=ids.arxiv:... 它都不认。
+                # 但 arXiv 给每篇论文都分配了一个 DataCite DOI（10.48550/arXiv.<编号>），
+                # 用这个 DOI 就能查到，所以这里先把 arXiv 编号翻译成 DOI，再走上面那条路。
+                arxiv_id = external_ref[6:].strip()
+                if not arxiv_id:
+                    return None
+                url = f"{self._endpoint}/https://doi.org/10.48550/arXiv.{arxiv_id}"
                 resp = await c.get(url)
                 if resp.status_code == 200:
                     data = resp.json()

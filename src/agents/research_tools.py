@@ -773,7 +773,7 @@ async def _handle_expand_by_citations(
 
     paper_data = entry.paper
     # 第二步：从种子论文里取出可用于引用查询的外部标识。
-    # 优先级：DOI > Semantic Scholar paperId > OpenAlex id > arXiv id。
+    # 优先级：DOI > arXiv 编号 > Semantic Scholar paperId > OpenAlex id。
     external_ref = _extract_external_ref(paper_data)
     if not external_ref:
         return {"error": f"论文 {paper_id} 缺少可用于引用扩展的外部标识（DOI 或数据库编号）"}
@@ -855,8 +855,8 @@ def _extract_external_ref(paper_data: JsonObject) -> str:
     """从工作区论文数据里取出可用于引用查询的外部标识。
 
     中文注释：
-    OpenAlex 和 Semantic Scholar 的引用 API 接受 DOI、数据库内部 id、arXiv id 等。
-    这里按优先级挑一个可用的：DOI > Semantic Scholar paperId > OpenAlex id。
+    上游的引用 API 接受 DOI、arXiv 编号、数据库内部 id 等。
+    这里按优先级挑一个可用的：DOI > arXiv 编号 > Semantic Scholar paperId > OpenAlex id。
     """
 
     doi = str(paper_data.get("doi") or "").strip()
@@ -864,6 +864,14 @@ def _extract_external_ref(paper_data: JsonObject) -> str:
         # DOI 有时带 https://doi.org/ 前缀，要去掉。
         doi = doi.removeprefix("https://doi.org/").removeprefix("http://doi.org/")
         return f"DOI:{doi}"
+
+    # 中文注释：arXiv 编号必须排在下面那个「首位是数字就当 S2 内部 id」的判断之前。
+    # arXiv 编号形如 2407.01527v1，同样是数字开头，但 Semantic Scholar 根本查不到它，
+    # 误判的结果是查询静默失败——用户只会看到「没有找到相关论文」。
+    arxiv_ref = _arxiv_external_ref(paper_data)
+    if arxiv_ref:
+        return arxiv_ref
+
     # Semantic Scholar 的内部 id（以数字开头）
     s2_id = str(paper_data.get("paperId") or "").strip()
     if s2_id and s2_id[0].isdigit():
@@ -872,6 +880,50 @@ def _extract_external_ref(paper_data: JsonObject) -> str:
     oa_id = str(paper_data.get("id") or "").strip()
     if oa_id.startswith("W"):
         return oa_id
+    return ""
+
+
+def _arxiv_external_ref(paper_data: JsonObject) -> str:
+    """从论文数据里取出 arXiv 编号，整理成上游认识的 `ARXIV:` 形式。
+
+    中文注释：
+    编号有两个可能的来源：arXiv 连接器把原始编号存在 metadata.arxiv_id，
+    同时把 id / paperId 也设成了它。两个都试一下，谁先能认出来就用谁。
+    """
+
+    candidates: list[str] = []
+    metadata = paper_data.get("metadata")
+    if isinstance(metadata, dict):
+        candidates.append(str(metadata.get("arxiv_id") or ""))
+    if str(paper_data.get("source") or "").strip().lower() == "arxiv":
+        candidates.append(str(paper_data.get("paperId") or ""))
+        candidates.append(str(paper_data.get("id") or ""))
+    for candidate in candidates:
+        normalized = _normalize_arxiv_id(candidate)
+        if normalized:
+            return f"ARXIV:{normalized}"
+    return ""
+
+
+def _normalize_arxiv_id(value: str) -> str:
+    """把 arXiv 编号整理成标准形式，认不出来就返回空串。
+
+    中文注释：
+    末尾的版本号一定要去掉。实测 OpenAlex 用 10.48550/arxiv.2407.01527v3 查不到，
+    去掉版本号才查得到（命中数从 0 变成 1）。
+
+    只认两种形状——新编号 2407.01527、2007 年前的老编号 math.GT/0309136——
+    这样不会把 Semantic Scholar 的纯数字内部 id 误当成 arXiv 编号。
+    """
+
+    text = (value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"v\d+$", "", text, flags=re.IGNORECASE)
+    if re.fullmatch(r"\d{4}\.\d{4,5}", text):
+        return text
+    if re.fullmatch(r"[A-Za-z\-]+(?:\.[A-Za-z\-]+)?/\d{7}", text):
+        return text
     return ""
 
 

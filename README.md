@@ -113,7 +113,7 @@ flowchart TB
     T6 --> SS
 ```
 
-> 主对话共注册 10 个工具（上图全部列出）。引文扩展（`expand_by_citations`）只对实现了该接口的 OpenAlex 与 Semantic Scholar 生效，arXiv 连接器未实现，会按空结果处理。
+> 主对话共注册 10 个工具（上图全部列出）。引文扩展（`expand_by_citations`）由 OpenAlex 与 Semantic Scholar 承担：arXiv 的接口本身不提供引文数据，所以它不参与回答，但 arXiv 来源的论文只要带编号（arXiv 编号或 DOI）一样可以扩展。
 
 ---
 
