@@ -40,7 +40,6 @@ class WritingOutlineAgent(BaseAgent):
         description="根据论文分析结果生成章节和小节级别的写作大纲。",
         # 中文说明：大纲和分析关系很近，先复用 default_agent 的模型配置，减少用户需要维护的配置项。
         llm_profile="default_agent",
-        skills=(),
         # 中文说明（阶段4去耦合）：大纲生成已改为显式入参（topic / analysis_report），
         # 不再从共享 State 里读字段，这里不再声明依赖的状态键。
         input_keys=(),
@@ -146,14 +145,21 @@ def _outline_messages(*, topic: str, analysis_report: JsonObject) -> list[JsonOb
             "overall_framework": overall_framework,
             "综合分析节点输出": overall_analysis,
             "可使用的子主题分析": subtopic_analyses,
+            # 中文说明：这里只给结构，标题和说明一律用占位符，不要写具体的章节名。
+            # 以前这里写的是「相关研究现状」「主要研究方向」这种真实标题，等于在用户
+            # 消息里暗示了一套固定骨架；而系统提示词自己的示例用的是 title1 / task1
+            # 这样的占位符（见 Prompts.py 的 WRITING_OUTLINE_AGENT_SYSTEM_PROMPT），
+            # 两处口径不一致。另外系统提示词末尾还挂了一段「章节该按什么逻辑组织」
+            # 的方法论，如果这里继续递一个具体骨架，模型会照着这个骨架写，那段方法论
+            # 就等于被压住了——出了问题时也分不清是方法论没生效还是被这里的示例带偏。
             "输出示例": {
                 "Chapter1": {
-                    "title": "相关研究现状",
-                    "description": "本章梳理主题下已有研究的主要方向和代表性发现，直接进入正文论述。",
+                    "title": "title1",
+                    "description": "description1",
                     "Sections": {
                         "section1": {
-                            "title": "主要研究方向",
-                            "task": "按研究方向归纳已有工作，说明每个方向解决的主要问题。",
+                            "title": "title2",
+                            "task": "task1",
                             "evidence-map": [],
                             "ref-sections": [],
                             "word-count": 600,

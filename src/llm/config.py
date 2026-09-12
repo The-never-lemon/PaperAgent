@@ -58,8 +58,12 @@ class ReadDefaults:
     connect_timeout_seconds: int = 10
     download_timeout_seconds: int = 60
     max_file_size_mb: int = 50
-    chunk_size: int = 1200
-    chunk_overlap: int = 150
+    # 中文注释：这里以前还有 chunk_size / chunk_overlap 两项，但它们从来没有任何代码读过——
+    # 真正切分正文的是 PageChunker，它用的是自己类里的 1200 / 4000 两个常量。留着这种
+    # "改了也不生效"的配置只会误导人，所以连同 _read_non_negative_int 一起删掉了。
+    # 中文注释：用哪个工具把 PDF 转成 Markdown。可选 auto / pymupdf / pypdf。
+    # auto 的意思是"装了 PyMuPDF 就用它"，PyMuPDF 能多提取出表格、公式和图片。
+    pdf_parser: str = "auto"
 
 
 @dataclass(slots=True)
@@ -118,8 +122,7 @@ class SystemConfig:
                 connect_timeout_seconds=_read_positive_int(read.get("connect_timeout_seconds"), 10),
                 download_timeout_seconds=_read_positive_int(read.get("download_timeout_seconds"), 60),
                 max_file_size_mb=_read_positive_int(read.get("max_file_size_mb"), 50),
-                chunk_size=_read_positive_int(read.get("chunk_size"), 1200),
-                chunk_overlap=_read_non_negative_int(read.get("chunk_overlap"), 150),
+                pdf_parser=_read_pdf_parser(read.get("pdf_parser")),
             ),
         )
 
@@ -433,11 +436,14 @@ def _read_positive_int(value: Any, default: int, *, maximum: int | None = None) 
     return min(resolved, maximum) if maximum is not None else resolved
 
 
-def _read_non_negative_int(value: Any, default: int) -> int:
-    """把允许为零的阅读配置安全转换为整数，避免切片参数出现负数。"""
+def _read_pdf_parser(value: Any) -> str:
+    """读取 PDF 解析器名字，只认 auto / pymupdf / pypdf 三个值。
 
-    try:
-        resolved = int(value)
-    except (TypeError, ValueError):
-        return default
-    return resolved if resolved >= 0 else default
+    中文注释：写错名字时不能直接报错启动失败，回退成 auto 更稳妥 —— 用户手滑
+    打错一个字，不该让整个阅读功能挂掉。
+    """
+
+    text = _optional_text(value)
+    if text in {"auto", "pymupdf", "pypdf"}:
+        return text
+    return "auto"

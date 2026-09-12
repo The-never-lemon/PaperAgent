@@ -3979,6 +3979,98 @@ body {
   cursor: not-allowed;
 }
 
+/* ---- 论文信息弹窗（点击对话里的 [paper_id] 引用、且尚未精读时弹出） ---- */
+
+.paper-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(15, 23, 38, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.paper-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(600px, 94vw);
+  max-height: 82vh;
+  overflow-y: auto;
+  /* 中文注释：底部内边距交给 .paper-dialog-actions 自己撑，
+     这样它用 position:sticky 贴在底部时才是严丝合缝的。 */
+  padding: 16px 18px 0;
+  border-radius: var(--radius-md);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow-lg);
+  animation: paper-dialog-in 0.16s ease;
+}
+
+@keyframes paper-dialog-in {
+  from { transform: translateY(10px) scale(0.99); opacity: 0.4; }
+  to { transform: translateY(0) scale(1); opacity: 1; }
+}
+
+.paper-dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.paper-dialog-close {
+  border: 0;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  padding: 2px;
+  display: inline-flex;
+}
+
+.paper-dialog-close:hover {
+  color: var(--text-soft);
+}
+
+.paper-dialog-title {
+  margin: 0;
+  font-size: 15.5px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.paper-dialog-meta {
+  margin: 0;
+}
+
+.paper-dialog-abstract {
+  margin: 0;
+  /* 中文注释：摘要完整铺开，不设高度上限、也不自己做滚动条。
+     之前给这里加过 max-height + overflow，结果文字被截在框的边缘、
+     滚动条又是悬浮式的看不见，看起来就像摘要在半句话处断了。
+     现在统一交给最外层弹窗滚动。 */
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text-soft);
+}
+
+.paper-dialog-empty {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+.paper-dialog-actions {
+  /* 中文注释：贴在弹窗底部，这样摘要再长也不用往下翻就能点到「原文」「精读」。 */
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 0 14px;
+  background: var(--surface-strong);
+}
+
 /* ---- 精读报告卡片 ---- */
 
 .deep-read-card {
@@ -4038,6 +4130,17 @@ body {
   font-size: 12.5px;
   line-height: 1.6;
   color: var(--text-soft);
+}
+
+/* 中文注释：没能下载到全文时的提示条，用警示色让它比正文更显眼。 */
+.deep-read-warning {
+  margin: 0;
+  padding: 6px 9px;
+  border-radius: 6px;
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 .deep-read-dims {

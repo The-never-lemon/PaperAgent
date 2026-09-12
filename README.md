@@ -127,7 +127,7 @@ flowchart TB
 | Agent | 主对话 Agent（researchAgent）+ 精读 / 追问 / 综述三个子 Agent |
 | LLM 适配 | OpenAI 兼容协议、Anthropic Messages 协议 |
 | 论文来源 | arXiv、OpenAlex、Semantic Scholar |
-| 全文处理 | `pypdf`、Markdown 转换、文本分块 |
+| 全文处理 | `PyMuPDF`（抽取表格 / 公式 / 图片，装不上时自动退回 `pypdf`）、Markdown 转换、文本分块 |
 | 语义重排 | 任意 OpenAI 兼容的 embedding 接口；作为检索排序的最后一档参考，未配置则该档不参与 |
 | 会话存储 | SQLite + 本地 JSON/Markdown 文件 |
 | 前端 | Vue 3、TypeScript、Vite、Vue Router、Lucide |
@@ -289,7 +289,7 @@ uv run python scripts/package.py    # 生成 Paper-Agent-<日期>.zip
 
 `config/system.yaml` 存放系统级默认值和阅读参数：`defaults.llm` 是所有 Agent 档位未声明字段时的兜底生成参数，`defaults.embedding` 是嵌入档位默认值，`paper_retrieval` 是检索数据源密钥，`read` 是阅读与下载参数（缓存目录、连接/下载超时、最大文件大小）。
 
-> `read.chunk_size` / `read.chunk_overlap` 目前只是配置项：实际分块固定按每 1200 字符、按 PDF 页切分且不重叠，改这两项不会生效。
+> 全文分块按 PDF 页切分、片段之间不重叠：单个片段上限 1200 字符，但遇到完整表格或公式块时会整块保留（上限 4000 字符），避免把表格和公式从中间切断。这些数字写在 `PageChunker` 类里，不通过配置文件调整。
 
 ---
 

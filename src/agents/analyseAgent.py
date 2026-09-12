@@ -42,7 +42,6 @@ class AnalyseAgent(BaseAgent):
         # 中文说明：分析任务统一使用 default_agent 档位；想让它用更强的模型，
         # 直接把 default_agent 指向的模型换成更强的即可。
         llm_profile="default_agent",
-        skills=(),
         input_keys=("request",),
     )
 

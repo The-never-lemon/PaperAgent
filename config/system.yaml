@@ -20,5 +20,5 @@ read:
   connect_timeout_seconds: 10
   download_timeout_seconds: 60
   max_file_size_mb: 50
-  chunk_size: 1024
-  chunk_overlap: 150
+  # PDF 转 Markdown 用哪个解析器：auto（优先 PyMuPDF，装不上就退回 pypdf）/ pymupdf / pypdf
+  pdf_parser: auto

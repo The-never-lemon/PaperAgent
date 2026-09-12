@@ -23,9 +23,6 @@ from src.services.workspace_export import export_workspace
 
 JsonObject = dict[str, Any]
 
-# 工作区清单里论文摘要的截断长度（REST 快照只给前端渲染卡片用，不需要全文摘要）。
-ABSTRACT_PREVIEW_CHARS = 400
-
 
 def create_workspace_router(repo: SessionRepository) -> APIRouter:
     """创建工作区相关的 FastAPI 路由。"""
@@ -63,7 +60,10 @@ def create_workspace_router(repo: SessionRepository) -> APIRouter:
                     "year": paper.get("year") or None,
                     "venue": str(paper.get("venue") or paper.get("journal_conference") or ""),
                     "source": str(paper.get("source") or ""),
-                    "abstract": str(paper.get("abstract") or "")[:ABSTRACT_PREVIEW_CHARS],
+                    # 中文注释：这里给完整摘要，不再截断。前端点论文编号弹出的信息卡片
+                    # 就是靠这个字段展示全文摘要的；截断会让用户看到半句话。
+                    # （对话流里的论文卡片另有一份截断长度，那张卡片本来就只显示三行。）
+                    "abstract": str(paper.get("abstract") or ""),
                     "url": str(paper.get("url") or ""),
                     "pdf_url": str(paper.get("pdf_url") or ""),
                     "status": entry.status(),

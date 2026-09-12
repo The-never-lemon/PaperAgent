@@ -316,7 +316,16 @@ const lastBlockIndex = computed(() => blocks.value.length - 1);
               <th v-for="(cell, cellIndex) in block.head" :key="cellIndex">
                 <template v-for="(part, partIndex) in cell" :key="partIndex">
                   <code v-if="part.code" class="chat-md-inline-code">{{ part.text }}</code>
+                  <a v-else-if="part.href" :href="part.href" target="_blank" rel="noopener noreferrer">{{ part.text }}</a>
+                  <strong v-else-if="part.bold && part.italic"><em>{{ part.text }}</em></strong>
                   <strong v-else-if="part.bold">{{ part.text }}</strong>
+                  <em v-else-if="part.italic">{{ part.text }}</em>
+                  <button
+                    v-else-if="part.paperId"
+                    type="button"
+                    class="chat-md-paper-ref"
+                    @click="emit('paperClick', part.paperId!)"
+                  >[{{ part.text }}]</button>
                   <template v-else>{{ part.text }}</template>
                 </template>
               </th>
@@ -331,6 +340,15 @@ const lastBlockIndex = computed(() => blocks.value.length - 1);
                   <strong v-else-if="part.bold && part.italic"><em>{{ part.text }}</em></strong>
                   <strong v-else-if="part.bold">{{ part.text }}</strong>
                   <em v-else-if="part.italic">{{ part.text }}</em>
+                  <!-- 中文注释：表格里的 [paper_id] 引用也要渲染成可点按钮。
+                       之前只有段落/列表/标题三个分支做了这件事，表格漏了，
+                       结果模型一旦把论文清单放进表格，引用就退化成纯文本、点不动。 -->
+                  <button
+                    v-else-if="part.paperId"
+                    type="button"
+                    class="chat-md-paper-ref"
+                    @click="emit('paperClick', part.paperId!)"
+                  >[{{ part.text }}]</button>
                   <template v-else>{{ part.text }}</template>
                 </template>
               </td>

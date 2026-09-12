@@ -8,12 +8,16 @@ from typing import Any, Literal, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from src.llm import ModelConfig, ProviderSnapshot, SystemConfig, make_provider
+from src.utils import get_logger
 from src.utils.read_utils.cache import safe_cache_name
 from src.utils.read_utils.chunkers import TextChunk, load_chunks_file
 
 from .base import AgentContext, AgentSpec, BaseAgent
 from .contracts import JsonObject
 from .Prompts import WRITING_ABSTRACT_SYSTEM_PROMPT, WRITING_AGENT_SYSTEM_PROMPT, WRITING_REVIEW_SYSTEM_PROMPT
+
+
+logger = get_logger(__name__)
 
 
 WritingAction = Literal["tool", "draft"]
@@ -73,7 +77,6 @@ class WritingAgent(BaseAgent):
         description="根据写作大纲、论文证据和前置小节生成综述正文。",
         llm_profile="default_agent",
         tools=("get_extraction", "search_section", "get_chunk_by_embed"),
-        skills=(),
         input_keys=("request", "writing_outline"),
     )
 
@@ -239,6 +242,18 @@ class WritingAgent(BaseAgent):
         parsed = _extract_json_object(raw_output)
         if parsed is None:
             draft = raw_output.strip() or _fallback_draft(state)
+            # 中文注释：这里是一条静默降级路径——模型没按约定返回结构化结果，
+            # 我们退而求其次把它的自由文本当成正文草稿。降级本身是设计好的，
+            # 但以前只写进 warnings 列表，而 warnings 既不落日志也不进产物元数据，
+            # 等于「提示词有没有被稀释到模型不再守格式」这件事完全看不见。
+            # 补一条日志，让这条路径可统计。
+            logger.warning(
+                "写作模型没有返回可解析的结构化结果，已把输出文本当作草稿使用",
+                extra={
+                    "section_id": str(state.get("section_id") or ""),
+                    "output_chars": len(raw_output),
+                },
+            )
             return {
                 **state,
                 "action_type": "draft",
@@ -338,6 +353,18 @@ class WritingAgent(BaseAgent):
         suggestions = _string_list(parsed.get("suggestions"))
         if passed or int(state.get("revision_count") or 0) >= self.max_revision_rounds:
             message = str(parsed.get("message") or ("审查通过" if passed else "修改次数已达到上限，保留当前正文")).strip()
+            if not passed:
+                # 中文注释：审查一直不通过、修改次数用尽，只好保留当前正文收尾。
+                # 这条也要记日志——它同样是「写手没写到位」的量化信号，
+                # 只写进 warnings 的话事后根本查不到发生过几次。
+                logger.warning(
+                    "小节审查反复未通过，修改次数已达上限，保留当前正文",
+                    extra={
+                        "section_id": str(state.get("section_id") or ""),
+                        "revision_count": int(state.get("revision_count") or 0),
+                        "suggestions": suggestions[:5],
+                    },
+                )
             return {
                 **state,
                 "raw_model_outputs": raw_outputs,

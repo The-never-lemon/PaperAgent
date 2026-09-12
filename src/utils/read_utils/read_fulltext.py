@@ -7,7 +7,10 @@ import re
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
+from typing import Any
+from urllib.parse import urljoin, urlparse
 
+from src.llm.config import SystemConfig
 from src.paper_retrieval.models import PaperDocument
 # 中文注释：引入项目统一的日志工具。正文质量闸拦下坏内容时记一条日志，
 # 排查问题时能看到"哪一篇论文的全文被判为不合格、原因是什么"。
@@ -18,6 +21,13 @@ from src.utils.read_utils.pdf_parsers import get_pdf_parser
 logger = get_logger(__name__)
 
 _UNSUPPORTED_FULLTEXT_WARNING = "暂不支持该全文文件格式"
+
+# 中文注释：转换器的版本号。只要"PDF/HTML 怎么变成 Markdown"的规则改了，就把它加一。
+# 缓存目录里放着的旧 paper.md 一旦发现版本号对不上，会被直接删掉重新转换——
+# 不然升级之后大家读到的还是旧版转出来的、没有表格公式图片的正文。
+# 2 -> 3：HTML 解析器修掉了"表格跨行跨列不展开导致整行左移""省略结束标签导致正文倒序"等问题，
+# 旧缓存里存的正是那些错位的表格，必须让它们作废重转。
+CONVERTER_VERSION = 3
 
 # 中文注释：正文质量闸的两个阈值——
 # 1) 转换出来的正文（去掉首尾空白后）不足 3000 字符，就认为"不是正文"：
@@ -34,6 +44,9 @@ class MarkdownConversion:
 
     markdown_path: Path | None = None
     page_count: int | None = None
+    # 中文注释：PDF 里的图片会被解析器写到 paper.md 旁边的 assets 目录，
+    # 这里记下目录位置，方便上层需要时找到图片文件。目录里没有写出任何图片时是空的。
+    assets_dir: Path | None = None
     warnings: list[str] = field(default_factory=list)
 
 
@@ -76,8 +89,11 @@ def _markdown_output_path(source_path: Path) -> Path:
 def _load_cached_markdown(markdown_path: Path) -> MarkdownConversion | None:
     """读取已经生成好的 Markdown 缓存，没有缓存或缓存内容不合格时返回空值。
 
-    中文注释：旧版本可能把"落地页转出来的坏内容"写进过缓存，所以缓存文件
-    也要过一次质量闸。不合格的缓存直接删掉，让流程重新转换原始文件再判一次，
+    中文注释：缓存要过两道检查。
+    第一道看转换器版本：旧版本转出来的 paper.md 里没有表格、公式和图片，
+    版本号对不上就删掉重转（这里只比版本号，不去猜内容新旧）。
+    第二道看正文质量：旧版本可能把"落地页转出来的坏内容"写进过缓存，
+    不合格的一律删掉，让流程重新转换原始文件再判一次，
     避免垃圾内容一直躺在缓存里被反复当成论文正文去精读。
     """
 
@@ -87,19 +103,76 @@ def _load_cached_markdown(markdown_path: Path) -> MarkdownConversion | None:
         cached_text = markdown_path.read_text(encoding="utf-8")
     except OSError:
         return None
+    if _read_markdown_header_text(cached_text).get("converter_version") != CONVERTER_VERSION:
+        logger.warning(
+            "历史 Markdown 缓存由旧版转换器生成，已删除并重新转换",
+            extra={"markdown_path": str(markdown_path), "converter_version": CONVERTER_VERSION},
+        )
+        _delete_quietly(markdown_path)
+        return None
     quality_problem = _check_fulltext_quality(cached_text)
     if quality_problem is not None:
         logger.warning(
             "历史 Markdown 缓存未通过正文质量检查，已删除并重新转换",
             extra={"markdown_path": str(markdown_path), "reason": quality_problem},
         )
-        try:
-            markdown_path.unlink()
-        except OSError:
-            # 中文注释：删除失败也不影响正确性——下次进到这个函数还会再次拦下同一份坏缓存。
-            pass
+        _delete_quietly(markdown_path)
         return None
-    return MarkdownConversion(markdown_path=markdown_path, page_count=_read_page_count(markdown_path))
+    return MarkdownConversion(
+        markdown_path=markdown_path,
+        page_count=_read_page_count(markdown_path),
+        # 中文注释：命中缓存和重新转换走的是同一个判据。
+        # 之前这里一直是空值，导致"第二次以后被精读的论文"永远拿不到图片目录，
+        # 而生产环境里绝大多数论文都是第二次以后才被精读的。
+        assets_dir=_existing_assets_dir(markdown_path),
+    )
+
+
+def _delete_quietly(path: Path) -> None:
+    """删除一个文件，删不掉也不报错。
+
+    中文注释：删不掉不影响正确性——下次进到同一个判断还会再次把这份坏缓存拦下来。
+    """
+
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _read_markdown_header_text(markdown_text: str) -> dict[str, Any]:
+    """读出 Markdown 开头那段用 --- 包起来的论文信息（里面存的是 JSON）。
+
+    中文注释：老的缓存文件可能没有这段头部、或者头部的 JSON 被写坏了，
+    这些情况一律当成"读不出信息"，返回一个空字典，由调用方决定怎么处理。
+    """
+
+    if not markdown_text.startswith("---"):
+        return {}
+    end = markdown_text.find("\n---", 3)
+    if end < 0:
+        return {}
+    try:
+        parsed = json.loads(markdown_text[3:end].strip())
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _markdown_body_text(markdown_text: str) -> str:
+    """砍掉开头那段用 --- 包起来的论文信息，只留下正文。
+
+    中文注释：质量闸只看正文，不看论文信息。标题、DOI 这些元数据有多长，
+    和"这段文字是不是论文正文"一点关系都没有；把它们算进去，
+    会出现"同一份内容，换个标题就从拦住变成放行"这种说不清的结果。
+    """
+
+    if not markdown_text.startswith("---"):
+        return markdown_text
+    end = markdown_text.find("\n---", 3)
+    if end < 0:
+        return markdown_text
+    return markdown_text[end + 4:]
 
 
 def _has_non_empty_file(path: Path) -> bool:
@@ -120,19 +193,22 @@ def _check_fulltext_quality(markdown_text: str) -> str | None:
     上层精读流程看到"没有转换结果"就会自动降级为"摘要精读"，不需要新增分支。
     """
 
-    stripped = markdown_text.strip()
-    if len(stripped) < _MIN_FULLTEXT_CHARACTERS:
+    # 中文注释：只量正文那一段。开头包着 JSON 的 --- 头部是论文信息，不属于正文。
+    body = _markdown_body_text(markdown_text).strip()
+    if len(body) < _MIN_FULLTEXT_CHARACTERS:
         return f"转换后的正文不足 {_MIN_FULLTEXT_CHARACTERS} 字符，下载到的可能只是论文介绍页而不是正文"
-    garbled_characters = stripped.count("\ufffd")
-    if garbled_characters / len(stripped) > _MAX_GARBLED_CHARACTERS_RATIO:
+    garbled_characters = body.count("\ufffd")
+    if garbled_characters / len(body) > _MAX_GARBLED_CHARACTERS_RATIO:
         return "转换后的正文乱码字符占比超过 1%，解析结果不可用"
     return None
 
 
 def _convert_html(paper: PaperDocument, source_path: Path, source_url: str | None, markdown_path: Path) -> MarkdownConversion:
-    """提取普通 HTML 页面中的标题和段落，生成不含页码的 Markdown 文件。"""
+    """提取普通 HTML 页面中的正文、表格、公式和图片，生成 Markdown 文件。"""
 
-    parser = _ArticleHtmlParser()
+    # 中文注释：把页面地址交给解析器，因为网页里的图片大多是相对地址
+    # （比如 "2502.20217v1/model.png"），必须知道"这篇文章在哪个网址下"才能补成完整链接。
+    parser = _ArticleHtmlParser(base_url=source_url)
     try:
         parser.feed(source_path.read_text(encoding="utf-8", errors="replace"))
         parser.close()
@@ -152,13 +228,20 @@ def _convert_html(paper: PaperDocument, source_path: Path, source_url: str | Non
         )
         return MarkdownConversion(warnings=[quality_problem])
     markdown_path.write_text(markdown_text, encoding="utf-8")
-    return MarkdownConversion(markdown_path=markdown_path)
+    return MarkdownConversion(
+        markdown_path=markdown_path,
+        # 中文注释：和 PDF 分支、和命中缓存的分支用同一个判据，三条路给出的结果一致。
+        assets_dir=_existing_assets_dir(markdown_path),
+    )
 
 
 def _markdown_header(paper: PaperDocument, source_url: str | None, page_count: int | None) -> str:
     """生成 Markdown 开头的论文基本信息，避免正文和来源信息分散保存。"""
 
     header = {
+        # 中文注释：记下是哪个版本的转换器生成的这份 Markdown。
+        # 以后解析规则再改，光看这个数字就知道缓存该不该重转。
+        "converter_version": CONVERTER_VERSION,
         "paper_id": paper.id,
         "title": paper.title,
         "doi": paper.doi,
@@ -172,22 +255,25 @@ def _read_page_count(markdown_path: Path) -> int | None:
     """从已有 Markdown 中读出 PDF 页数，缓存文件不完整时返回空值。"""
 
     try:
-        match = re.search(r'"page_count":\s*(\d+)', markdown_path.read_text(encoding="utf-8")[:1000])
-        return int(match.group(1)) if match else None
+        page_count = _read_markdown_header_text(markdown_path.read_text(encoding="utf-8")).get("page_count")
     except OSError:
         return None
+    return page_count if isinstance(page_count, int) else None
 
 
 def _convert_pdf_with_parser(paper: PaperDocument, source_path: Path, source_url: str | None, markdown_path: Path) -> MarkdownConversion:
     """使用可替换的 PDF 解析器生成 Markdown。
 
     中文注释：阅读节点只需要 Markdown，不应该关心 PDF 到底是 pypdf、PyMuPDF
-    还是其它工具解析的。这里先使用 pypdf 解析器，后续新增解析器时只需要改
-    get_pdf_parser 的选择规则。
+    还是其它工具解析的。用哪个由配置里的 read.pdf_parser 决定，
+    auto 表示"装了 PyMuPDF 就用 PyMuPDF"，PyMuPDF 能多提取出表格、公式和图片。
     """
 
-    parser = get_pdf_parser("pypdf")
-    parsed = parser.parse(source_path)
+    parser = get_pdf_parser(SystemConfig.load().read.pdf_parser)
+    # 中文注释：PDF 里的图片不能塞进一个 Markdown 文件里，只能单独存成文件，
+    # 放在 paper.md 旁边的 assets 目录，正文里用 assets/xxx.png 这样的相对路径引用。
+    assets_dir = markdown_path.parent / "assets"
+    parsed = parser.parse(source_path, assets_dir=assets_dir)
     if parsed.warnings:
         return MarkdownConversion(warnings=parsed.warnings)
     if not parsed.pages:
@@ -207,71 +293,532 @@ def _convert_pdf_with_parser(paper: PaperDocument, source_path: Path, source_url
         )
         return MarkdownConversion(warnings=[quality_problem])
     markdown_path.write_text(markdown_text, encoding="utf-8")
-    return MarkdownConversion(markdown_path=markdown_path, page_count=len(parsed.pages))
+    return MarkdownConversion(
+        markdown_path=markdown_path,
+        page_count=len(parsed.pages),
+        # 中文注释：只有真往这个目录里写出过图片，才把它报给上层；
+        # 空目录对上层没有任何用处。
+        assets_dir=_existing_assets_dir(markdown_path),
+    )
+
+
+def _existing_assets_dir(markdown_path: Path) -> Path | None:
+    """返回 paper.md 旁边那个真的有图片的 assets 目录，没有就是空值。
+
+    中文注释：不管是刚刚转出来的，还是直接读的缓存，都拿这一个函数判断，
+    就不会出现"新转的有图片目录、读缓存的没有"这种前后不一致的情况。
+    """
+
+    assets_dir = markdown_path.parent / "assets"
+    return assets_dir if _has_any_file(assets_dir) else None
+
+
+def _has_any_file(directory: Path) -> bool:
+    """判断目录里是不是真的有文件（目录不存在或读不了都算没有）。"""
+
+    try:
+        return any(entry.is_file() for entry in directory.iterdir())
+    except OSError:
+        return False
+
+
+# 中文注释：脚本、样式、内嵌图形这三类标签里的内容是给浏览器看的，不是论文正文。
+# 遇到它们就整段跳过，连里面的文字都不要。
+_IGNORED_TAGS = frozenset({"script", "style", "noscript", "svg"})
+
+# 中文注释：标题、段落、列表项、引用这几种标签是正文的基本单位，每一个都会单独成段。
+_BLOCK_TAGS = frozenset({"p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote"})
+
+# 中文注释：这几种标签一出现，就说明"新的一段 / 新的一张表 / 新的一张图开始了"。
+# 它们出现时，如果表格格子或图注还开着口，说明网页漏写了 </td> 或 </figcaption>，
+# 必须先把它们收尾，否则它们会继续把后面的正文吸进自己肚子里。
+# 注意 <div> 只在这件事上算块级标签，它自己不攒文字（见下面 _TEXT_KINDS 的说明）：
+# 网页顶栏底栏那些"登录 / 搜索 / 关注我们"之类的按钮文字全在 <div> 里，
+# 让 <div> 攒文字会把一大堆跟论文无关的页面噪声灌进正文
+# （实测 PMC 那个页面会因此多出 3082 字符，arXiv 页面多出 1730 字符）。
+_BLOCK_STARTERS = _BLOCK_TAGS | frozenset({"div", "table", "figure"})
+
+# 中文注释：只有这几种标签才往自己身上攒文字。文字永远归给"最里层"的那个，
+# 这样 <td> 里套 <span> 时，文字算在表格单元格头上，不会跑到别处；
+# 而 <div> 不在这里面，所以网页顶栏底栏里那些直接放在 <div> 中的按钮文字会被自然挡掉。
+_TEXT_KINDS = frozenset({"block", "caption", "cell", "math"})
+
+# 中文注释：arXiv 网页里的图片地址本来就带着论文编号（形如 "2502.20217v1/图.png"）。
+# 这个正则用来认出"论文编号"这种形状的目录名，只在补全图片地址时用来去重。
+_ARXIV_ID_PATTERN = re.compile(r"^\d{4}\.\d{4,5}(v\d+)?$")
+
+
+def _span_count(raw: str | None) -> int:
+    """读出 colspan / rowspan 写的是跨几格（没写或者写坏了都当成 1 格）。"""
+
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return 1
+    return value if value > 0 else 1
+
+
+@dataclass
+class _OpenTag:
+    """记录一个还没闭合的标签。
+
+    中文注释：网页的标签是一层套一层的（<figure> 套 <figcaption> 套 <span>，
+    <table> 套 <tr> 套 <td>），只有把"当前打开了哪些标签"按顺序记下来，
+    才知道一段文字到底该归给谁。kind 表示这个标签扮演什么角色，
+    position 是它在网页里出现的顺序号，parts 用来攒文字，data 放各自的附加信息。
+    """
+
+    tag: str
+    kind: str
+    position: int = 0
+    parts: list[str] = field(default_factory=list)
+    data: dict[str, Any] = field(default_factory=dict)
 
 
 class _ArticleHtmlParser(HTMLParser):
-    """用标准库提取常见 HTML 正文标签，避免额外引入网页解析依赖。"""
+    """用标准库提取 HTML 正文，并尽量保住表格、公式和图片。
 
-    def __init__(self) -> None:
-        """初始化标签栈和已经整理出的 Markdown 片段。"""
+    中文注释：这里用"标签栈"来记状态（一个列表当栈用）：进来一个标签就压栈，
+    碰到闭标签就弹栈。因为网页的嵌套层数不固定，只记"当前这一个标签"根本不够用，
+    深层嵌套的内容会张冠李戴。
+
+    输出的先后顺序不看"谁先弹栈"，只看每个片段在网页里的位置号。
+    网页经常省略 </p> </li> </td> </tr> 这些结束标签（HTML5 允许这么写），
+    靠弹栈顺序拼出来的正文会整段倒过来。
+    """
+
+    def __init__(self, base_url: str | None = None) -> None:
+        """初始化标签栈、忽略计数和已经整理出的 Markdown 片段。"""
 
         super().__init__(convert_charrefs=True)
+        # 中文注释：页面地址，用来把图片的相对地址补成完整网址。
+        self._base_url = base_url or ""
+        self._stack: list[_OpenTag] = []
         self._ignored_depth = 0
-        self._current_tag: str | None = None
-        self._buffer: list[str] = []
-        self._blocks: list[str] = []
+        # 中文注释：每输出一段正文，就连同它出现的位置号一起存进来，最后按位置号从小到大排。
+        self._blocks: list[tuple[int, str]] = []
+        # 中文注释：位置号是一个只增不减的计数器。每压一次栈就发一号，
+        # 谁先出现谁号小，最后照着号排就能还原网页上的顺序。
+        self._next_position = 0
+
+    def _push(self, tag: str, kind: str, data: dict[str, Any] | None = None) -> _OpenTag:
+        """压一个标签进栈，并给它发一个位置号。"""
+
+        node = _OpenTag(
+            tag=tag,
+            kind=kind,
+            position=self._next_position,
+            data=data if data is not None else {},
+        )
+        self._next_position += 1
+        self._stack.append(node)
+        return node
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        """遇到开始标签时记录正文标签，脚本和样式内容直接忽略。"""
+        """遇到开始标签时，判断它是正文、表格、公式、图片还是无关内容。"""
 
-        del attrs
         lowered = tag.lower()
-        if lowered in {"script", "style", "noscript", "svg"}:
-            self._ignored_depth += 1
+        attributes = {name.lower(): (value or "") for name, value in attrs}
+        # 中文注释：脚本、样式这类整段忽略的标签，用计数记住要跳过几层嵌套；
+        # 已经在忽略区域里的其它标签，也要压栈，保证弹栈时不会错位。
+        if lowered in _IGNORED_TAGS or self._ignored_depth > 0:
+            if lowered in _IGNORED_TAGS:
+                self._ignored_depth += 1
+            self._push(lowered, "ignored")
             return
-        if self._ignored_depth == 0 and lowered in {"p", "h1", "h2", "h3", "h4", "li", "blockquote"}:
-            self._flush_current()
-            self._current_tag = lowered
+        # 中文注释：<br> 在网页上看到的就是"这里断一下"，对应到文字里就是一个空格。
+        # 不补这个空格，"word1<br>word2" 就会粘成一个词。
+        if lowered == "br":
+            self._append_space()
+            return
+        if lowered == "math":
+            self._open_math(attributes)
+            return
+        if lowered == "img":
+            self._remember_figure_image(attributes)
+            return
+
+        classes = attributes.get("class", "")
+
+        # 中文注释：新的一段/一张表/一张图开始了。这时候要是表格格子或者图注还开着口，
+        # 说明网页漏写了 </td>、</figcaption>，先把它们收尾，别让它们继续吸后面的正文。
+        if lowered in _BLOCK_STARTERS:
+            self._close_open_kinds(("cell", "caption"))
+
+        enclosing_table = self._innermost("table")
+        if enclosing_table is not None:
+            if enclosing_table.data.get("equation"):
+                # 中文注释：公式排版表（arXiv 把公式也排成 <table>）里的 <tr>/<td>
+                # 只是排版用的格子，不当成数据表的行列，免得把整条公式拆成一张乱码表。
+                self._push(lowered, "plain")
+                return
+            if lowered == "tr" or "ltx_tr" in classes:
+                # 中文注释：上一行的最后一个格子可能没写 </td>，先收尾再开新行。
+                self._close_open_kinds(("cell",))
+                row = self._push(lowered, "row", {"cells": []})
+                enclosing_table.data.setdefault("rows", []).append(row)
+                return
+            if lowered in {"td", "th"} or "ltx_td" in classes:
+                # 中文注释：同一行里上一个格子可能也没写 </td>，先收尾。
+                self._close_open_kinds(("cell",))
+                cell = self._push(
+                    lowered,
+                    "cell",
+                    {
+                        "colspan": _span_count(attributes.get("colspan")),
+                        "rowspan": _span_count(attributes.get("rowspan")),
+                        "text": "",
+                    },
+                )
+                row = self._innermost("row")
+                if row is not None:
+                    # 中文注释：格子按它出现的先后顺序记在行里。
+                    # 最后是从左往右排的，所以顺序必须按"出现顺序"，不能按"闭合顺序"。
+                    row.data.setdefault("cells", []).append(cell)
+                return
+            if lowered in _BLOCK_TAGS:
+                # 中文注释：表格里偶尔也会夹着段落，照样当一段正文收集，免得文字白白丢掉。
+                self._push(lowered, "block")
+                return
+            self._push(lowered, "plain")
+            return
+
+        # 中文注释：判断"这是不是一张数据表"，看的是里面有没有表格的行和格子，
+        # 而不是看它有没有 ltx_tabular 这个名字。
+        # 之前只认 class 里带 ltx_tabular 的表，别的 <table> 整张被丢掉，
+        # 连里面的文字都不剩，还没有任何提示——非 arXiv 的论文全文页（比如 PMC）就是这么丢表的。
+        if lowered == "table":
+            self._push("table", "table", {"equation": "ltx_equation" in classes, "rows": []})
+            return
+        # 中文注释：arXiv 有的表连 <table> 都不写，直接拿 <span class="ltx_tabular"> 当表格用
+        # （实测 2502.20217v1 的第三张表就是这样）。所以 class 这条路也得留着，不然那张表会整个丢掉。
+        if "ltx_equation" in classes:
+            self._push(lowered, "table", {"equation": True, "rows": []})
+            return
+        if "ltx_tabular" in classes:
+            self._push(lowered, "table", {"equation": False, "rows": []})
+            return
+
+        if lowered == "figure":
+            # 中文注释：一个 <figure> 里可能有一张图片和一段图注。图片地址和图注文字
+            # 都先攒在这个标签身上，等它闭合时再一起输出，这样"图片在前、图注在后"的顺序能保证。
+            self._push(lowered, "figure", {"images": [], "caption": ""})
+            return
+        if lowered == "figcaption":
+            self._push(lowered, "caption")
+            return
+        if lowered in _BLOCK_TAGS:
+            self._push(lowered, "block")
+            return
+        self._push(lowered, "plain")
 
     def handle_endtag(self, tag: str) -> None:
-        """遇到结束标签时把已收集的段落写入结果列表。"""
+        """遇到结束标签时，把对应的内容整理成 Markdown 块。"""
 
         lowered = tag.lower()
-        if lowered in {"script", "style", "noscript", "svg"} and self._ignored_depth > 0:
-            self._ignored_depth -= 1
-            return
-        if self._ignored_depth == 0 and self._current_tag == lowered:
-            self._flush_current()
+        # 中文注释：网页里偶尔会漏写闭合标签。这里从栈顶往下找同名的那个标签，
+        # 把中间没闭合的一起收尾，免得一个错位把后面所有内容都算错。
+        for index in range(len(self._stack) - 1, -1, -1):
+            if self._stack[index].tag == lowered:
+                while len(self._stack) > index:
+                    self._close_top()
+                return
 
     def handle_data(self, data: str) -> None:
-        """只收集正文标签内的文字，避免把导航菜单等内容写入论文正文。"""
+        """收集文字，只归给最里层那个正在攒文字的标签。"""
 
-        if self._ignored_depth == 0 and self._current_tag is not None:
-            self._buffer.append(data)
+        if self._ignored_depth > 0:
+            return
+        for node in reversed(self._stack):
+            if node.kind in _TEXT_KINDS:
+                node.parts.append(data)
+                return
 
     def to_markdown(self) -> str:
-        """完成最后一个未闭合段落，并返回拼接后的 Markdown 正文。"""
+        """完成还没闭合的标签，返回拼接后的 Markdown 正文。"""
 
-        self._flush_current()
-        return "\n\n".join(self._blocks)
+        while self._stack:
+            self._close_top()
+        # 中文注释：按位置号从小到大排，正文顺序就和网页上看到的一样了，
+        # 不会因为网页漏写结束标签而整段倒过来。
+        # 位置号相同的（比如一张图的图片引用和它的图注）保持原来的先后顺序。
+        self._blocks.sort(key=lambda item: item[0])
+        return "\n\n".join(text for _, text in self._blocks)
 
-    def _flush_current(self) -> None:
-        """将当前标签中的文字转换成简单 Markdown 块，并清空临时缓存。"""
+    def _close_top(self) -> None:
+        """弹出一个标签，并按它扮演的角色输出内容。"""
 
-        if self._current_tag is None:
+        node = self._stack.pop()
+        kind = node.kind
+        if kind == "ignored":
+            if node.tag in _IGNORED_TAGS and self._ignored_depth > 0:
+                self._ignored_depth -= 1
             return
-        text = " ".join("".join(self._buffer).split())
-        tag = self._current_tag
-        self._buffer = []
-        self._current_tag = None
+        if kind == "block":
+            self._emit_block(node.tag, self._joined_text(node), node.position)
+            return
+        if kind == "caption":
+            # 中文注释：图注文字先存到所属的 <figure> 上，等图闭合时和图片一起输出。
+            figure = self._innermost("figure")
+            if figure is not None:
+                figure.data["caption"] = self._joined_text(node)
+            return
+        if kind == "cell":
+            self._close_cell(node)
+            return
+        if kind == "table":
+            self._emit_table(node)
+            return
+        if kind == "figure":
+            self._emit_figure(node)
+            return
+        if kind == "math":
+            self._emit_math(node)
+            return
+
+    def _close_open_kinds(self, kinds: tuple[str, ...]) -> None:
+        """把栈里还没闭合的某几类标签收尾，连同它们里面套着的一起。
+
+        中文注释：网页漏写 </td> 或 </figcaption> 时，这些标签会一直挂在栈上，
+        把后面所有正文都吸进自己肚子里。这里在"新的一段开始了"的时候主动收尾。
+        """
+
+        for index in range(len(self._stack) - 1, -1, -1):
+            if self._stack[index].kind in kinds:
+                while len(self._stack) > index:
+                    self._close_top()
+                return
+
+    def _close_cell(self, node: _OpenTag) -> None:
+        """单元格闭合时，把里面的文字记在它自己身上。"""
+
+        # 中文注释：单元格里的换行会把 Markdown 表格拆散，"|" 会被当成列分隔符，
+        # 所以换行压成空格、竖线转义成 \|，表格才不会被撑破。
+        # 至于这个格子排在行的第几列，前面开标签的时候就已经定好了，这里不动它。
+        node.data["text"] = self._joined_text(node).replace("|", "\\|")
+
+    def _innermost(self, kind: str) -> _OpenTag | None:
+        """找出栈里最靠上的某一类标签。"""
+
+        for node in reversed(self._stack):
+            if node.kind == kind:
+                return node
+        return None
+
+    def _joined_text(self, node: _OpenTag) -> str:
+        """把一个标签里攒到的文字连起来，并把多余的空格和换行压平。"""
+
+        return " ".join("".join(node.parts).split())
+
+    def _emit(self, text: str, position: int) -> None:
+        """记下一段要输出的正文，连同它在网页里的位置号。"""
+
+        if not text:
+            return
+        self._blocks.append((position, text))
+
+    def _emit_block(self, tag: str, text: str, position: int) -> None:
+        """把一个段落/标题/列表项转换成 Markdown 块。"""
+
         if not text:
             return
         if tag.startswith("h") and len(tag) == 2 and tag[1].isdigit():
-            self._blocks.append("#" * min(int(tag[1]), 4) + " " + html.unescape(text))
+            self._emit("#" * min(int(tag[1]), 4) + " " + text, position)
         elif tag == "li":
-            self._blocks.append("- " + html.unescape(text))
+            self._emit("- " + text, position)
         elif tag == "blockquote":
-            self._blocks.append("> " + html.unescape(text))
+            self._emit("> " + text, position)
         else:
-            self._blocks.append(html.unescape(text))
+            self._emit(text, position)
+
+    def _append_space(self) -> None:
+        """给当前正在攒文字的那一段补一个空格（<br> 用）。"""
+
+        for node in reversed(self._stack):
+            if node.kind in _TEXT_KINDS:
+                node.parts.append(" ")
+                return
+
+    def _append_inline(self, text: str) -> None:
+        """把一小段文字塞进当前正在攒的段落或单元格里。"""
+
+        for node in reversed(self._stack):
+            if node.kind in _TEXT_KINDS:
+                node.parts.append(text)
+                return
+        # 中文注释：偶尔有公式直接写在 <div> 里，外面没有段落标签。这种情况也把它单独
+        # 输出一段，总比整条公式丢掉强。位置号用"下一个还没发出去的号"，
+        # 这样它会排在已经攒好的内容后面、排在还没出现的标签前面。
+        self._emit(text, self._next_position)
+
+    def _open_math(self, attributes: dict[str, str]) -> None:
+        """处理 <math>：优先取 alttext 属性，那里面装的就是现成的 LaTeX 公式。"""
+
+        # 中文注释：网页里的 alttext 是转义过的（比如 &lt; 表示小于号），要先还原回来。
+        latex = html.unescape(attributes.get("alttext", "")).strip()
+        is_block = attributes.get("display", "").strip() == "block"
+        self._push("math", "math", {"latex": latex, "block": is_block})
+
+    def _emit_math(self, node: _OpenTag) -> None:
+        """把一条公式输出成 Markdown：独占一行的用 $$ 包，夹在句子里的用 $ 包。"""
+
+        latex = str(node.data.get("latex") or "")
+        if not latex:
+            # 中文注释：极少数公式没有 alttext，就退一步拿它能显示出来的字符凑合，
+            # 绝不自己去猜 LaTeX 该怎么写。
+            latex = self._joined_text(node)
+        if not latex:
+            return
+        if node.data.get("block"):
+            self._emit(f"$$\n{latex}\n$$", node.position)
+        else:
+            self._append_inline(f"${latex}$")
+
+    def _remember_figure_image(self, attributes: dict[str, str]) -> None:
+        """只收集 <figure> 里面的图片。
+
+        中文注释：页面顶上的 arXiv 标志、底部的赞助方图标、构建工具的小图标都是
+        <img>，但它们不在 <figure> 里。只认 <figure> 里的图片，这些装饰图就自动被排除。
+        """
+
+        figure = self._innermost("figure")
+        if figure is None:
+            return
+        source = attributes.get("src", "").strip()
+        if not source:
+            return
+        figure.data["images"].append(self._resolve_image_url(source))
+
+    def _resolve_image_url(self, source: str) -> str:
+        """把图片地址补成完整网址。"""
+
+        if not source:
+            return source
+        # 中文注释：本来就是完整网址的（http://... 或者 //例子.com/...）原样返回。
+        # 这种地址再拿页面地址去拼、再去掉重复段落，只会把一个好好的网址改坏——
+        # 比如 "https://arxiv.org/html/2502.20217v1/2502.20217v1/x.png" 会被削成 404 的地址。
+        if urlparse(source).netloc or source.startswith("//"):
+            return source
+        if not self._base_url:
+            return source
+        return _collapse_repeated_path_segment(urljoin(self._base_url, source))
+
+    def _emit_table(self, node: _OpenTag) -> None:
+        """把一张数据表输出成 Markdown 表格，公式表则什么都不做。"""
+
+        if node.data.get("equation"):
+            # 中文注释：公式表格里的内容已经由 <math> 输出成 $$ 公式了，这里再输出一遍
+            # 只会让每条公式变成一张乱码表格。
+            return
+        rows = _expand_table_grid(node.data.get("rows") or [])
+        # 中文注释：门槛——真表格至少要有 2 个格子。整张表只有一个格子的，
+        # 都是网页拿来排版的外壳（比如 PMC 把公式包在一个 <table> 里），不是论文的表格。
+        if sum(len(row) for row in rows) < 2:
+            return
+        self._emit(_render_markdown_table(rows), node.position)
+
+    def _emit_figure(self, node: _OpenTag) -> None:
+        """输出一个 <figure>：先把图片引用排好，再跟一段图注文字。"""
+
+        caption = str(node.data.get("caption") or "").strip()
+        for url in node.data.get("images", []):
+            if url:
+                self._emit(_figure_markdown(caption, url), node.position)
+        if caption:
+            self._emit(caption, node.position)
+
+
+def _expand_table_grid(rows: list[_OpenTag]) -> list[list[str]]:
+    """把表格的行和格子摊成一个规整的方格，跨行跨列的位置补上空格子。
+
+    中文注释：网页里的格子能横着跨几列（colspan）、竖着跨几行（rowspan）。
+    要是"一个格子就当一格"直接排，跨行跨列后面的格子会整体往左移一格，
+    数字就挂到了错误的列标题底下——这比整张表丢掉还危险，
+    因为看起来是一张正常的表，没人会发现数字串了列。
+
+    做法：从上到下、从左到右走一遍，给每个格子算出它真正落在第几列。
+    被上面跨行格子占住的列，在这一行补一个空格子站住位置。
+    """
+
+    grid: list[list[str]] = []
+    # 中文注释：记下"第几列被某个跨行格子占着，占到第几行为止（这一行也算）"。
+    occupied_until: dict[int, int] = {}
+    for row_index, row in enumerate(rows):
+        cells = row.data.get("cells") or []
+        if not cells:
+            # 中文注释：一个格子都没有的 <tr> 没有内容，跳过。
+            # 位置上它还占着一行，所以 row_index 照常往前走。
+            continue
+        current: dict[int, str] = {}
+        column = 0
+        for cell in cells:
+            # 中文注释：先跳过上面跨行格子占住的列，这些列在这一行是空的。
+            while occupied_until.get(column, -1) >= row_index:
+                current[column] = ""
+                column += 1
+            colspan = int(cell.data.get("colspan") or 1)
+            rowspan = int(cell.data.get("rowspan") or 1)
+            current[column] = str(cell.data.get("text") or "")
+            # 中文注释：横着跨几列，多出来的列补空格子。
+            for extra in range(1, colspan):
+                current[column + extra] = ""
+            if rowspan > 1:
+                for index in range(column, column + colspan):
+                    occupied_until[index] = row_index + rowspan - 1
+            column += colspan
+        # 中文注释：行尾要是还被跨行格子占着，也要补空格子，不然这一行会比别人短。
+        while occupied_until.get(column, -1) >= row_index:
+            current[column] = ""
+            column += 1
+        width = max(current) + 1
+        grid.append([current.get(index, "") for index in range(width)])
+    # 中文注释：整行都是空字的不带任何信息（网页常拿它当分隔条），去掉。
+    return [row for row in grid if any(cell.strip() for cell in row)]
+
+
+def _render_markdown_table(rows: list[list[str]]) -> str:
+    """把表格的行列拼成 GitHub 风格的 Markdown 表格。
+
+    中文注释：每一行的竖线个数必须完全一样，多一个少一个都会让整张表错位。
+    所以这里先量出最宽的一行有几列，再把每一行都补齐到这个列数，
+    保证每一行的竖线数和表头行一模一样。
+    """
+
+    column_count = max(len(row) for row in rows)
+    lines: list[str] = []
+    for index, row in enumerate(rows):
+        padded = list(row) + [""] * (column_count - len(row))
+        lines.append("| " + " | ".join(padded) + " |")
+        if index == 0:
+            # 中文注释：Markdown 表格的第一行是表头，第二行必须是 |---|---| 这样的分隔行，
+            # 少了分隔行，渲染出来就只是一堆带竖线的普通文字。
+            lines.append("| " + " | ".join(["---"] * column_count) + " |")
+    return "\n".join(lines)
+
+
+def _figure_markdown(caption: str, url: str) -> str:
+    """拼出 Markdown 的图片引用：![图注](图片地址)。"""
+
+    # 中文注释：图注里的 "]" 会提前把方括号配对收尾，把整个引用写法弄坏，先转义掉。
+    alt = caption.replace("]", "\\]") if caption else "Figure"
+    return f"![{alt}]({url})"
+
+
+def _collapse_repeated_path_segment(url: str) -> str:
+    """去掉网址路径里连续重复的一段论文编号。
+
+    中文注释：arXiv 网页里图片地址本身就带着论文编号（形如 "2502.20217v1/图.png"），
+    如果拿"页面地址"去补全，很容易拼出 ".../2502.20217v1/2502.20217v1/图.png"
+    这种编号写两遍的地址，点开就是 404。这里专挑"连着两段一模一样的论文编号"，
+    把多出来的那一段删掉。只认论文编号这种形状，不会误伤正常的网址。
+    """
+
+    prefix, separator, path = url.partition("://")
+    if not separator:
+        prefix, separator, path = "", "", url
+    collapsed: list[str] = []
+    for segment in path.split("/"):
+        if collapsed and collapsed[-1] == segment and _ARXIV_ID_PATTERN.match(segment):
+            continue
+        collapsed.append(segment)
+    return prefix + separator + "/".join(collapsed)

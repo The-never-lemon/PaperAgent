@@ -30,6 +30,7 @@ import ChatComposer from "../components/chat/ChatComposer.vue";
 import DeepReadReportCard from "../components/chat/DeepReadReportCard.vue";
 import DeepReadDrawer from "../components/chat/DeepReadDrawer.vue";
 import PaperCardGroup from "../components/chat/PaperCardGroup.vue";
+import PaperInfoDialog from "../components/chat/PaperInfoDialog.vue";
 import ReviewMessage from "../components/chat/ReviewMessage.vue";
 import ToolCallTrace from "../components/chat/ToolCallTrace.vue";
 import UserBubble from "../components/chat/UserBubble.vue";
@@ -44,6 +45,7 @@ import type {
   DeepReadReportPayload,
   PaperListPayload,
   ReviewCardPayload,
+  WorkspacePaperItem,
 } from "../types/chat";
 import type {
   SessionRuntimeEvent,
@@ -97,6 +99,11 @@ const drawerReport = ref<DeepReadReportPayload | null>(null);
 const readablePaperIds = ref<Set<string>>(new Set());
 // 当前会话工作区里全部论文编号（助手回复里的 [paper_id] 引用按钮靠它判定）
 const workspacePaperIds = ref<Set<string>>(new Set());
+// 当前会话工作区的论文明细（点 [paper_id] 引用、且这篇还没精读时，弹窗用它展示标题和摘要）
+const workspacePapers = ref<Map<string, WorkspacePaperItem>>(new Map());
+// 论文信息弹窗状态：点击引用但该论文尚未精读时弹出
+const paperDialogVisible = ref(false);
+const dialogPaper = ref<WorkspacePaperItem | null>(null);
 
 // 论文工作区面板引用（用于 turn_end 时刷新）
 const libraryPanelRef = ref<InstanceType<typeof PaperLibraryPanel> | null>(null);
@@ -286,6 +293,7 @@ async function refreshWorkspacePapers() {
   if (!selectedSessionKey.value) {
     readablePaperIds.value = new Set();
     workspacePaperIds.value = new Set();
+    workspacePapers.value = new Map();
     return;
   }
   try {
@@ -294,6 +302,8 @@ async function refreshWorkspacePapers() {
       snapshot.papers.filter((paper) => paper.has_report).map((paper) => paper.paper_id),
     );
     workspacePaperIds.value = new Set(snapshot.papers.map((paper) => paper.paper_id));
+    // 中文注释：同时按编号存一份论文明细，点引用但还没精读时用它弹出论文信息卡片。
+    workspacePapers.value = new Map(snapshot.papers.map((paper) => [paper.paper_id, paper]));
   } catch {
     // 中文注释：工作区接口失败不阻塞聊天主流程，卡片只是暂时少一个"报告"按钮。
   }
@@ -389,6 +399,12 @@ function openStream(sessionKey: string, streamUrl: string) {
     onEvent: async (event) => {
       aggregator.apply(event);
       syncSnapshot();
+      // 中文注释：检索工具一执行完就会推一条 kind=paper_list 的消息，这时论文已经写进工作区。
+      // 顺手让左侧论文面板重拉一次，用户不用刷新页面就能看到刚检索到的论文。
+      const cardKind = typeof event.metadata?.kind === "string" ? event.metadata.kind : "";
+      if (event.event === "message" && cardKind === "paper_list") {
+        void libraryPanelRef.value?.refresh();
+      }
       if (event.event === "turn_end") {
         await handleRunFinished(sessionKey, event);
       }
@@ -475,6 +491,9 @@ async function handleRunFinished(sessionKey: string, event: SessionRuntimeEvent)
   activeRunId.value = null;
   await reloadCurrentThread();
   await refreshWorkspacePapers();
+  // 中文注释：一轮跑完后工作区可能已经变了（新检索到论文、评价出分、精读完成），
+  // 让左侧论文面板也跟着刷新一次，否则用户要手动刷新页面才能看到最新状态。
+  void libraryPanelRef.value?.refresh();
   emit("refreshSessions");
   if (event.status === "failed") {
     pushToast({
@@ -597,6 +616,41 @@ async function openReportById(paperId: string) {
   }
 }
 
+/** 点击助手回复里的 [paper_id] 引用：已精读的直接开报告，否则弹一张论文信息卡片。
+
+    中文注释：以前不管有没有精读都直接开报告抽屉，没精读的论文就只会弹一句失败提示，
+    用户既看不到摘要也点不到原文。现在改成"有报告开报告、没报告出卡片"。
+    卡片是独立浮层，不往对话流里插内容。
+*/
+function handlePaperClick(paperId: string) {
+  if (readablePaperIds.value.has(paperId)) {
+    void openReportById(paperId);
+    return;
+  }
+  const paper = workspacePapers.value.get(paperId);
+  if (!paper) {
+    // 中文注释：正常走不到这里（引用按钮只在编号存在于工作区时才渲染），
+    // 兜底沿用老行为打开报告，由它给出统一的失败提示。
+    void openReportById(paperId);
+    return;
+  }
+  dialogPaper.value = paper;
+  paperDialogVisible.value = true;
+}
+
+/** 弹窗里的「精读」：关掉弹窗，把精读请求发回对话流。 */
+function requestDeepReadFromDialog(paperId: string) {
+  paperDialogVisible.value = false;
+  dialogPaper.value = null;
+  requestDeepReadById(paperId);
+}
+
+/** 关闭论文信息弹窗。 */
+function closePaperDialog() {
+  paperDialogVisible.value = false;
+  dialogPaper.value = null;
+}
+
 function statusTone(status: string) {
   if (status === "completed") return "success";
   if (status === "running") return "warning";
@@ -666,7 +720,7 @@ function handleError(error: unknown, title: string) {
                 :is-streaming="message.isStreaming"
                 :reasoning-streaming="message.reasoningStreaming"
                 :known-paper-ids="workspacePaperIds"
-                @paper-click="openReportById"
+                @paper-click="handlePaperClick"
               />
               <PaperCardGroup
                 v-else-if="message.kind === 'paper_list' && asPaperList(message)"
@@ -750,6 +804,15 @@ function handleError(error: unknown, title: string) {
       :busy="isRunning || sending"
       @close="closeDrawer"
       @ask="askFromDrawer"
+    />
+
+    <!-- 点击引用但该论文尚未精读时，用弹窗展示标题、摘要和原文链接 -->
+    <PaperInfoDialog
+      :visible="paperDialogVisible"
+      :paper="dialogPaper"
+      :busy="isRunning || sending"
+      @close="closePaperDialog"
+      @deep-read="requestDeepReadFromDialog"
     />
   </section>
 </template>

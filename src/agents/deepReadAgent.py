@@ -15,6 +15,7 @@ import asyncio
 import json
 from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 from src.llm.base import normalize_token_usage
 from src.llm.config import SystemConfig
@@ -42,6 +43,8 @@ from .Prompts import (
 
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from src.graph.runtime import WorkflowCancellation, WorkflowNodeReporter
     from src.graph.runtime_resources import WorkflowRuntimeResources
     from src.llm import ProviderSnapshot
@@ -75,6 +78,9 @@ DEEP_READ_STAGE = "deep_read_paper"
 # 产物类型常量，写 artifact 时使用。
 ARTIFACT_TYPE_REPORT = "deep_read_report"
 ARTIFACT_TYPE_FULLTEXT = "paper_fulltext"
+# 中文注释：论文配图也单独存成产物。这样全文 Markdown 里的图片引用才能指向一个
+# 真能打开的地址（详见 _write_figure_artifacts）。
+ARTIFACT_TYPE_FIGURE = "paper_figure"
 
 # reduce 输入里论文摘要的截断长度。
 REDUCE_ABSTRACT_CHARS = 400
@@ -163,9 +169,13 @@ async def _run_deep_read_impl(*, paper_id: str, focus: str, deps: DeepReadDeps) 
             stage=DEEP_READ_STAGE,
             event_key=deps.event_key,
         )
+        cached_source = entry.deep_read.source
+        cached_fulltext = cached_source == DEEP_READ_SOURCE_FULLTEXT
         return {
             "paper_id": paper_id,
-            "source": entry.deep_read.source,
+            "source": cached_source,
+            "fulltext_available": cached_fulltext,
+            "notice": _fulltext_notice(cached_fulltext, ""),
             "report_summary": entry.deep_read.short_summary[:REPORT_SUMMARY_CHARS],
             "artifact_id": entry.deep_read.artifact_id,
             "cached": True,
@@ -195,6 +205,9 @@ async def _run_deep_read_impl(*, paper_id: str, focus: str, deps: DeepReadDeps) 
     # token 用量累加器：map + reduce（或降级）所有响应的 usage 统一累加。
     total_input = 0
     total_output = 0
+    # 中文注释：全文没拿到时把原因记在这里，最后要如实告诉用户"这篇论文下载不了"，
+    # 不能让用户以为报告是读了全文写出来的。
+    fulltext_failure_reason = ""
 
     # 尝试全文路径：下载成功 → 转换 → 分块 → map → reduce。
     # 任何一步失败就降级到摘要精读。map/reduce 失败属于硬失败，直接返回 failed。
@@ -249,6 +262,7 @@ async def _run_deep_read_impl(*, paper_id: str, focus: str, deps: DeepReadDeps) 
                 )
             else:
                 # 分块为空，降级摘要。
+                fulltext_failure_reason = "全文分块为空"
                 deps.reporter.progress(
                     "全文分块为空，改用摘要精读",
                     stage=DEEP_READ_STAGE,
@@ -256,6 +270,7 @@ async def _run_deep_read_impl(*, paper_id: str, focus: str, deps: DeepReadDeps) 
                 )
         else:
             # 转换失败，降级摘要。
+            fulltext_failure_reason = "全文转换失败"
             deps.reporter.progress(
                 "全文转换失败，改用摘要精读",
                 stage=DEEP_READ_STAGE,
@@ -263,6 +278,9 @@ async def _run_deep_read_impl(*, paper_id: str, focus: str, deps: DeepReadDeps) 
             )
     else:
         # 下载失败，降级摘要。
+        # 中文注释：这里的原因来自下载层（比如"未提供开放获取链接""下载全文超时"），
+        # 会原样带给用户，让用户知道到底是没链接还是链接打不开。
+        fulltext_failure_reason = downloaded.reason or "未能获取全文"
         deps.reporter.progress(
             f"全文获取失败（{downloaded.reason}），改用摘要精读",
             stage=DEEP_READ_STAGE,
@@ -293,6 +311,11 @@ async def _run_deep_read_impl(*, paper_id: str, focus: str, deps: DeepReadDeps) 
     safe = sanitize_for_filename(paper_id)
     # 先写全文 Markdown（仅全文路径才有）。
     if markdown_text:
+        # 中文注释：全文 Markdown 里的图片引用是 "assets/xxx.png" 这种相对地址，而图片文件
+        # 躺在论文缓存目录里。产物只存 Markdown 文本，图片不跟着走，相对地址就会指向一个
+        # 不存在的目录，用户打开产物看到满屏裂图。所以这里先把配图也存成产物，并把引用
+        # 换成能打开的接口地址，再写全文产物。
+        markdown_text = await _write_figure_artifacts(deps, paper_id, conversion.assets_dir, markdown_text)
         fulltext_record = await asyncio.to_thread(
             deps.repo.write_artifact,
             deps.session_key,
@@ -322,13 +345,22 @@ async def _run_deep_read_impl(*, paper_id: str, focus: str, deps: DeepReadDeps) 
 
     # 第十二步：推 deep_read_report 卡片（role 用 system，不干扰助手消息缓冲区）。
     title_preview = (doc.title or "")[:CARD_TITLE_CHARS]
+    # 中文注释：全文没拿到时，卡片标题必须如实写明"无法下载全文"。
+    # 否则用户看到的报告和正常精读长得一模一样，会误以为全文读过。
+    fulltext_available = source == DEEP_READ_SOURCE_FULLTEXT
+    if fulltext_available:
+        card_title = f"《{title_preview}》精读完成"
+    else:
+        card_title = f"《{title_preview}》无法下载全文，报告基于摘要生成"
     deps.reporter.message(
         role="system",
-        content=f"《{title_preview}》精读完成",
+        content=card_title,
         metadata={
             "kind": "deep_read_report",
             "paper_id": paper_id,
             "source": source,
+            "fulltext_available": fulltext_available,
+            "fulltext_failure_reason": fulltext_failure_reason,
             "artifact_id": report.artifact_id,
             "report": report.to_dict(),
         },
@@ -357,6 +389,8 @@ async def _run_deep_read_impl(*, paper_id: str, focus: str, deps: DeepReadDeps) 
     return {
         "paper_id": paper_id,
         "source": source,
+        "fulltext_available": fulltext_available,
+        "notice": _fulltext_notice(fulltext_available, fulltext_failure_reason),
         "report_summary": report.short_summary[:REPORT_SUMMARY_CHARS],
         "artifact_id": report.artifact_id,
         "cached": False,
@@ -366,6 +400,59 @@ async def _run_deep_read_impl(*, paper_id: str, focus: str, deps: DeepReadDeps) 
 # ---------------------------------------------------------------------------
 # map 阶段：并发逐块精读
 # ---------------------------------------------------------------------------
+
+
+async def _write_figure_artifacts(
+    deps: DeepReadDeps,
+    paper_id: str,
+    assets_dir: "Path | None",
+    markdown_text: str,
+) -> str:
+    """把论文配图也存成产物，并把正文里的图片引用改成能打开的地址。
+
+    中文注释：转换出来的 paper.md 里，图片写的是 "![Figure 1](assets/fig_p1_1.png)"
+    这种相对地址，图片文件本身躺在论文缓存目录里。产物只把 Markdown 文本单独存一份，
+    图片不跟着走，相对地址就指向一个不存在的目录 —— 用户打开产物看到的是满屏裂图。
+    改造前正文里根本没有图片引用，所以这个问题看不出来；现在有了图表提取就必须处理。
+
+    做法是：每张图也当成一件产物存进会话目录（各拿到自己的编号），然后把正文里的相对
+    地址换成"按编号取这张图"的接口地址。这样复用已有的产物下载接口，不必新增路由。
+    同一张图可能被多页引用，但替换是按文件名做的，一次替换就能覆盖所有出现的位置。
+
+    拿不到图片目录时（比如老缓存的目录被清理掉了），原样返回、不做任何替换。
+    """
+
+    if assets_dir is None or not assets_dir.is_dir():
+        return markdown_text
+    for figure_path in sorted(assets_dir.iterdir()):
+        if not figure_path.is_file():
+            continue
+        try:
+            payload = await asyncio.to_thread(figure_path.read_bytes)
+            record = await asyncio.to_thread(
+                deps.repo.write_artifact,
+                deps.session_key,
+                ARTIFACT_TYPE_FIGURE,
+                figure_path.name,
+                payload,
+                relative_path=f"artifacts/assets/{figure_path.name}",
+                metadata={"paper_id": paper_id},
+            )
+        except Exception as exc:
+            # 中文注释：单张图写不进去，不该把整篇精读拖垮 —— 那张图的地址会保留原样、
+            # 显示成裂图，但报告和其余图片都还在。这里故意捕得宽一些：写产物可能因为
+            # 磁盘满、路径非法、会话目录不见了等各种原因失败，而它们都不值得让整份报告作废。
+            # 记一条日志，方便事后发现。
+            logger.warning(
+                "论文配图写入产物失败，正文里会保留这张图的相对地址",
+                extra={"paper_id": paper_id, "figure": figure_path.name, "reason": str(exc)},
+            )
+            continue
+        # 中文注释：地址形状要跟前端取产物的方式对齐（见前端 DeepReadDrawer 里
+        # /api/sessions/{会话}/artifacts/{产物编号}），否则拼出来的地址照样打不开。
+        figure_url = f"/api/sessions/{quote(deps.session_key, safe='')}/artifacts/{record.get('id') or ''}"
+        markdown_text = markdown_text.replace(f"](assets/{figure_path.name})", f"]({figure_url})")
+    return markdown_text
 
 
 async def _map_chunks(
@@ -434,7 +521,12 @@ async def _map_chunks(
             # 取笔记文本，超长截断到 MAP_NOTE_MAX_CHARS。
             note = (response.content or "").strip()
             if len(note) > MAP_NOTE_MAX_CHARS:
-                note = note[:MAP_NOTE_MAX_CHARS]
+                # 中文注释：这里的截断是按字数位置硬切的，模型自己看不到这把刀，所以
+                # 提示词里"装不下时先保方法与实验数据"那句取舍根本无从执行——而表格片段
+                # 恰恰是数值最密、被切掉最多的那种。所以切了必须留痕：补一句标记，
+                # 让汇总阶段和读报告的人知道这段笔记不完整，而不是把半截笔记当完整结论用。
+                # 写法和 _build_reduce_user_content 里已有的「[部分内容已省略]」保持一致。
+                note = note[:MAP_NOTE_MAX_CHARS] + "\n[本段笔记超长已截断]"
             return note
 
     # gather 保持顺序：返回的笔记列表和 chunks 一一对应。
@@ -667,6 +759,21 @@ def _fail(deps: DeepReadDeps, reason: str) -> JsonObject:
     deps.reporter.failed(reason, stage=DEEP_READ_STAGE, event_key=deps.event_key)
     logger.info("精读失败", extra={"reason": reason[:200]})
     return {"status": "failed", "reason": reason}
+
+
+def _fulltext_notice(fulltext_available: bool, reason: str) -> str:
+    """生成"全文到底有没有拿到"的提示语，交给主 Agent 转告用户。
+
+    中文注释：主 Agent 看到这句话就知道该怎么跟用户说。全文拿到了就返回空字符串，
+    主 Agent 按正常流程汇报即可；没拿到时把原因一并写清楚，
+    让用户能分辨是"这篇论文本来就没有开放全文"还是"有链接但打不开"。
+    """
+
+    if fulltext_available:
+        return ""
+    if reason:
+        return f"该论文无法下载全文（{reason}），本报告基于标题和摘要生成，未通读全文。"
+    return "该论文无法下载全文，本报告基于标题和摘要生成，未通读全文。"
 
 
 def _paper_document(payload: JsonObject) -> PaperDocument:

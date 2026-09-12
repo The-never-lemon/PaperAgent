@@ -27,11 +27,20 @@ const emit = defineEmits<{
       <header class="deep-read-card-head">
         <FileText :size="16" />
         <h4 class="deep-read-card-title" :title="payload.report.title">{{ payload.report.title }}</h4>
-        <span class="deep-read-source-badge" :data-source="payload.source">
-          {{ payload.source === "fulltext" ? "全文精读" : "摘要降级" }}
+        <span
+          class="deep-read-source-badge"
+          :data-source="payload.source"
+          :title="payload.fulltext_failure_reason || ''"
+        >
+          {{ payload.source === "fulltext" ? "全文精读" : "无法下载全文" }}
         </span>
         <span class="deep-read-overall">{{ payload.report.overall_score }} 分</span>
       </header>
+      <!-- 中文注释：没拿到全文时给一句明确的说明，不让用户以为下面的报告是通读全文写出来的。 -->
+      <p v-if="payload.source !== 'fulltext'" class="deep-read-warning">
+        本篇论文无法下载全文{{ payload.fulltext_failure_reason ? `（${payload.fulltext_failure_reason}）` : "" }}，
+        以下报告基于标题和摘要生成，未通读全文。
+      </p>
       <p v-if="payload.report.short_summary" class="deep-read-summary">{{ payload.report.short_summary }}</p>
       <div class="deep-read-dims">
         <span class="deep-read-dim">相关 {{ payload.report.relevance?.score ?? 0 }}</span>

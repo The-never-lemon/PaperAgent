@@ -86,6 +86,10 @@ export interface DeepReadCardPayload {
   paper_id: string;
   source: string;
   artifact_id: string;
+  /** 全文是否真的拿到了；false 表示这篇论文没能下载到全文，报告基于摘要生成。 */
+  fulltext_available?: boolean;
+  /** 没拿到全文时的原因，例如"该论文未提供开放获取的全文链接""下载全文超时"。 */
+  fulltext_failure_reason?: string;
   report: DeepReadReportPayload;
 }
 

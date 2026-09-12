@@ -12,6 +12,7 @@
 import { computed } from "vue";
 import { BookOpenCheck, ExternalLink, FileText } from "lucide-vue-next";
 
+import { pickPaperLink } from "../../lib/paper-link";
 import type { ChatPaperCard, PaperListPayload } from "../../types/chat";
 
 defineOptions({ name: "PaperCardGroup" });
@@ -96,9 +97,9 @@ function statusLabel(status?: string) {
               <FileText :size="14" /> 报告
             </button>
             <a
-              v-if="paper.pdf_url || paper.url"
+              v-if="pickPaperLink(paper)"
               class="paper-card-action paper-card-link"
-              :href="paper.pdf_url || paper.url"
+              :href="pickPaperLink(paper)"
               target="_blank"
               rel="noreferrer"
             >

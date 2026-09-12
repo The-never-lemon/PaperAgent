@@ -29,7 +29,6 @@ class AgentSpec:
     description: str
     llm_profile: str = "default_agent"
     tools: tuple[str, ...] = ()
-    skills: tuple[str, ...] = ()
     input_keys: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -43,7 +42,7 @@ class AgentSpec:
 class AgentContext:
     """Agent 运行时上下文。
 
-    这里仅暴露当前 Agent 允许访问的能力，例如 LLM、工具、技能与环境信息，
+    这里仅暴露当前 Agent 允许访问的能力，例如 LLM、工具与环境信息，
     而具体业务输入统一从图状态 `State` 中读取。
     """
 
