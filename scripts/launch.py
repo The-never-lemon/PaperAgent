@@ -17,15 +17,20 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import platform
 import re
 import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import urllib.request
 import webbrowser
+import zipfile
 from pathlib import Path
 
 # 本文件在 scripts/ 目录下，往上一级就是项目根。
@@ -46,6 +51,15 @@ API_KEY_FIELD_PATTERN = re.compile(r'"api_key"\s*:\s*"[^"]+"')
 
 # 前端 index.html 里对静态资源的引用，例如 src="/assets/index-xxxx.js"。
 ASSET_REF_PATTERN = re.compile(r"""["'](/assets/[^"']+)["']""")
+
+# 绿色版 Node 的下载来源与落地位置。
+# 中文注释：构建前端需要 npm。这里不要求使用者先去装一遍 Node，而是按需下载一份
+# 官方绿色版放进项目自己的目录——和打包时内置 uv.exe 是同一个思路（需要什么工具就
+# 带上什么工具）。选绿色版而不是系统安装，是因为它不需要管理员权限、不改动系统，
+# 不想要了删掉 tools/node 就干净了。
+NODE_DIST_INDEX_URL = "https://nodejs.org/dist/index.json"
+NODE_DIST_BASE_URL = "https://nodejs.org/dist"
+NODE_TOOLS_SUBDIR = ("tools", "node")
 
 
 def _enter_project_root() -> None:
@@ -258,32 +272,181 @@ def run_check() -> int:
     return 1
 
 
-def has_npm() -> bool:
-    """判断本机有没有 npm（构建前端要用）。"""
+def node_tools_dir() -> Path:
+    """返回项目里放绿色版 Node 的目录。"""
 
-    return shutil.which("npm") is not None
+    return ROOT.joinpath(*NODE_TOOLS_SUBDIR)
+
+
+def local_npm() -> str | None:
+    """在项目自带的绿色版 Node 里找 npm，没找到返回 None。"""
+
+    root = node_tools_dir()
+    if not root.is_dir():
+        return None
+    # 官方压缩包解出来是 node-vXX.YY.ZZ-win-x64/ 这种带版本号的目录，所以按通配找。
+    for pattern in ("*/npm.cmd", "*/bin/npm"):
+        found = sorted(root.glob(pattern))
+        if found:
+            return str(found[0])
+    return None
+
+
+def resolve_npm() -> str | None:
+    """确定这次该用哪个 npm：优先项目自带的绿色版，其次系统 PATH 里的。
+
+    中文注释：先看自带的，是为了让"上次自动装过"的人直接沿用那一次的结果，
+    既不重复询问，也不依赖系统 PATH 有没有配好。
+    """
+
+    return local_npm() or shutil.which("npm")
+
+
+def has_npm() -> bool:
+    """判断现在有没有可用的 npm（构建前端要用）。"""
+
+    return resolve_npm() is not None
+
+
+def node_archive_platform() -> str | None:
+    """返回当前平台对应的 Node 官方包后缀（例如 win-x64），不支持的平台返回 None。
+
+    中文注释：自动安装只对 Windows 做了——这个项目本来就是用 start.bat 在 Windows 上
+    分发的。别的系统不去猜包名，老实返回 None，走手动安装那条提示。
+    """
+
+    if os.name != "nt":
+        return None
+    machine = platform.machine().lower()
+    if machine in {"amd64", "x86_64"}:
+        return "win-x64"
+    if machine in {"arm64", "aarch64"}:
+        return "win-arm64"
+    return None
+
+
+def download_node_archive(platform_tag: str) -> Path:
+    """下载最新的 Node LTS 绿色版压缩包到临时目录，返回压缩包路径。"""
+
+    with urllib.request.urlopen(NODE_DIST_INDEX_URL, timeout=30) as response:
+        releases = json.load(response)
+    # 中文注释：取第一个带 lts 标记的版本，而不是写死版本号——写死的话过一阵就过期了。
+    latest_lts = next(item for item in releases if item.get("lts"))
+    version = str(latest_lts["version"])
+    archive_name = f"node-{version}-{platform_tag}.zip"
+    url = f"{NODE_DIST_BASE_URL}/{version}/{archive_name}"
+
+    working_dir = Path(tempfile.mkdtemp(prefix="paper_agent_node_"))
+    target = working_dir / archive_name
+    print(f"    正在下载 {url}")
+    try:
+        with urllib.request.urlopen(url, timeout=120) as response, target.open("wb") as handle:
+            total = int(response.headers.get("Content-Length") or 0)
+            received = 0
+            while chunk := response.read(1 << 20):
+                handle.write(chunk)
+                received += len(chunk)
+                if total:
+                    # 中文注释：三十多兆，不显示进度会让人以为卡死了。
+                    print(f"\r    已下载 {received / 1048576:.1f} / {total / 1048576:.1f} MB", end="")
+    except Exception:
+        # 中文注释：下载中途断了就把半个文件清掉，别在别人机器上留三十多兆垃圾。
+        shutil.rmtree(working_dir, ignore_errors=True)
+        raise
+    print()
+    return target
+
+
+def install_portable_node() -> bool:
+    """下载并解压一份绿色版 Node 到项目的 tools/node 下，成功返回 True。"""
+
+    platform_tag = node_archive_platform()
+    if platform_tag is None:
+        print("    [!] 自动安装目前只支持 Windows，请在别处装好 Node.js 后再启动")
+        return False
+    try:
+        archive = download_node_archive(platform_tag)
+    except Exception as exc:  # noqa: BLE001
+        print(f"    [!] 下载失败：{exc}")
+        return False
+
+    destination = node_tools_dir()
+    destination.mkdir(parents=True, exist_ok=True)
+    try:
+        with zipfile.ZipFile(archive) as bundle:
+            bundle.extractall(destination)
+    except Exception as exc:  # noqa: BLE001
+        print(f"    [!] 解压失败：{exc}")
+        return False
+    finally:
+        # 中文注释：压缩包下载在临时目录里，解压完就删掉，不在别人机器上留垃圾。
+        shutil.rmtree(archive.parent, ignore_errors=True)
+
+    npm = local_npm()
+    if npm is None:
+        print("    [!] 解压完了却没在里面找到 npm，请手动检查 tools/node 目录")
+        return False
+    print(f"    已准备好：{npm}")
+    return True
+
+
+def ask_to_install_node() -> bool:
+    """问使用者要不要现在自动装一份 Node，返回是否要装。
+
+    中文注释：只有人对着控制台双击启动时才会问。管道、重定向、定时任务这类没有
+    交互终端的场景一律按"不装"处理——绝不能让一个没人看着的脚本自己下三十多兆。
+    默认选项是"装"，直接回车就走安装。
+    """
+
+    if not sys.stdin.isatty():
+        return False
+    print()
+    print("  没有找到 npm（构建前端需要它）。")
+    print("  可以现在自动下载一份 Node.js 绿色版放进项目的 tools/node/ 下：")
+    print("  不需要管理员权限、不改动系统，不想要了删掉那个目录就能撤销。")
+    print()
+    try:
+        answer = input("  要现在下载安装吗？[Y/n] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return answer in {"", "y", "yes"}
 
 
 def build_frontend_in_place() -> bool:
     """就地构建前端产物，成功返回 True。
 
-    中文注释：这个启动器的定位就是"双击就能用"，它本来就该把建环境、建前端、起服务
-    串起来。但从 git 仓库克隆出来的目录里是没有 front/dist 的——构建产物不入库
-    （见 .gitignore），所以以前这里只能拒绝启动、留一句"自己去跑 npm"。现在改成
-    当场构建，clone 之后双击 start.bat 就能直接用。
+    中文注释：从 git 仓库克隆出来的目录里是没有 front/dist 的（构建产物不入库），
+    所以启动时缺产物就地构建一次，双击 start.bat 就能直接用。
 
     构建要跑 npm install 加 vite build，第一遍可能要几分钟，所以每一步都打印出来，
     不能让它静默卡着让人以为程序死了。
     """
 
+    npm = resolve_npm()
+    if npm is None:
+        return False
+    # 中文注释：项目自带的绿色版 Node 不在系统 PATH 里。npm 自身能跑（它用的是同一目录里
+    # 的 node.exe），但 npm 干活的时候会再按名字去叫 node——实测 npm --version 正常、
+    # 而 npm install 会因为找不到 node 直接失败。所以把它所在目录临时加到子进程 PATH 的
+    # 最前面：只影响这一次构建，不动系统环境变量。
+    environment = None
+    vendor_npm = local_npm()
+    if vendor_npm is not None:
+        environment = {
+            **os.environ,
+            "PATH": str(Path(vendor_npm).parent) + os.pathsep + os.environ.get("PATH", ""),
+        }
     print()
     print("  没有找到前端构建产物，正在就地构建（第一次会比较慢，请耐心等）")
-    for command in (["npm", "run", "front:install"], ["npm", "run", "front:build"]):
-        print(f"    > {' '.join(command)}")
+    for script in ("front:install", "front:build"):
+        print(f"    > npm run {script}")
         # 中文注释：Windows 上的 npm 其实是个 .cmd 批处理文件，不能当普通可执行文件
         # 直接启动（会报"系统找不到指定的文件"），必须交给系统 shell 去跑。
         # 打包脚本 scripts/package.py 里用的是同一个写法。
-        result = subprocess.run(command, cwd=ROOT, shell=(os.name == "nt"))
+        result = subprocess.run(
+            [npm, "run", script], cwd=ROOT, shell=(os.name == "nt"), env=environment
+        )
         if result.returncode != 0:
             print(f"    [!] 这条命令失败了（退出码 {result.returncode}），上面的输出里有原因")
             return False
@@ -294,8 +457,9 @@ def build_frontend_in_place() -> bool:
 def frontend_build_hint(problems: list[str]) -> list[str]:
     """前端产物有问题时，补一条「怎么修」的提示。
 
-    中文注释：提示往哪个方向指，取决于本机有没有 npm——有 npm 的话启动时会自动
-    构建，剩下的失败基本是构建本身报错（上面能看到具体原因）；没 npm 就得先装 Node。
+    中文注释：提示往哪个方向指，取决于现在有没有可用的 npm——有的话启动时会自动
+    构建，剩下的失败基本是构建本身报错；没有的话启动时会问要不要自动下载一份绿色版
+    Node（也可以自己装）。--check 是只读模式，不会问也不会装，只把这条路说清楚。
     """
 
     if not problems:
@@ -306,8 +470,9 @@ def frontend_build_hint(problems: list[str]) -> list[str]:
             "npm run front:install 和 npm run front:build"
         ]
     return [
-        "修复方式：本机没有找到 npm，没法自动构建前端。",
-        "请先安装 Node.js（自带 npm），再在项目根目录执行 "
+        "修复方式：本机没有 npm。直接双击启动时会询问是否自动下载一份绿色版 Node"
+        "（放进项目的 tools/node/ 下，不需要管理员权限）；",
+        "也可以自己装好 Node.js（自带 npm），再执行 "
         "npm run front:install 和 npm run front:build",
     ]
 
@@ -345,6 +510,12 @@ def main() -> int:
     # 目录天生没有 front/dist（构建产物不入库），不补这一步的话 clone 之后根本起不来。
     # 本机没有 npm、或者构建仍然失败，才拒绝启动并给出提示。
     problems = check_frontend()
+    if problems and not has_npm():
+        # 中文注释：构建前端要 npm。没有就先问一句要不要自动装一份绿色版 Node。
+        # 这一步只发生在真正的启动路径上——--check 是只读的，既不问也不下载；
+        # 而且没有人对着终端时（管道、定时任务）ask_to_install_node 直接返回 False。
+        if ask_to_install_node():
+            install_portable_node()
     if problems and has_npm():
         if build_frontend_in_place():
             problems = check_frontend()
