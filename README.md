@@ -275,14 +275,17 @@ uv run python scripts/package.py    # 生成 Paper-Agent-<日期>.zip
 
 ---
 
-## 💬 交流社群
 
-加入 Paper-Agent 用户交流群，获取最新动态、使用技巧与技术讨论：
+## 👤 作者
+
+**The-never-lemon**
 
 <p align="center">
-  <img src="assets/paper-agent-QQ.jpg" width="280" alt="QQ 交流群二维码" />
+  <a href="https://github.com/The-never-lemon">
+    <img src="https://github.com/The-never-lemon.png" width="80" height="80" style="border-radius:50%" alt="The-never-lemon" />
+  </a>
   <br>
-  <em>（QQ 群号：340020097）</em>
+  <strong><a href="https://github.com/The-never-lemon">@The-never-lemon</a></strong>
 </p>
 
 ---
@@ -310,7 +313,7 @@ uv run python scripts/package.py    # 生成 Paper-Agent-<日期>.zip
 3. 运行 `npm run front:build`，确保前端类型检查和构建通过；
 4. 在 PR 描述中说明改动范围、配置影响和复现步骤。
 
-项目地址：<https://github.com/Tswoen/Paper-Agent>
+项目地址：<https://github.com/The-never-lemon/PaperAgentMain>
 
 ---
 
