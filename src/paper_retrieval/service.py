@@ -51,6 +51,54 @@ def _is_retryable_search_error(exc: Exception) -> bool:
     return isinstance(exc, httpx.TransportError)
 
 
+def _backfill_fulltext_fields(representative: PaperDocument, group: list[PaperDocument]) -> None:
+    """把同组其它记录里可用的全文下载信息补给代表记录。
+
+    中文注释：
+    选代表看的是引用数，而 arXiv 记录拿不到引用数（它的数据源不提供这个字段），
+    于是同一篇论文同时被 arXiv 和 OpenAlex 收录时，代表必然是 OpenAlex 那条，
+    arXiv 记录里那个稳定好用的 PDF 直链就跟着被丢掉了。
+    结果就是：明明有能下载的链接，下载却失败，精读被迫降级成摘要。
+
+    这里在保留代表（引用数信息最全的那条）的前提下，把三样东西补回来：
+    1. arxiv_id —— 下载层靠它拼 arXiv 的 PDF 直链；
+    2. pdf_url —— 代表自己没有可下载链接时，用组里别的记录的；
+    3. open_access_pdf —— 同上，OpenAlex 那条经常缺这个字段。
+
+    代表自己已经有值的字段一律不动，避免把更好的信息覆盖掉。
+    """
+
+    if representative.metadata is None:
+        representative.metadata = {}
+    metadata = representative.metadata
+
+    # 中文注释：先补 arXiv 编号。它是最有用的一样——下载层拿到编号就能拼出
+    # arXiv 的 PDF 直链，而 arXiv 的链接比出版社的开放获取链接稳定得多。
+    if not str(metadata.get("arxiv_id") or "").strip():
+        for candidate in group:
+            arxiv_id = str((candidate.metadata or {}).get("arxiv_id") or "").strip()
+            if arxiv_id:
+                metadata["arxiv_id"] = arxiv_id
+                break
+
+    # 中文注释：代表自己没有 PDF 直链时，借组里别的记录的用。
+    if not str(representative.pdf_url or "").strip():
+        for candidate in group:
+            if candidate is representative:
+                continue
+            if str(candidate.pdf_url or "").strip():
+                representative.pdf_url = candidate.pdf_url
+                break
+
+    # 中文注释：开放获取 PDF 同理，代表那条经常缺这个字段。
+    if not metadata.get("open_access_pdf"):
+        for candidate in group:
+            value = (candidate.metadata or {}).get("open_access_pdf")
+            if value:
+                metadata["open_access_pdf"] = value
+                break
+
+
 class PaperSearchService:
     """论文检索编排层。
 
@@ -663,6 +711,12 @@ class PaperSearchService:
             if best.metadata is None:
                 best.metadata = {}
             best.metadata["sources"] = sources
+
+            # 中文注释：代表是按引用数选出来的，而 arXiv 记录拿不到引用数（它的数据源不提供），
+            # 所以同一篇论文同时被 arXiv 和 OpenAlex 收录时，代表一定是 OpenAlex 那条，
+            # arXiv 记录里那个稳定好用的 PDF 直链就跟着被丢掉了——这正是「很多论文下不了全文」的主因。
+            # 下面把兄弟记录里可用的下载信息补给代表：保留代表的高引信息，同时不浪费能下载的链接。
+            _backfill_fulltext_fields(best, [paper for _, paper in entries])
             representatives.append(best)
 
         # 第三步：按多维度排序 + 截断。
