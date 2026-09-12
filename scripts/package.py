@@ -259,6 +259,52 @@ def run_self_check(staging: Path) -> None:
     if result.returncode != 0:
         raise RuntimeError("启动器自检未通过，这个包发出去同事会启动失败")
 
+    # 中文注释：上面的启动器自检只查环境（解释器、前端产物、目录结构），它**不导入
+    # 应用本体**，所以拦不住另一类事故：应用在导入期就要读某个文件，而那个文件没被打进包。
+    # 现在就有这样的文件——src/agents/skills/ 下的技能文档。Prompts.py 一被导入
+    # （也就是 uvicorn 一启动）就要读它，读不到当场抛异常、界面全无。这类"运行时依赖的
+    # 非 .py 文件"以后只会更多，所以这里补一步：真的把应用导入一次。
+    _run_import_smoke(staging)
+
+
+# 中文注释：应用在导入期会自己写出来的目录。导入自检之后必须把它们清掉，
+# 否则会被 write_zip 一起打进包，而这两样恰恰是包最不该带的东西
+# （下面 FORBIDDEN 列表就是专门拦它们的）。
+_IMPORT_SMOKE_SIDE_EFFECTS = ("data", "logs")
+
+
+def _run_import_smoke(staging: Path) -> None:
+    """在打包目录里真的把应用导入一次，确认它能装配起来。
+
+    中文注释：这一步必须排在 assert_no_forbidden 之后跑，而且**自检不许改动要发布的
+    内容**——导入应用本身会写东西（日志目录、会话目录），还可能顺手写出 .pyc 字节码。
+    所以这里做两件事：跑完把已知的副作用目录清掉，再拿文件清单前后对比，多出任何东西
+    都当场中止，绝不带着它们去打包。
+    """
+
+    before = {item.relative_to(staging).as_posix() for item in staged_files(staging)}
+    result = subprocess.run(
+        # 中文注释：-B 表示这次导入不要写 .pyc 字节码。不加它的话，自检会在 src/ 各处
+        # 留下一堆 __pycache__，而它们紧接着就会被 write_zip 打进包里。
+        [sys.executable, "-B", "-c", "import main"],
+        cwd=staging,
+    )
+    for name in _IMPORT_SMOKE_SIDE_EFFECTS:
+        leftover = staging / name
+        if leftover.exists():
+            shutil.rmtree(leftover, ignore_errors=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            "打包目录里的应用导入失败，这个包发出去同事会启动不起来。"
+            "最常见的原因是应用运行时需要读的文件没被打进包（见 INCLUDE_FILES / INCLUDE_DIRS）"
+        )
+    after = {item.relative_to(staging).as_posix() for item in staged_files(staging)}
+    appeared = sorted(after - before)
+    if appeared:
+        shown = "、".join(appeared[:5])
+        raise RuntimeError(f"导入自检往打包目录里写了内容（{shown} 等 {len(appeared)} 个），不能就这样打包")
+    log("应用能在打包目录里正常导入")
+
 
 def write_zip(staging: Path, zip_path: Path) -> None:
     """把打包目录压成 zip。"""
