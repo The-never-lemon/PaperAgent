@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -257,12 +258,58 @@ def run_check() -> int:
     return 1
 
 
+def has_npm() -> bool:
+    """判断本机有没有 npm（构建前端要用）。"""
+
+    return shutil.which("npm") is not None
+
+
+def build_frontend_in_place() -> bool:
+    """就地构建前端产物，成功返回 True。
+
+    中文注释：这个启动器的定位就是"双击就能用"，它本来就该把建环境、建前端、起服务
+    串起来。但从 git 仓库克隆出来的目录里是没有 front/dist 的——构建产物不入库
+    （见 .gitignore），所以以前这里只能拒绝启动、留一句"自己去跑 npm"。现在改成
+    当场构建，clone 之后双击 start.bat 就能直接用。
+
+    构建要跑 npm install 加 vite build，第一遍可能要几分钟，所以每一步都打印出来，
+    不能让它静默卡着让人以为程序死了。
+    """
+
+    print()
+    print("  没有找到前端构建产物，正在就地构建（第一次会比较慢，请耐心等）")
+    for command in (["npm", "run", "front:install"], ["npm", "run", "front:build"]):
+        print(f"    > {' '.join(command)}")
+        # 中文注释：Windows 上的 npm 其实是个 .cmd 批处理文件，不能当普通可执行文件
+        # 直接启动（会报"系统找不到指定的文件"），必须交给系统 shell 去跑。
+        # 打包脚本 scripts/package.py 里用的是同一个写法。
+        result = subprocess.run(command, cwd=ROOT, shell=(os.name == "nt"))
+        if result.returncode != 0:
+            print(f"    [!] 这条命令失败了（退出码 {result.returncode}），上面的输出里有原因")
+            return False
+    print("    前端构建完成")
+    return True
+
+
 def frontend_build_hint(problems: list[str]) -> list[str]:
-    """前端产物有问题时，补一条「怎么修」的提示。"""
+    """前端产物有问题时，补一条「怎么修」的提示。
+
+    中文注释：提示往哪个方向指，取决于本机有没有 npm——有 npm 的话启动时会自动
+    构建，剩下的失败基本是构建本身报错（上面能看到具体原因）；没 npm 就得先装 Node。
+    """
 
     if not problems:
         return []
-    return ["修复方式：在项目根目录执行 npm run front:install 和 npm run front:build"]
+    if has_npm():
+        return [
+            "修复方式：直接启动就会自动构建前端；也可以手动执行 "
+            "npm run front:install 和 npm run front:build"
+        ]
+    return [
+        "修复方式：本机没有找到 npm，没法自动构建前端。",
+        "请先安装 Node.js（自带 npm），再在项目根目录执行 "
+        "npm run front:install 和 npm run front:build",
+    ]
 
 
 def resolve_port(cli_port: int | None) -> int:
@@ -294,8 +341,13 @@ def main() -> int:
 
     port = resolve_port(args.port)
 
-    # 第一步：确认前端产物完整。这是唯一没法在运行时补救的东西。
+    # 第一步：确认前端产物完整。缺产物就先试着就地构建一次——从 git 仓库克隆出来的
+    # 目录天生没有 front/dist（构建产物不入库），不补这一步的话 clone 之后根本起不来。
+    # 本机没有 npm、或者构建仍然失败，才拒绝启动并给出提示。
     problems = check_frontend()
+    if problems and has_npm():
+        if build_frontend_in_place():
+            problems = check_frontend()
     if problems:
         print()
         print("  无法启动：前端构建产物不完整。")
@@ -304,7 +356,7 @@ def main() -> int:
         for hint in frontend_build_hint(problems):
             print(f"    - {hint}")
         print()
-        print("  如果你是从别人那里拿到的这个目录，说明压缩包本身有问题，请找发布的人重新要一份。")
+        print("  如果你是从压缩包解压出来的目录，说明包里的前端产物有问题，请找发布的人重新要一份。")
         print()
         return 1
 
