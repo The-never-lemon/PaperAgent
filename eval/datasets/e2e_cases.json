@@ -1,0 +1,312 @@
+[
+  {
+    "case_id": "e01",
+    "task_type": "search",
+    "holdout": false,
+    "turns": ["帮我调研一下 LLM 推理优化，找 8 篇左右有代表性的论文"],
+    "timeout_s": 900,
+    "assertions": {
+      "expect_tools_completed": ["search_papers"],
+      "min_papers": 5,
+      "expect_evaluation_count_min": 0,
+      "citation_valid_rate_min": 1.0,
+      "expect_final_answer": true
+    },
+    "judge_brief": "用户需求要点：①需要了解 LLM 推理优化的最新进展；②希望找到有代表性的论文（8篇左右）；③需要这些论文是该领域的关键工作",
+    "judge": {
+      "relevance_min": 3.5,
+      "faithfulness_min": 3.5,
+      "completeness_min": 3.5,
+      "organization_min": 3.0
+    }
+  },
+  {
+    "case_id": "e02",
+    "task_type": "search",
+    "holdout": false,
+    "turns": ["找我一些关于 Vision Transformer 的最新论文"],
+    "timeout_s": 900,
+    "assertions": {
+      "expect_tools_completed": ["search_papers"],
+      "min_papers": 4,
+      "expect_evaluation_count_min": 0,
+      "citation_valid_rate_min": 1.0,
+      "expect_final_answer": true
+    },
+    "judge_brief": "用户需求要点：①想要了解 Vision Transformer 相关工作；②偏好最新论文；③希望得到 Paper-Agent 的推荐",
+    "judge": {
+      "relevance_min": 3.5,
+      "faithfulness_min": 3.5,
+      "completeness_min": 3.5,
+      "organization_min": 3.0
+    }
+  },
+  {
+    "case_id": "e03",
+    "task_type": "search",
+    "holdout": true,
+    "turns": ["我想了解多模态模型的最新研究方向"],
+    "timeout_s": 900,
+    "assertions": {
+      "expect_tools_completed": ["search_papers"],
+      "min_papers": 4,
+      "expect_evaluation_count_min": 0,
+      "citation_valid_rate_min": 1.0,
+      "expect_final_answer": true
+    },
+    "judge_brief": "用户需求要点：①需要了解多模态模型的研究方向；②想要系统了解该领域的进展",
+    "judge": {
+      "relevance_min": 3.5,
+      "faithfulness_min": 3.5,
+      "completeness_min": 3.5,
+      "organization_min": 3.0
+    }
+  },
+  {
+    "case_id": "e04",
+    "task_type": "search_evaluate",
+    "holdout": false,
+    "turns": ["帮我找一些关于知识蒸馏的论文，并帮我评估一下它们的价值"],
+    "timeout_s": 900,
+    "assertions": {
+      "expect_tools_completed": ["search_papers", "evaluate_papers"],
+      "min_papers": 5,
+      "expect_evaluation_count_min": 1,
+      "citation_valid_rate_min": 1.0,
+      "expect_final_answer": true
+    },
+    "judge_brief": "用户需求要点：①需要找到知识蒸馏相关论文；②希望 Paper-Agent 对这些论文的价值进行评估；③希望了解哪些论文更有参考价值",
+    "judge": {
+      "relevance_min": 3.5,
+      "faithfulness_min": 3.5,
+      "completeness_min": 3.5,
+      "organization_min": 3.0
+    }
+  },
+  {
+    "case_id": "e05",
+    "task_type": "search_evaluate",
+    "holdout": false,
+    "turns": ["查找关于提示词工程（prompt engineering）的论文，并告诉我有哪些创新方法"],
+    "timeout_s": 900,
+    "assertions": {
+      "expect_tools_completed": ["search_papers", "evaluate_papers"],
+      "min_papers": 5,
+      "expect_evaluation_count_min": 1,
+      "citation_valid_rate_min": 1.0,
+      "expect_final_answer": true
+    },
+    "judge_brief": "用户需求要点：①需要找到提示词工程的相关论文；②希望了解该领域的创新方法；③期望 Paper-Agent 总结出主要的技术方向",
+    "judge": {
+      "relevance_min": 3.5,
+      "faithfulness_min": 3.5,
+      "completeness_min": 3.5,
+      "organization_min": 3.0
+    }
+  },
+  {
+    "case_id": "e06",
+    "task_type": "search_evaluate",
+    "holdout": true,
+    "turns": ["找找神经网络可解释性方面的论文，并评估它们的技术贡献"],
+    "timeout_s": 900,
+    "assertions": {
+      "expect_tools_completed": ["search_papers", "evaluate_papers"],
+      "min_papers": 5,
+      "expect_evaluation_count_min": 1,
+      "citation_valid_rate_min": 1.0,
+      "expect_final_answer": true
+    },
+    "judge_brief": "用户需求要点：①需要了解神经网络可解释性的研究工作；②希望评估这些论文的技术贡献程度；③期望系统性的总结",
+    "judge": {
+      "relevance_min": 3.5,
+      "faithfulness_min": 3.5,
+      "completeness_min": 3.5,
+      "organization_min": 3.0
+    }
+  },
+  {
+    "case_id": "e07",
+    "task_type": "deep_read",
+    "holdout": false,
+    "turns": ["找一篇关于图神经网络的代表性论文，然后帮我详细解读一下"],
+    "timeout_s": 1200,
+    "assertions": {
+      "expect_tools_completed": ["search_papers", "deep_read_paper"],
+      "min_papers": 1,
+      "expect_evaluation_count_min": 0,
+      "citation_valid_rate_min": 0.9,
+      "expect_final_answer": true,
+      "expect_deep_read": {
+        "source_any_of": ["fulltext", "abstract_fallback"]
+      }
+    },
+    "judge_brief": "用户需求要点：①想要获取关于图神经网络的优秀论文；②希望 Paper-Agent 对论文进行深度解读；③期望得到论文的关键内容和创新点分析",
+    "judge": {
+      "relevance_min": 3.5,
+      "faithfulness_min": 3.5,
+      "completeness_min": 3.5,
+      "organization_min": 3.0
+    }
+  },
+  {
+    "case_id": "e08",
+    "task_type": "deep_read",
+    "holdout": false,
+    "turns": ["帮我找一篇关于强化学习的经典论文，并深入讲解一下其核心方法"],
+    "timeout_s": 1200,
+    "assertions": {
+      "expect_tools_completed": ["search_papers", "deep_read_paper"],
+      "min_papers": 1,
+      "expect_evaluation_count_min": 0,
+      "citation_valid_rate_min": 0.9,
+      "expect_final_answer": true,
+      "expect_deep_read": {
+        "source_any_of": ["fulltext", "abstract_fallback"]
+      }
+    },
+    "judge_brief": "用户需求要点：①需要找到强化学习领域的经典论文；②希望获得深度的技术解读；③期望对论文的核心方法有清晰理解",
+    "judge": {
+      "relevance_min": 3.5,
+      "faithfulness_min": 3.5,
+      "completeness_min": 3.5,
+      "organization_min": 3.0
+    }
+  },
+  {
+    "case_id": "e09",
+    "task_type": "multi_turn",
+    "holdout": false,
+    "turns": [
+      "帮我查一下元学习（meta-learning）的最新进展",
+      "这些论文里，评分最高的那篇是哪一篇？",
+      "能不能帮我深度解读一下这篇论文的核心方法？"
+    ],
+    "timeout_s": 1800,
+    "assertions": {
+      "expect_tools_completed": ["search_papers", "evaluate_papers", "deep_read_paper"],
+      "min_papers": 3,
+      "expect_evaluation_count_min": 1,
+      "citation_valid_rate_min": 0.9,
+      "expect_final_answer": true
+    },
+    "judge_brief": "用户需求要点：①第一轮：了解元学习的最新研究；②第二轮：识别出最优秀的论文；③第三轮：对该论文进行深度技术解读。考察跨轮的上下文保持和 paper_id 解析",
+    "judge": {
+      "relevance_min": 3.5,
+      "faithfulness_min": 3.5,
+      "completeness_min": 3.5,
+      "organization_min": 3.0
+    }
+  },
+  {
+    "case_id": "e10",
+    "task_type": "multi_turn",
+    "holdout": false,
+    "turns": [
+      "找一些关于对比学习（contrastive learning）的论文",
+      "第二篇论文讲的是什么内容？",
+      "能告诉我这篇论文使用了什么数据集吗？"
+    ],
+    "timeout_s": 1800,
+    "assertions": {
+      "expect_tools_completed": ["search_papers"],
+      "min_papers": 3,
+      "expect_evaluation_count_min": 0,
+      "citation_valid_rate_min": 1.0,
+      "expect_final_answer": true
+    },
+    "judge_brief": "用户需求要点：①第一轮：检索对比学习相关论文；②第二轮：获取第二篇论文的内容总结；③第三轮：了解数据集信息。考察论文索引的准确性和上下文追踪",
+    "judge": {
+      "relevance_min": 3.5,
+      "faithfulness_min": 3.5,
+      "completeness_min": 3.5,
+      "organization_min": 3.0
+    }
+  },
+  {
+    "case_id": "e11",
+    "task_type": "multi_turn",
+    "holdout": true,
+    "turns": [
+      "帮我调研一下自监督学习的发展现状",
+      "这些论文的主要贡献有哪些？",
+      "能不能详细讲讲最重要的那篇论文？",
+      "这篇论文里提到的自监督方法有什么优缺点吗？"
+    ],
+    "timeout_s": 2400,
+    "assertions": {
+      "expect_tools_completed": ["search_papers"],
+      "min_papers": 5,
+      "expect_evaluation_count_min": 0,
+      "citation_valid_rate_min": 1.0,
+      "expect_final_answer": true
+    },
+    "judge_brief": "用户需求要点：①第一轮：了解自监督学习的现状；②第二轮：总结论文贡献；③第三轮：深度讲解关键论文；④第四轮：分析优缺点。这是一个三轮追问的复杂场景，考察长上下文和递进式理解",
+    "judge": {
+      "relevance_min": 3.5,
+      "faithfulness_min": 3.5,
+      "completeness_min": 3.5,
+      "organization_min": 3.0
+    }
+  },
+  {
+    "case_id": "e12",
+    "task_type": "review",
+    "holdout": false,
+    "turns": ["帮我写一篇关于图卷积神经网络（GCN）的综述，包括基本原理、主要方法、应用案例和未来方向"],
+    "timeout_s": 2400,
+    "assertions": {
+      "expect_tools_completed": ["search_papers", "generate_review"],
+      "min_papers": 8,
+      "expect_evaluation_count_min": 1,
+      "citation_valid_rate_min": 1.0,
+      "expect_final_answer": true,
+      "expect_review_artifact": true,
+      "review_word_count_min": 1500
+    },
+    "judge_brief": "用户需求要点：①需要一篇系统的 GCN 综述；②应涵盖基本原理、方法体系、应用案例；③期望论述清晰、引用充分。综述应覆盖该领域的主要发展脉络",
+    "judge": {
+      "relevance_min": 3.5,
+      "faithfulness_min": 3.5,
+      "completeness_min": 3.5,
+      "organization_min": 3.0
+    }
+  },
+  {
+    "case_id": "e13",
+    "task_type": "review",
+    "holdout": true,
+    "turns": ["为我综述一下 Transformer 架构的演进和应用，要求包括核心设计理念、变体方法、以及不同领域的应用现状"],
+    "timeout_s": 2400,
+    "assertions": {
+      "expect_tools_completed": ["search_papers", "generate_review"],
+      "min_papers": 8,
+      "expect_evaluation_count_min": 1,
+      "citation_valid_rate_min": 1.0,
+      "expect_final_answer": true,
+      "expect_review_artifact": true,
+      "review_word_count_min": 1500
+    },
+    "judge_brief": "用户需求要点：①需要全面覆盖 Transformer 的演进历程；②应介绍重要的变体方法；③需要涵盖多领域应用。考察对 Transformer 生态系统的深度理解和综述撰写质量",
+    "judge": {
+      "relevance_min": 3.5,
+      "faithfulness_min": 3.5,
+      "completeness_min": 3.5,
+      "organization_min": 3.0
+    }
+  },
+  {
+    "case_id": "e14",
+    "task_type": "boundary",
+    "holdout": false,
+    "turns": ["帮我看看最近 AI 有什么新东西"],
+    "timeout_s": 900,
+    "assertions": {
+      "expect_final_answer": true
+    },
+    "judge_brief": "用户需求要点：①极模糊的需求描述；②需要 Paper-Agent 理解并做出合理回应；③评估系统的鲁棒性和优雅处理能力。重点是无崩溃和合理的解释",
+    "judge": {
+      "organization_min": 3.0
+    }
+  }
+]

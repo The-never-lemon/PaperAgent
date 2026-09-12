@@ -1,0 +1,341 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "case_id": "r01",
+      "domain": "llm_inference",
+      "difficulty": "broad",
+      "topic": "大型语言模型推理优化与加速方法",
+      "concept_groups": [["LLM inference", "language model inference"], ["optimization", "acceleration"]],
+      "limit": 10,
+      "year_from": null,
+      "min_sources_expected": 2,
+      "golden_papers": [
+        {"arxiv_id": "2405.12981", "doi": null, "title_hint": "SnapKV"}
+      ],
+      "expand_seed_index": 0
+    },
+    {
+      "case_id": "r02",
+      "domain": "llm_inference",
+      "difficulty": "narrow",
+      "topic": "KV 缓存压缩与稀疏化策略",
+      "concept_groups": [["KV cache", "key-value cache"], ["compression", "sparsity"]],
+      "limit": 10,
+      "year_from": null,
+      "min_sources_expected": 2,
+      "golden_papers": [
+        {"arxiv_id": "2407.11066", "doi": null, "title_hint": "QKeyValue"}
+      ],
+      "expand_seed_index": 0
+    },
+    {
+      "case_id": "r03",
+      "domain": "llm_inference",
+      "difficulty": "temporal",
+      "topic": "最新的 Transformer 推理优化技术（2024 年以后）",
+      "concept_groups": [["Transformer inference", "LLM inference"], ["optimization"]],
+      "limit": 10,
+      "year_from": 2024,
+      "min_sources_expected": 2,
+      "golden_papers": [
+        {"arxiv_id": "2405.12981", "doi": null, "title_hint": "SnapKV"}
+      ],
+      "expand_seed_index": 0
+    },
+    {
+      "case_id": "r04",
+      "domain": "llm_inference",
+      "difficulty": "hard",
+      "topic": "多模态 LLM 推理中的 KV 缓存优化",
+      "concept_groups": [["multimodal LLM", "vision language model"], ["KV cache", "inference optimization"]],
+      "limit": 10,
+      "year_from": null,
+      "min_sources_expected": 2,
+      "golden_papers": [
+        {"arxiv_id": "2405.12981", "doi": null, "title_hint": "SnapKV"}
+      ],
+      "expand_seed_index": 0
+    },
+    {
+      "case_id": "r05",
+      "domain": "multi_agent",
+      "difficulty": "broad",
+      "topic": "多智能体协作系统设计与实现",
+      "concept_groups": [["multi-agent", "cooperative agents"], ["collaboration", "coordination"]],
+      "limit": 10,
+      "year_from": null,
+      "min_sources_expected": 2,
+      "golden_papers": [
+        {"arxiv_id": "2309.10025", "doi": null, "title_hint": "Agents"}
+      ],
+      "expand_seed_index": 0
+    },
+    {
+      "case_id": "r06",
+      "domain": "multi_agent",
+      "difficulty": "narrow",
+      "topic": "多智能体规划与路径协调算法",
+      "concept_groups": [["multi-agent planning", "path planning"], ["coordination", "collision avoidance"]],
+      "limit": 10,
+      "year_from": null,
+      "min_sources_expected": 2,
+      "golden_papers": [
+        {"arxiv_id": "1805.03677", "doi": null, "title_hint": "PRIMAL"}
+      ],
+      "expand_seed_index": 0
+    },
+    {
+      "case_id": "r07",
+      "domain": "multi_agent",
+      "difficulty": "temporal",
+      "topic": "2024 年新兴的智能体框架与协作范式",
+      "concept_groups": [["agent framework", "LLM agent"], ["multi-agent cooperation"]],
+      "limit": 10,
+      "year_from": 2024,
+      "min_sources_expected": 2,
+      "golden_papers": [
+        {"arxiv_id": "2401.02727", "doi": null, "title_hint": "Metatranslator"}
+      ],
+      "expand_seed_index": 0
+    },
+    {
+      "case_id": "r08",
+      "domain": "multi_agent",
+      "difficulty": "hard",
+      "topic": "大规模异构多智能体系统中的信息融合与一致性算法",
+      "concept_groups": [["multi-agent", "heterogeneous agents"], ["consensus", "information fusion"]],
+      "limit": 10,
+      "year_from": null,
+      "min_sources_expected": 2,
+      "golden_papers": [
+        {"arxiv_id": "1805.03677", "doi": null, "title_hint": "PRIMAL"}
+      ],
+      "expand_seed_index": 0
+    },
+    {
+      "case_id": "r09",
+      "domain": "rag",
+      "difficulty": "broad",
+      "topic": "检索增强生成（RAG）系统设计与优化",
+      "concept_groups": [["retrieval augmented generation", "RAG"], ["information retrieval", "generation"]],
+      "limit": 10,
+      "year_from": null,
+      "min_sources_expected": 2,
+      "golden_papers": [
+        {"arxiv_id": "2005.11401", "doi": null, "title_hint": "Retrieval-Augmented Generation"}
+      ],
+      "expand_seed_index": 0
+    },
+    {
+      "case_id": "r10",
+      "domain": "rag",
+      "difficulty": "narrow",
+      "topic": "密集检索与混合检索在 RAG 中的应用",
+      "concept_groups": [["dense retrieval", "BM25"], ["RAG", "hybrid search"]],
+      "limit": 10,
+      "year_from": null,
+      "min_sources_expected": 2,
+      "golden_papers": [
+        {"arxiv_id": "2308.01545", "doi": null, "title_hint": "Hybrid Search"}
+      ],
+      "expand_seed_index": 0
+    },
+    {
+      "case_id": "r11",
+      "domain": "rag",
+      "difficulty": "temporal",
+      "topic": "2024 年 RAG 最新进展：适应性检索与多步推理",
+      "concept_groups": [["RAG", "retrieval augmented generation"], ["adaptive retrieval"]],
+      "limit": 10,
+      "year_from": 2024,
+      "min_sources_expected": 2,
+      "golden_papers": [
+        {"arxiv_id": "2005.11401", "doi": null, "title_hint": "Retrieval-Augmented Generation"}
+      ],
+      "expand_seed_index": 0
+    },
+    {
+      "case_id": "r12",
+      "domain": "rag",
+      "difficulty": "hard",
+      "topic": "小样本学习场景下的检索器微调与知识库构建策略",
+      "concept_groups": [["RAG", "retrieval"], ["few-shot learning", "knowledge base"], ["fine-tuning"]],
+      "limit": 10,
+      "year_from": null,
+      "min_sources_expected": 2,
+      "golden_papers": [
+        {"arxiv_id": "2005.11401", "doi": null, "title_hint": "Retrieval-Augmented Generation"}
+      ],
+      "expand_seed_index": 0
+    },
+    {
+      "case_id": "r13",
+      "domain": "medical_imaging",
+      "difficulty": "broad",
+      "topic": "医学影像分析与深度学习应用",
+      "concept_groups": [["medical imaging", "medical image"], ["deep learning", "CNN"]],
+      "limit": 10,
+      "year_from": null,
+      "min_sources_expected": 2,
+      "golden_papers": [
+        {"arxiv_id": "1512.03385", "doi": null, "title_hint": "ResNet"}
+      ],
+      "expand_seed_index": 0
+    },
+    {
+      "case_id": "r14",
+      "domain": "medical_imaging",
+      "difficulty": "narrow",
+      "topic": "CT 与 MRI 图像分割中的U-Net与变体网络",
+      "concept_groups": [["segmentation", "U-Net"], ["CT", "MRI"], ["medical image"]],
+      "limit": 10,
+      "year_from": null,
+      "min_sources_expected": 2,
+      "golden_papers": [
+        {"arxiv_id": "1505.04597", "doi": null, "title_hint": "U-Net"}
+      ],
+      "expand_seed_index": 0
+    },
+    {
+      "case_id": "r15",
+      "domain": "medical_imaging",
+      "difficulty": "temporal",
+      "topic": "2024 年医学影像中的多模态融合与 Transformer 应用",
+      "concept_groups": [["medical imaging", "multimodal fusion"], ["Transformer", "vision transformer"]],
+      "limit": 10,
+      "year_from": 2024,
+      "min_sources_expected": 2,
+      "golden_papers": [
+        {"arxiv_id": "2010.11929", "doi": null, "title_hint": "Vision Transformer"}
+      ],
+      "expand_seed_index": 0
+    },
+    {
+      "case_id": "r16",
+      "domain": "medical_imaging",
+      "difficulty": "hard",
+      "topic": "小数据集上的医学影像诊断模型：迁移学习与自监督方法",
+      "concept_groups": [["medical imaging", "diagnosis"], ["few-shot", "transfer learning"], ["self-supervised learning"]],
+      "limit": 10,
+      "year_from": null,
+      "min_sources_expected": 2,
+      "golden_papers": [
+        {"arxiv_id": "1512.03385", "doi": null, "title_hint": "ResNet"}
+      ],
+      "expand_seed_index": 0
+    },
+    {
+      "case_id": "r17",
+      "domain": "rlhf_alignment",
+      "difficulty": "broad",
+      "topic": "强化学习人类反馈（RLHF）与大模型对齐",
+      "concept_groups": [["RLHF", "reinforcement learning from human feedback"], ["model alignment", "instruction tuning"]],
+      "limit": 10,
+      "year_from": null,
+      "min_sources_expected": 2,
+      "golden_papers": [
+        {"arxiv_id": "2203.02155", "doi": null, "title_hint": "ChatGPT RLHF"}
+      ],
+      "expand_seed_index": 0
+    },
+    {
+      "case_id": "r18",
+      "domain": "rlhf_alignment",
+      "difficulty": "narrow",
+      "topic": "奖励模型设计与偏好学习中的分布外泛化问题",
+      "concept_groups": [["reward model", "preference learning"], ["out-of-distribution", "generalization"]],
+      "limit": 10,
+      "year_from": null,
+      "min_sources_expected": 2,
+      "golden_papers": [
+        {"arxiv_id": "2203.02155", "doi": null, "title_hint": "ChatGPT RLHF"}
+      ],
+      "expand_seed_index": 0
+    },
+    {
+      "case_id": "r19",
+      "domain": "rlhf_alignment",
+      "difficulty": "temporal",
+      "topic": "2024 年对齐技术新进展：DPO、IPO 等无奖励模型方法",
+      "concept_groups": [["alignment", "DPO"], ["direct preference optimization", "reward model"]],
+      "limit": 10,
+      "year_from": 2024,
+      "min_sources_expected": 2,
+      "golden_papers": [
+        {"arxiv_id": "2305.18290", "doi": null, "title_hint": "DPO"}
+      ],
+      "expand_seed_index": 0
+    },
+    {
+      "case_id": "r20",
+      "domain": "rlhf_alignment",
+      "difficulty": "hard",
+      "topic": "多语言与跨文化环境中的模型对齐与价值观一致性",
+      "concept_groups": [["alignment", "multilingual"], ["cross-cultural", "values"], ["RLHF"]],
+      "limit": 10,
+      "year_from": null,
+      "min_sources_expected": 2,
+      "golden_papers": [
+        {"arxiv_id": "2203.02155", "doi": null, "title_hint": "ChatGPT RLHF"}
+      ],
+      "expand_seed_index": 0
+    },
+    {
+      "case_id": "r21",
+      "domain": "edge_deploy",
+      "difficulty": "broad",
+      "topic": "神经网络模型在边缘设备上的部署与优化",
+      "concept_groups": [["edge deployment", "edge computing"], ["model optimization", "quantization"]],
+      "limit": 10,
+      "year_from": null,
+      "min_sources_expected": 2,
+      "golden_papers": [
+        {"arxiv_id": "1910.02745", "doi": null, "title_hint": "MobileNetV3"}
+      ],
+      "expand_seed_index": 0
+    },
+    {
+      "case_id": "r22",
+      "domain": "edge_deploy",
+      "difficulty": "narrow",
+      "topic": "INT8 量化与知识蒸馏在移动端的实践应用",
+      "concept_groups": [["quantization", "INT8"], ["knowledge distillation"], ["mobile", "edge"]],
+      "limit": 10,
+      "year_from": null,
+      "min_sources_expected": 2,
+      "golden_papers": [
+        {"arxiv_id": "1910.02745", "doi": null, "title_hint": "MobileNetV3"}
+      ],
+      "expand_seed_index": 0
+    },
+    {
+      "case_id": "r23",
+      "domain": "edge_deploy",
+      "difficulty": "temporal",
+      "topic": "2024 年边缘 AI 的新方向：联邦学习与隐私保护",
+      "concept_groups": [["edge deployment", "federated learning"], ["privacy", "distributed learning"]],
+      "limit": 10,
+      "year_from": 2024,
+      "min_sources_expected": 2,
+      "golden_papers": [
+        {"arxiv_id": "1602.05629", "doi": null, "title_hint": "MobileNet"}
+      ],
+      "expand_seed_index": 0
+    },
+    {
+      "case_id": "r24",
+      "domain": "edge_deploy",
+      "difficulty": "hard",
+      "topic": "异构边缘环境中的动态模型选择与自适应推理",
+      "concept_groups": [["edge", "heterogeneous"], ["adaptive inference", "dynamic"], ["model selection"]],
+      "limit": 10,
+      "year_from": null,
+      "min_sources_expected": 2,
+      "golden_papers": [
+        {"arxiv_id": "1910.02745", "doi": null, "title_hint": "MobileNetV3"}
+      ],
+      "expand_seed_index": 0
+    }
+  ]
+}

@@ -1,0 +1,786 @@
+{
+  "schema_version": 1,
+  "instructions": "人工标注说明（必读）\n\n【评分标准】\n针对每条 case，按论文与研究主题的相关性给 human_score 填入整数 0/1/2：\n\n0 分：论文与主题完全无关，或仅因为关键词出现而看起来相关（\"碰瓷\"）\n- 例如：研究主题是\"LLM 推理加速\"，但论文是\"医学影像诊断\"\n\n1 分：论文涉及同一大领域或相邻问题，可作为背景知识参考\n- 例如：研究主题是\"KV cache 压缩\"，但论文是\"Transformer 一般性优化\"\n\n2 分：论文直接解决或贡献于研究主题，且涉及至少一个概念组的核心工作\n- 例如：研究主题是\"KV cache 压缩\"，论文直接提出了 KV cache 压缩方法\n\n【特别提示】\n- 对标记为 boundary_sample=true 的论文特别关注：这些是\"1分还是2分两可\"的边界案例，需要仔细判断\n- 每条 case 的 concept_groups 是关键判断依据：论文必须涉及至少一个概念组的核心工作才能评 2 分\n\n【完成后】\n标注所有 human_score 后，运行以下命令进行校准分析：\n  python -c \"from eval.lib.judge import run_calibration; import asyncio; import json; calib = json.load(open('eval/datasets/judge_calibration.json')); print(asyncio.run(run_calibration(..., calibration_cases=calib['cases'])))\"\n",
+  "cases": [
+    {
+      "case_id": "c01",
+      "topic": "KV cache compression long-context LLM serving inference optimization",
+      "concept_groups": [
+        [
+          "KV cache",
+          "key-value cache"
+        ],
+        [
+          "long context",
+          "长上下文"
+        ],
+        [
+          "inference",
+          "推理"
+        ]
+      ],
+      "paper": {
+        "title": "DuoAttention: Efficient Long-Context LLM Inference with Retrieval and Streaming Heads",
+        "abstract": "Deploying long-context large language models (LLMs) is essential but poses significant computational and memory challenges. Caching all Key and Value (KV) states across all attention heads consumes substantial memory. Existing KV cache pruning methods either damage the long-context capabilities of LLMs or offer only limited efficiency improvements. In this paper, we identify that only a fraction of attention heads, a.k.a, Retrieval Heads, are critical for processing long contexts and require full attention across all tokens. In contrast, all other heads, which primarily focus on recent tokens and attention sinks--referred to as Streaming Heads--do not require full attention. Based on this insight, we introduce DuoAttention, a framework that only applies a full KV cache to retrieval heads w",
+        "year": 2024,
+        "venue": "International Conference on Learning Representations"
+      },
+      "human_score": null,
+      "boundary_sample": false
+    },
+    {
+      "case_id": "c02",
+      "topic": "KV cache compression long-context LLM serving inference optimization",
+      "concept_groups": [
+        [
+          "KV cache",
+          "key-value cache"
+        ],
+        [
+          "long context",
+          "长上下文"
+        ],
+        [
+          "inference",
+          "推理"
+        ]
+      ],
+      "paper": {
+        "title": "When Attention Sink Emerges in Language Models: An Empirical View",
+        "abstract": "Language Models (LMs) assign significant attention to the first token, even if it is not semantically important, which is known as attention sink. This phenomenon has been widely adopted in applications such as streaming/long context generation, KV cache optimization, inference acceleration, model quantization, and others. Despite its widespread use, a deep understanding of attention sink in LMs is still lacking. In this work, we first demonstrate that attention sinks exist universally in LMs with various inputs, even in small models. Furthermore, attention sink is observed to emerge during the LM pre-training, motivating us to investigate how optimization, data distribution, loss function, and model architecture in LM pre-training influence its emergence. We highlight that attention sink ",
+        "year": 2024,
+        "venue": "International Conference on Learning Representations"
+      },
+      "human_score": null,
+      "boundary_sample": false
+    },
+    {
+      "case_id": "c03",
+      "topic": "KV cache compression long-context LLM serving inference optimization",
+      "concept_groups": [
+        [
+          "KV cache",
+          "key-value cache"
+        ],
+        [
+          "long context",
+          "长上下文"
+        ],
+        [
+          "inference",
+          "推理"
+        ]
+      ],
+      "paper": {
+        "title": "MiniCache: KV Cache Compression in Depth Dimension for Large Language Models",
+        "abstract": "A critical approach for efficiently deploying computationally demanding large language models (LLMs) is Key-Value (KV) caching. The KV cache stores key-value states of previously generated tokens, significantly reducing the need for repetitive computations and thereby lowering latency in autoregressive generation. However, the size of the KV cache grows linearly with sequence length, posing challenges for applications requiring long context input and extensive sequence generation. In this paper, we present a simple yet effective approach, called MiniCache, to compress the KV cache across layers from a novel depth perspective, significantly reducing the memory footprint for LLM inference. Our approach is based on the observation that KV cache states exhibit high similarity between the adjac",
+        "year": 2024,
+        "venue": "Neural Information Processing Systems"
+      },
+      "human_score": null,
+      "boundary_sample": false
+    },
+    {
+      "case_id": "c04",
+      "topic": "KV cache compression long-context LLM serving inference optimization",
+      "concept_groups": [
+        [
+          "KV cache",
+          "key-value cache"
+        ],
+        [
+          "long context",
+          "长上下文"
+        ],
+        [
+          "inference",
+          "推理"
+        ]
+      ],
+      "paper": {
+        "title": "PQCache: Product Quantization-based KVCache for Long Context LLM Inference",
+        "abstract": "As the field of Large Language Models (LLMs) continues to evolve, the context length in inference is steadily growing. Key-Value Cache (KVCache), the intermediate representations of tokens within LLM inference, has now become the primary memory bottleneck due to limited GPU memory. Current methods selectively determine suitable keys and values for self-attention computation in LLMs to address the issue. However, they either fall short in maintaining model quality or result in high serving latency. Drawing inspiration from advanced embedding retrieval techniques prevalent in the data management community, we consider the storage and retrieval of KVCache as a typical embedding retrieval problem. We propose PQCache, which employs Product Quantization (PQ) to manage KVCache, maintaining model ",
+        "year": 2024,
+        "venue": "Proc. ACM Manag. Data"
+      },
+      "human_score": null,
+      "boundary_sample": true
+    },
+    {
+      "case_id": "c05",
+      "topic": "KV cache compression long-context LLM serving inference optimization",
+      "concept_groups": [
+        [
+          "KV cache",
+          "key-value cache"
+        ],
+        [
+          "long context",
+          "长上下文"
+        ],
+        [
+          "inference",
+          "推理"
+        ]
+      ],
+      "paper": {
+        "title": "LOOK-M: Look-Once Optimization in KV Cache for Efficient Multimodal Long-Context Inference",
+        "abstract": "Long-context Multimodal Large Language Models (MLLMs) demand substantial computational resources for inference as the growth of their multimodal Key-Value (KV) cache, in response to increasing input lengths, challenges memory and time efficiency. Unlike single-modality LLMs that manage only textual contexts, the KV cache of long-context MLLMs includes representations from multiple images with temporal and spatial relationships and related textual contexts. The predominance of image tokens means traditional optimizations for LLMs' KV caches are unsuitable for multimodal long-context settings, and no prior works have addressed this challenge. In this work, we introduce LOOK-M, a pioneering, fine-tuning-free approach that efficiently reduces the multimodal KV cache size while maintaining perf",
+        "year": 2024,
+        "venue": "Conference on Empirical Methods in Natural Language Processing"
+      },
+      "human_score": null,
+      "boundary_sample": false
+    },
+    {
+      "case_id": "c06",
+      "topic": "multi-agent collaboration cooperative language models agent orchestration",
+      "concept_groups": [
+        [
+          "multi-agent",
+          "multi agent"
+        ],
+        [
+          "collaboration",
+          "cooperative"
+        ],
+        [
+          "language models",
+          "LLM"
+        ]
+      ],
+      "paper": {
+        "title": "MetaGPT: Meta Programming for Multi-Agent Collaborative Framework",
+        "abstract": "Recently, remarkable progress has been made in automated task-solving through the use of multi-agent driven by large language models (LLMs). However, existing LLM-based multi-agent works primarily focus on solving simple dialogue tasks, and complex tasks are rarely studied, mainly due to the LLM hallucination problem. This type of hallucination becomes cascading when naively chaining multiple intelligent agents, resulting in a failure to effectively address complex problems. Therefore, we introduce MetaGPT, an innovative framework that incorporates efficient human workflows as a meta programming approach into LLM-based multi-agent collaboration. Specifically, MetaGPT encodes Standardized Operating Procedures (SOPs) into prompts to enhance structured coordination. Subsequently, it mandates ",
+        "year": 2023,
+        "venue": "arXiv.org"
+      },
+      "human_score": null,
+      "boundary_sample": false
+    },
+    {
+      "case_id": "c07",
+      "topic": "multi-agent collaboration cooperative language models agent orchestration",
+      "concept_groups": [
+        [
+          "multi-agent",
+          "multi agent"
+        ],
+        [
+          "collaboration",
+          "cooperative"
+        ],
+        [
+          "language models",
+          "LLM"
+        ]
+      ],
+      "paper": {
+        "title": "CAMEL: Communicative Agents for \"Mind\" Exploration of Large Language Model Society",
+        "abstract": "The rapid advancement of chat-based language models has led to remarkable progress in complex task-solving. However, their success heavily relies on human input to guide the conversation, which can be challenging and time-consuming. This paper explores the potential of building scalable techniques to facilitate autonomous cooperation among communicative agents, and provides insight into their\"cognitive\"processes. To address the challenges of achieving autonomous cooperation, we propose a novel communicative agent framework named role-playing. Our approach involves using inception prompting to guide chat agents toward task completion while maintaining consistency with human intentions. We showcase how role-playing can be used to generate conversational data for studying the behaviors and ca",
+        "year": 2023,
+        "venue": "Neural Information Processing Systems"
+      },
+      "human_score": null,
+      "boundary_sample": false
+    },
+    {
+      "case_id": "c08",
+      "topic": "multi-agent collaboration cooperative language models agent orchestration",
+      "concept_groups": [
+        [
+          "multi-agent",
+          "multi agent"
+        ],
+        [
+          "collaboration",
+          "cooperative"
+        ],
+        [
+          "language models",
+          "LLM"
+        ]
+      ],
+      "paper": {
+        "title": "ChatDev: Communicative Agents for Software Development",
+        "abstract": "Software development is a complex task that necessitates cooperation among multiple members with diverse skills. Numerous studies used deep learning to improve specific phases in a waterfall model, such as design, coding, and testing. However, the deep learning model in each phase requires unique designs, leading to technical inconsistencies across various phases, which results in a fragmented and ineffective development process. In this paper, we introduce ChatDev, a chat-powered software development framework in which specialized agents driven by large language models (LLMs) are guided in what to communicate (via chat chain) and how to communicate (via communicative dehallucination). These agents actively contribute to the design, coding, and testing phases through unified language-based",
+        "year": 2023,
+        "venue": "Annual Meeting of the Association for Computational Linguistics"
+      },
+      "human_score": null,
+      "boundary_sample": false
+    },
+    {
+      "case_id": "c09",
+      "topic": "multi-agent collaboration cooperative language models agent orchestration",
+      "concept_groups": [
+        [
+          "multi-agent",
+          "multi agent"
+        ],
+        [
+          "collaboration",
+          "cooperative"
+        ],
+        [
+          "language models",
+          "LLM"
+        ]
+      ],
+      "paper": {
+        "title": "AgentVerse: Facilitating Multi-Agent Collaboration and Exploring Emergent Behaviors in Agents",
+        "abstract": "Autonomous agents empowered by Large Language Models (LLMs) have undergone significant improvements, enabling them to generalize across a broad spectrum of tasks. However, in real-world scenarios, cooperation among individuals is often required to enhance the efficiency and effectiveness of task accomplishment. Hence, inspired by human group dynamics, we propose a multi-agent framework \\framework that can collaboratively and dynamically adjust its composition as a greater-than-the-sum-of-its-parts system. Our experiments demonstrate that \\framework framework can effectively deploy multi-agent groups that outperform a single agent. Furthermore, we delve into the emergence of social behaviors among individual agents within a group during collaborative task accomplishment. In view of these be",
+        "year": 2023,
+        "venue": "International Conference on Learning Representations"
+      },
+      "human_score": null,
+      "boundary_sample": true
+    },
+    {
+      "case_id": "c10",
+      "topic": "multi-agent collaboration cooperative language models agent orchestration",
+      "concept_groups": [
+        [
+          "multi-agent",
+          "multi agent"
+        ],
+        [
+          "collaboration",
+          "cooperative"
+        ],
+        [
+          "language models",
+          "LLM"
+        ]
+      ],
+      "paper": {
+        "title": "Multi-Agent Collaboration Mechanisms: A Survey of LLMs",
+        "abstract": "With recent advances in Large Language Models (LLMs), Agentic AI has become phenomenal in real-world applications, moving toward multiple LLM-based agents to perceive, learn, reason, and act collaboratively. These LLM-based Multi-Agent Systems (MASs) enable groups of intelligent agents to coordinate and solve complex tasks collectively at scale, transitioning from isolated models to collaboration-centric approaches. This work provides an extensive survey of the collaborative aspect of MASs and introduces an extensible framework to guide future research. Our framework characterizes collaboration mechanisms based on key dimensions: actors (agents involved), types (e.g., cooperation, competition, or coopetition), structures (e.g., peer-to-peer, centralized, or distributed), strategies (e.g., ",
+        "year": 2025,
+        "venue": "arXiv.org"
+      },
+      "human_score": null,
+      "boundary_sample": false
+    },
+    {
+      "case_id": "c11",
+      "topic": "retrieval augmented generation RAG knowledge document",
+      "concept_groups": [
+        [
+          "retrieval",
+          "search"
+        ],
+        [
+          "augmented generation",
+          "knowledge"
+        ],
+        [
+          "document",
+          "index"
+        ]
+      ],
+      "paper": {
+        "title": "Graph Retrieval-Augmented Generation: A Survey",
+        "abstract": "Recently, Retrieval-Augmented Generation (RAG) has achieved remarkable success in addressing the challenges of Large Language Models (LLMs) without necessitating retraining. By referencing an external knowledge base, RAG refines LLM outputs, effectively mitigating issues such as “hallucination,” lack of domain-specific knowledge, and outdated information. However, the complex structure of relationships among different entities in databases presents challenges for RAG systems. In response, GraphRAG leverages structural information across entities to enable more precise and comprehensive retrieval, capturing relational knowledge and facilitating more accurate, context-aware responses. Given the novelty and potential of GraphRAG, a systematic review of current technologies is imperative. This",
+        "year": 2024,
+        "venue": "ACM Trans. Inf. Syst."
+      },
+      "human_score": null,
+      "boundary_sample": false
+    },
+    {
+      "case_id": "c12",
+      "topic": "retrieval augmented generation RAG knowledge document",
+      "concept_groups": [
+        [
+          "retrieval",
+          "search"
+        ],
+        [
+          "augmented generation",
+          "knowledge"
+        ],
+        [
+          "document",
+          "index"
+        ]
+      ],
+      "paper": {
+        "title": "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks",
+        "abstract": "Large pre-trained language models have been shown to store factual knowledge in their parameters, and achieve state-of-the-art results when fine-tuned on downstream NLP tasks. However, their ability to access and precisely manipulate knowledge is still limited, and hence on knowledge-intensive tasks, their performance lags behind task-specific architectures. Additionally, providing provenance for their decisions and updating their world knowledge remain open research problems. Pre-trained models with a differentiable access mechanism to explicit non-parametric memory can overcome this issue, but have so far been only investigated for extractive downstream tasks. We explore a general-purpose fine-tuning recipe for retrieval-augmented generation (RAG) -- models which combine pre-trained para",
+        "year": 2020,
+        "venue": "Neural Information Processing Systems"
+      },
+      "human_score": null,
+      "boundary_sample": false
+    },
+    {
+      "case_id": "c13",
+      "topic": "retrieval augmented generation RAG knowledge document",
+      "concept_groups": [
+        [
+          "retrieval",
+          "search"
+        ],
+        [
+          "augmented generation",
+          "knowledge"
+        ],
+        [
+          "document",
+          "index"
+        ]
+      ],
+      "paper": {
+        "title": "REALM: Retrieval-Augmented Language Model Pre-Training",
+        "abstract": "Language model pre-training has been shown to capture a surprising amount of world knowledge, crucial for NLP tasks such as question answering. However, this knowledge is stored implicitly in the parameters of a neural network, requiring ever-larger networks to cover more facts. \nTo capture knowledge in a more modular and interpretable way, we augment language model pre-training with a latent knowledge retriever, which allows the model to retrieve and attend over documents from a large corpus such as Wikipedia, used during pre-training, fine-tuning and inference. For the first time, we show how to pre-train such a knowledge retriever in an unsupervised manner, using masked language modeling as the learning signal and backpropagating through a retrieval step that considers millions of docum",
+        "year": 2020,
+        "venue": "International Conference on Machine Learning"
+      },
+      "human_score": null,
+      "boundary_sample": false
+    },
+    {
+      "case_id": "c14",
+      "topic": "retrieval augmented generation RAG knowledge document",
+      "concept_groups": [
+        [
+          "retrieval",
+          "search"
+        ],
+        [
+          "augmented generation",
+          "knowledge"
+        ],
+        [
+          "document",
+          "index"
+        ]
+      ],
+      "paper": {
+        "title": "From Local to Global: A Graph RAG Approach to Query-Focused Summarization",
+        "abstract": "The use of retrieval-augmented generation (RAG) to retrieve relevant information from an external knowledge source enables large language models (LLMs) to answer questions over private and/or previously unseen document collections. However, RAG fails on global questions directed at an entire text corpus, such as\"What are the main themes in the dataset?\", since this is inherently a query-focused summarization (QFS) task, rather than an explicit retrieval task. Prior QFS methods, meanwhile, do not scale to the quantities of text indexed by typical RAG systems. To combine the strengths of these contrasting methods, we propose GraphRAG, a graph-based approach to question answering over private text corpora that scales with both the generality of user questions and the quantity of source text. ",
+        "year": 2024,
+        "venue": "arXiv.org"
+      },
+      "human_score": null,
+      "boundary_sample": true
+    },
+    {
+      "case_id": "c15",
+      "topic": "retrieval augmented generation RAG knowledge document",
+      "concept_groups": [
+        [
+          "retrieval",
+          "search"
+        ],
+        [
+          "augmented generation",
+          "knowledge"
+        ],
+        [
+          "document",
+          "index"
+        ]
+      ],
+      "paper": {
+        "title": "Improving language models by retrieving from trillions of tokens",
+        "abstract": "We enhance auto-regressive language models by conditioning on document chunks retrieved from a large corpus, based on local similarity with preceding tokens. With a $2$ trillion token database, our Retrieval-Enhanced Transformer (RETRO) obtains comparable performance to GPT-3 and Jurassic-1 on the Pile, despite using 25$\\times$ fewer parameters. After fine-tuning, RETRO performance translates to downstream knowledge-intensive tasks such as question answering. RETRO combines a frozen Bert retriever, a differentiable encoder and a chunked cross-attention mechanism to predict tokens based on an order of magnitude more data than what is typically consumed during training. We typically train RETRO from scratch, yet can also rapidly RETROfit pre-trained transformers with retrieval and still achi",
+        "year": 2021,
+        "venue": "International Conference on Machine Learning"
+      },
+      "human_score": null,
+      "boundary_sample": false
+    },
+    {
+      "case_id": "c16",
+      "topic": "medical image segmentation diagnosis CT MRI",
+      "concept_groups": [
+        [
+          "medical",
+          "healthcare"
+        ],
+        [
+          "image",
+          "imaging"
+        ],
+        [
+          "segmentation",
+          "diagnosis"
+        ]
+      ],
+      "paper": {
+        "title": "nnU-Net: a self-configuring method for deep learning-based biomedical image segmentation",
+        "abstract": "",
+        "year": 2020,
+        "venue": "Nature Methods"
+      },
+      "human_score": null,
+      "boundary_sample": false
+    },
+    {
+      "case_id": "c17",
+      "topic": "medical image segmentation diagnosis CT MRI",
+      "concept_groups": [
+        [
+          "medical",
+          "healthcare"
+        ],
+        [
+          "image",
+          "imaging"
+        ],
+        [
+          "segmentation",
+          "diagnosis"
+        ]
+      ],
+      "paper": {
+        "title": "TransUNet: Transformers Make Strong Encoders for Medical Image Segmentation",
+        "abstract": "Medical image segmentation is an essential prerequisite for developing healthcare systems, especially for disease diagnosis and treatment planning. On various medical image segmentation tasks, the u-shaped architecture, also known as U-Net, has become the de-facto standard and achieved tremendous success. However, due to the intrinsic locality of convolution operations, U-Net generally demonstrates limitations in explicitly modeling long-range dependency. Transformers, designed for sequence-to-sequence prediction, have emerged as alternative architectures with innate global self-attention mechanisms, but can result in limited localization abilities due to insufficient low-level details. In this paper, we propose TransUNet, which merits both Transformers and U-Net, as a strong alternative f",
+        "year": 2021,
+        "venue": "arXiv.org"
+      },
+      "human_score": null,
+      "boundary_sample": false
+    },
+    {
+      "case_id": "c18",
+      "topic": "medical image segmentation diagnosis CT MRI",
+      "concept_groups": [
+        [
+          "medical",
+          "healthcare"
+        ],
+        [
+          "image",
+          "imaging"
+        ],
+        [
+          "segmentation",
+          "diagnosis"
+        ]
+      ],
+      "paper": {
+        "title": "Swin-Unet: Unet-like Pure Transformer for Medical Image Segmentation",
+        "abstract": "In the past few years, convolutional neural networks (CNNs) have achieved milestones in medical image analysis. Especially, the deep neural networks based on U-shaped architecture and skip-connections have been widely applied in a variety of medical image tasks. However, although CNN has achieved excellent performance, it cannot learn global and long-range semantic information interaction well due to the locality of the convolution operation. In this paper, we propose Swin-Unet, which is an Unet-like pure Transformer for medical image segmentation. The tokenized image patches are fed into the Transformer-based U-shaped Encoder-Decoder architecture with skip-connections for local-global semantic feature learning. Specifically, we use hierarchical Swin Transformer with shifted windows as the",
+        "year": 2021,
+        "venue": "ECCV Workshops"
+      },
+      "human_score": null,
+      "boundary_sample": false
+    },
+    {
+      "case_id": "c19",
+      "topic": "medical image segmentation diagnosis CT MRI",
+      "concept_groups": [
+        [
+          "medical",
+          "healthcare"
+        ],
+        [
+          "image",
+          "imaging"
+        ],
+        [
+          "segmentation",
+          "diagnosis"
+        ]
+      ],
+      "paper": {
+        "title": "Image Segmentation Using Deep Learning: A Survey",
+        "abstract": "Image segmentation is a key task in computer vision and image processing with important applications such as scene understanding, medical image analysis, robotic perception, video surveillance, augmented reality, and image compression, among others, and numerous segmentation algorithms are found in the literature. Against this backdrop, the broad success of deep learning (DL) has prompted the development of new image segmentation approaches leveraging DL models. We provide a comprehensive review of this recent literature, covering the spectrum of pioneering efforts in semantic and instance segmentation, including convolutional pixel-labeling networks, encoder-decoder architectures, multiscale and pyramid-based approaches, recurrent networks, visual attention models, and generative models i",
+        "year": 2020,
+        "venue": "IEEE Transactions on Pattern Analysis and Machine Intelligence"
+      },
+      "human_score": null,
+      "boundary_sample": true
+    },
+    {
+      "case_id": "c20",
+      "topic": "medical image segmentation diagnosis CT MRI",
+      "concept_groups": [
+        [
+          "medical",
+          "healthcare"
+        ],
+        [
+          "image",
+          "imaging"
+        ],
+        [
+          "segmentation",
+          "diagnosis"
+        ]
+      ],
+      "paper": {
+        "title": "UNETR: Transformers for 3D Medical Image Segmentation",
+        "abstract": "Fully Convolutional Neural Networks (FCNNs) with contracting and expanding paths have shown prominence for the majority of medical image segmentation applications since the past decade. In FCNNs, the encoder plays an integral role by learning both global and local features and contextual representations which can be utilized for semantic output prediction by the decoder. Despite their success, the locality of convolutional layers in FCNNs, limits the capability of learning long-range spatial dependencies. Inspired by the recent success of transformers for Natural Language Processing (NLP) in long-range sequence learning, we reformulate the task of volumetric (3D) medical image segmentation as a sequence-to-sequence prediction problem. We introduce a novel architecture, dubbed as UNEt TRans",
+        "year": 2021,
+        "venue": "IEEE Workshop/Winter Conference on Applications of Computer Vision"
+      },
+      "human_score": null,
+      "boundary_sample": false
+    },
+    {
+      "case_id": "c21",
+      "topic": "reinforcement learning human feedback alignment safety",
+      "concept_groups": [
+        [
+          "reinforcement learning",
+          "RLHF"
+        ],
+        [
+          "human feedback",
+          "feedback"
+        ],
+        [
+          "alignment",
+          "safety"
+        ]
+      ],
+      "paper": {
+        "title": "Training a Helpful and Harmless Assistant with Reinforcement Learning from Human Feedback",
+        "abstract": "We apply preference modeling and reinforcement learning from human feedback (RLHF) to ﬁnetune language models to act as helpful and harmless assistants. We ﬁnd this alignment training improves performance on almost all NLP evaluations, and is fully compatible with training for specialized skills such as python coding and summarization. We explore an iterated online mode of training, where preference models and RL policies are updated on a weekly cadence with fresh human feedback data, efﬁciently improving our datasets and models. Finally, we investigate the robustness of RLHF training, and identify a roughly linear relation between the RL reward and the square root of the KL divergence between the policy and its initialization. Alongside our main results, we perform peripheral analyses on ",
+        "year": 2022,
+        "venue": "arXiv.org"
+      },
+      "human_score": null,
+      "boundary_sample": false
+    },
+    {
+      "case_id": "c22",
+      "topic": "reinforcement learning human feedback alignment safety",
+      "concept_groups": [
+        [
+          "reinforcement learning",
+          "RLHF"
+        ],
+        [
+          "human feedback",
+          "feedback"
+        ],
+        [
+          "alignment",
+          "safety"
+        ]
+      ],
+      "paper": {
+        "title": "BeaverTails: Towards Improved Safety Alignment of LLM via a Human-Preference Dataset",
+        "abstract": "In this paper, we introduce the \\textsc{BeaverTails} dataset, aimed at fostering research on safety alignment in large language models (LLMs). This dataset uniquely separates annotations of helpfulness and harmlessness for question-answering pairs, thus offering distinct perspectives on these crucial attributes. In total, we have gathered safety meta-labels for 30,207 question-answer (QA) pairs and 30,144 pairs of expert comparison data for both the helpfulness and harmlessness metrics. In total, we have gathered safety meta-labels for 333,963 question-answer (QA) pairs and 361,903 pairs of expert comparison data for both the helpfulness and harmlessness metrics. We further showcase applications of BeaverTails in content moderation and reinforcement learning with human feedback (RLHF), emp",
+        "year": 2023,
+        "venue": "Neural Information Processing Systems"
+      },
+      "human_score": null,
+      "boundary_sample": false
+    },
+    {
+      "case_id": "c23",
+      "topic": "reinforcement learning human feedback alignment safety",
+      "concept_groups": [
+        [
+          "reinforcement learning",
+          "RLHF"
+        ],
+        [
+          "human feedback",
+          "feedback"
+        ],
+        [
+          "alignment",
+          "safety"
+        ]
+      ],
+      "paper": {
+        "title": "OpenAssistant Conversations - Democratizing Large Language Model Alignment",
+        "abstract": "Aligning large language models (LLMs) with human preferences has proven to drastically improve usability and has driven rapid adoption as demonstrated by ChatGPT. Alignment techniques such as supervised fine-tuning (SFT) and reinforcement learning from human feedback (RLHF) greatly reduce the required skill and domain knowledge to effectively harness the capabilities of LLMs, increasing their accessibility and utility across various domains. However, state-of-the-art alignment techniques like RLHF rely on high-quality human feedback data, which is expensive to create and often remains proprietary. In an effort to democratize research on large-scale alignment, we release OpenAssistant Conversations, a human-generated, human-annotated assistant-style conversation corpus consisting of 161,443",
+        "year": 2023,
+        "venue": "Neural Information Processing Systems"
+      },
+      "human_score": null,
+      "boundary_sample": false
+    },
+    {
+      "case_id": "c24",
+      "topic": "reinforcement learning human feedback alignment safety",
+      "concept_groups": [
+        [
+          "reinforcement learning",
+          "RLHF"
+        ],
+        [
+          "human feedback",
+          "feedback"
+        ],
+        [
+          "alignment",
+          "safety"
+        ]
+      ],
+      "paper": {
+        "title": "Aligning Large Multimodal Models with Factually Augmented RLHF",
+        "abstract": "Large Multimodal Models (LMM) are built across modalities and the misalignment between two modalities can result in\"hallucination\", generating textual outputs that are not grounded by the multimodal information in context. To address the multimodal misalignment issue, we adapt the Reinforcement Learning from Human Feedback (RLHF) from the text domain to the task of vision-language alignment, where human annotators are asked to compare two responses and pinpoint the more hallucinated one, and the vision-language model is trained to maximize the simulated human rewards. We propose a new alignment algorithm called Factually Augmented RLHF that augments the reward model with additional factual information such as image captions and ground-truth multi-choice options, which alleviates the reward",
+        "year": 2023,
+        "venue": "Annual Meeting of the Association for Computational Linguistics"
+      },
+      "human_score": null,
+      "boundary_sample": true
+    },
+    {
+      "case_id": "c25",
+      "topic": "reinforcement learning human feedback alignment safety",
+      "concept_groups": [
+        [
+          "reinforcement learning",
+          "RLHF"
+        ],
+        [
+          "human feedback",
+          "feedback"
+        ],
+        [
+          "alignment",
+          "safety"
+        ]
+      ],
+      "paper": {
+        "title": "RAFT: Reward rAnked FineTuning for Generative Foundation Model Alignment",
+        "abstract": "Generative foundation models are susceptible to implicit biases that can arise from extensive unsupervised training data. Such biases can produce suboptimal samples, skewed outcomes, and unfairness, with potentially serious consequences. Consequently, aligning these models with human ethics and preferences is an essential step toward ensuring their responsible and effective deployment in real-world applications. Prior research has primarily employed Reinforcement Learning from Human Feedback (RLHF) to address this problem, where generative models are fine-tuned with RL algorithms guided by a human-feedback-informed reward model. However, the inefficiencies and instabilities associated with RL algorithms frequently present substantial obstacles to the successful alignment, necessitating the",
+        "year": 2023,
+        "venue": "Trans. Mach. Learn. Res."
+      },
+      "human_score": null,
+      "boundary_sample": false
+    },
+    {
+      "case_id": "c26",
+      "topic": "edge computing mobile deployment model compression quantization",
+      "concept_groups": [
+        [
+          "edge",
+          "endpoint"
+        ],
+        [
+          "mobile",
+          "IoT"
+        ],
+        [
+          "compression",
+          "quantization"
+        ]
+      ],
+      "paper": {
+        "title": "AWQ: Activation-aware Weight Quantization for On-Device LLM Compression and Acceleration",
+        "abstract": "Large language models (LLMs) have transformed numerous AI applications. On-device LLM is becoming increasingly important: running LLMs locally on edge devices can reduce cloud computing costs and protect users' privacy. However, the astronomical model size and the limited hardware resources pose significant deployment challenges. To solve these issues, we propose Activation-aware Weight Quantization (AWQ) and TinyChat, an algorithm-system full-stack solution for efficient on-device LLM deployment. AWQ is a novel quantization method that identifies and protects salient weights based on activation distribution, significantly reducing model size while preserving performance. TinyChat, an optimized inference framework, translates AWQ's theoretical memory savings into practical speedups through",
+        "year": 2023,
+        "venue": "Conference on Machine Learning and Systems"
+      },
+      "human_score": null,
+      "boundary_sample": false
+    },
+    {
+      "case_id": "c27",
+      "topic": "edge computing mobile deployment model compression quantization",
+      "concept_groups": [
+        [
+          "edge",
+          "endpoint"
+        ],
+        [
+          "mobile",
+          "IoT"
+        ],
+        [
+          "compression",
+          "quantization"
+        ]
+      ],
+      "paper": {
+        "title": "Deep Anomaly Detection for Time-Series Data in Industrial IoT: A Communication-Efficient On-Device Federated Learning Approach",
+        "abstract": "Since edge device failures (i.e., anomalies) seriously affect the production of industrial products in Industrial IoT (IIoT), accurately and timely detecting anomalies are becoming increasingly important. Furthermore, data collected by the edge device contain massive user’s private data, which is challenging current detection approaches as user privacy has attracted more and more public concerns. With this focus, this article proposes a new communication-efficient on-device federated learning (FL)-based deep anomaly detection framework for sensing time-series data in IIoT. Specifically, we first introduce an FL framework to enable decentralized edge devices to collaboratively train an anomaly detection model, which can improve its generalization ability. Second, we propose an attention mec",
+        "year": 2020,
+        "venue": "IEEE Internet of Things Journal"
+      },
+      "human_score": null,
+      "boundary_sample": false
+    },
+    {
+      "case_id": "c28",
+      "topic": "edge computing mobile deployment model compression quantization",
+      "concept_groups": [
+        [
+          "edge",
+          "endpoint"
+        ],
+        [
+          "mobile",
+          "IoT"
+        ],
+        [
+          "compression",
+          "quantization"
+        ]
+      ],
+      "paper": {
+        "title": "A Lite Distributed Semantic Communication System for Internet of Things",
+        "abstract": "The rapid development of deep learning (DL) and widespread applications of Internet-of-Things (IoT) have made the devices smarter than before, and enabled them to perform more intelligent tasks. However, it is challenging for any IoT device to train and run DL models independently due to its limited computing capability. In this paper, we consider an IoT network where the cloud/edge platform performs the DL based semantic communication (DeepSC) model training and updating while IoT devices perform data collection and transmission based on the trained model. To make it affordable for IoT devices, we propose a lite distributed semantic communication system based on DL, named L-DeepSC, for text transmission with low complexity, where the data transmission from the IoT devices to the cloud/edg",
+        "year": 2020,
+        "venue": "IEEE Journal on Selected Areas in Communications"
+      },
+      "human_score": null,
+      "boundary_sample": false
+    },
+    {
+      "case_id": "c29",
+      "topic": "edge computing mobile deployment model compression quantization",
+      "concept_groups": [
+        [
+          "edge",
+          "endpoint"
+        ],
+        [
+          "mobile",
+          "IoT"
+        ],
+        [
+          "compression",
+          "quantization"
+        ]
+      ],
+      "paper": {
+        "title": "SpQR: A Sparse-Quantized Representation for Near-Lossless LLM Weight Compression",
+        "abstract": "Recent advances in large language model (LLM) pretraining have led to high-quality LLMs with impressive abilities. By compressing such LLMs via quantization to 3-4 bits per parameter, they can fit into memory-limited devices such as laptops and mobile phones, enabling personalized use. However, quantization down to 3-4 bits per parameter usually leads to moderate-to-high accuracy losses, especially for smaller models in the 1-10B parameter range, which are well-suited for edge deployments. To address this accuracy issue, we introduce the Sparse-Quantized Representation (SpQR), a new compressed format and quantization technique which enables for the first time near-lossless compression of LLMs across model scales, while reaching similar compression levels to previous methods. SpQR works by ",
+        "year": 2023,
+        "venue": "International Conference on Learning Representations"
+      },
+      "human_score": null,
+      "boundary_sample": false
+    },
+    {
+      "case_id": "c30",
+      "topic": "edge computing mobile deployment model compression quantization",
+      "concept_groups": [
+        [
+          "edge",
+          "endpoint"
+        ],
+        [
+          "mobile",
+          "IoT"
+        ],
+        [
+          "compression",
+          "quantization"
+        ]
+      ],
+      "paper": {
+        "title": "Lite Transformer with Long-Short Range Attention",
+        "abstract": "Transformer has become ubiquitous in natural language processing (e.g., machine translation, question answering); however, it requires enormous amount of computations to achieve high performance, which makes it not suitable for mobile applications since mobile phones are tightly constrained by the hardware resources and battery. In this paper, we investigate the mobile setting (under 500M Mult-Adds) for NLP tasks to facilitate the deployment on the edge devices. We present Long-Short Range Attention (LSRA), where one group of heads specializes in the local context modeling (by convolution) while another group captures the long-distance relationship (by attention). Based on this primitive, we design Lite Transformer that is tailored for the mobile NLP application. Our Lite Transformer demon",
+        "year": 2020,
+        "venue": "International Conference on Learning Representations"
+      },
+      "human_score": null,
+      "boundary_sample": false
+    }
+  ]
+}

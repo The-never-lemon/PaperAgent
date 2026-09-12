@@ -1,0 +1,100 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+*$py.class
+*.pyd
+*.so
+
+# Python packaging artifacts
+build/
+dist/
+site/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test and coverage artifacts
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+
+# Logs and runtime files
+*.log
+*.out
+*.err
+*.pid
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Local environment files
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# IDE and OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Frontend dependencies and build outputs
+node_modules/
+front/node_modules/
+dist/
+front/dist/
+coverage/
+.npm/
+.pnpm-store/
+.yarn/
+.vite/
+front/.vite/
+.parcel-cache/
+.next/
+.nuxt/
+.svelte-kit/
+*.tsbuildinfo
+vite.svg
+*.local
+
+# Local caches
+.cache/
+tmp/
+temp/
+
+# config
+model.json
+
+# other
+doc/*
+paper-search-mcp/
+data/*
+.claude/*
+.impeccable/*
+logs/*
+.codegraph/
+
+# 分发包产物：构建生成，随时可重建，不入库
+*.zip
+
+# 个人求职材料：不随项目分发
+简历-*.md
+

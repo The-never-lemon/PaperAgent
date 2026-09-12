@@ -1,0 +1,39 @@
+{
+  "providers": {
+    "deepseek": {
+      "backend": "anthropic_compat",
+      "api_key": "",
+      "api_base": "https://api.deepseek.com/anthropic",
+      "extra_headers": {},
+      "extra_body": {}
+    },
+    "dashscope": {
+      "backend": "openai_compat",
+      "api_key": "",
+      "api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "extra_headers": {},
+      "extra_body": {}
+    }
+  },
+  "agents": {
+    "default_agent": {
+      "label": "DeepSeek Flash",
+      "description": "系统唯一的内置档位，所有子 Agent（检索、阅读、分析、大纲、写作）都用它。",
+      "provider": "deepseek",
+      "model_name": "deepseek-flash",
+      "temperature": 0.3,
+      "max_tokens": 8192,
+      "reasoning_effort": "none"
+    }
+  },
+  "default_embedding_profile": "default_embedding",
+  "embedding_profiles": {
+    "default_embedding": {
+      "label": "Qwen3.7 Text Embedding (DashScope)",
+      "provider": "dashscope",
+      "model_name": "qwen3.7-text-embedding",
+      "dimensions": null,
+      "batch_size": 32
+    }
+  }
+}
