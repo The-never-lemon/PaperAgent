@@ -547,19 +547,25 @@ WRITING_OUTLINE_AGENT_SYSTEM_PROMPT += "\n\n" + skill_section(
 WRITING_AGENT_SYSTEM_PROMPT += "\n\n" + skill_section(
     "literature-review", "正文写作原则与段落骨架"
 )
+WRITING_AGENT_SYSTEM_PROMPT += "\n\n" + skill_section(
+    "literature-review", "公式与表格写法"
+)
 WRITING_REVIEW_SYSTEM_PROMPT += "\n\n" + skill_section(
     "literature-review", "正文审查清单"
 )
 
-# 精读链路：读一段时怎么取舍、写评价时守什么纪律、公式怎么写。
+# 精读链路：读一段时怎么取舍、写评价时守什么纪律、公式怎么写、字段句式怎么排。
 #
-# 「评价纪律」和「公式写法」两节都要给汇总与摘要降级两条路径用。它们的输入材料
-# 不同（一个是分段笔记，一个只有标题和摘要），所以「评价纪律」那一节的措辞刻意
-# 写成对两者都成立的「输入材料」。这两节合并成一个字符串复用，避免两处各取一遍。
+# 「评价纪律」「公式写法」「字段句式模板」三节都要给汇总与摘要降级两条路径用。
+# 它们的输入材料不同（一个是分段笔记，一个只有标题和摘要），所以「评价纪律」那一节
+# 的措辞刻意写成对两者都成立的「输入材料」；「字段句式模板」里也专门点了一句降级路径
+# 开头要写「基于摘要的精读」。这三节合并成一个字符串复用，避免三处各取一遍。
 _DEEP_READ_REPORT_SECTIONS = (
     skill_section("paper-deep-reading", "评价纪律")
     + "\n\n"
     + skill_section("paper-deep-reading", "公式写法")
+    + "\n\n"
+    + skill_section("paper-deep-reading", "字段句式模板")
 )
 
 DEEP_READ_MAP_SYSTEM_PROMPT += "\n\n" + _DEEP_READ_FIDELITY
