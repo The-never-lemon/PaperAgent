@@ -56,19 +56,6 @@ export function saveAgent(
   });
 }
 
-export function saveEmbeddingProfile(
-  name: string,
-  payload: JsonObject,
-): Promise<SettingsPayload> {
-  return request<SettingsPayload>(
-    `/api/settings/embedding-profiles/${encodeURIComponent(name)}`,
-    {
-      method: "PUT",
-      body: JSON.stringify(payload),
-    },
-  );
-}
-
 export function getProviderModels(
   provider: string,
 ): Promise<ProviderModelsPayload> {
@@ -78,7 +65,7 @@ export function getProviderModels(
 }
 
 export function testModelConnectivity(
-  targetType: "agent" | "embedding_profile",
+  targetType: "agent",
   name: string,
 ): Promise<ModelConnectivityPayload> {
   return request<ModelConnectivityPayload>("/api/settings/model-connectivity", {

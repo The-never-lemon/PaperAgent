@@ -71,7 +71,7 @@ class WorkflowRuntimeContext:
     # 节点可以在开始新阶段前检查它，后台服务也可以用它配合取消当前任务。
     cancellation: WorkflowCancellation | None = None
     # 中文注释：resources 里放的是单次 run 共用的并发控制对象和公共资源，
-    # 例如下载限流、共用 AsyncClient、embedding 连接等。节点通过 runtime_context
+    # 例如下载限流、共用 AsyncClient 等。节点通过 runtime_context
     # 就能拿到这些资源，不需要再往 State 顶层散落很多字段。
     resources: WorkflowRuntimeResources | None = None
 

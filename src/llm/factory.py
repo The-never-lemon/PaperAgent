@@ -43,53 +43,22 @@ def make_provider(
     config: ModelConfig,
     agent_name: str | None = None,
     *,
-    embedding_profile_name: str | None = None,
     client: Any | None = None,
     timeout_s: float = 60,
 ) -> ProviderSnapshot:
     """根据模型配置装配并返回一个 provider 快照。
 
     Args:
-        config: 全局模型配置对象，包含 provider、agent 和 embedding profile 配置。
+        config: 全局模型配置对象（provider + agent 档位）。
         agent_name: 需要解析的 Agent 名称；为空时使用 default_agent。
-        embedding_profile_name: 需要解析的 embedding profile 名称；为空时不走 embedding 装配。
         client: 可选外部注入 client，通常用于测试、mock 或复用自定义 SDK 实例。
-        timeout_s: provider 请求超时时间，单位秒；embedding 和 chat 装配都会透传。
+        timeout_s: provider 请求超时时间，单位秒。
 
     Returns:
         `ProviderSnapshot`，其中包含实例化后的 provider 和配置签名。
 
-    工厂函数只负责“装配成一个可用 provider 实例”，不关心后续调用 chat 还是
-    embedding。默认仍按 agent 装配；当传入 embedding_profile_name 时，则按
-    embedding profile 装配同样的 provider 实例，但不新增单独的 make_embedding_provider。
+    工厂函数只负责"装配成一个可用 provider 实例"，不关心后续是调用 chat 还是别的。
     """
-    if agent_name is not None and embedding_profile_name is not None:
-        raise ValueError("agent_name 和 embedding_profile_name 不能同时指定，请只选择一种模型配置")
-
-    if embedding_profile_name is not None:
-        # embedding profile 只决定“用哪个 provider 和哪个向量模型”，具体请求仍由 provider.embed 负责。
-        profile_name = embedding_profile_name or config.default_embedding_profile
-        profile, provider_config = config.resolve_embedding_provider_config(profile_name)
-        provider_name = profile.provider
-        spec = match_provider_backend(provider_config.backend)
-        kwargs: dict[str, Any] = {
-            "model": profile.model_name,
-            "api_key": provider_config.api_key,
-            "api_base": provider_config.api_base,
-            "generation": None,
-            "extra_headers": provider_config.extra_headers,
-            "extra_body": provider_config.extra_body,
-            "client": client,
-            # provider 配置里显式写了超时时间时优先生效；调用方传入的 timeout_s 作为兜底。
-            "timeout_s": provider_config.timeout_s or timeout_s,
-            "max_retries": provider_config.max_retries,
-            "max_concurrency": provider_config.max_concurrency,
-            "include_stream_usage": provider_config.include_stream_usage,
-        }
-        provider = _instantiate_provider(spec, kwargs)
-        signature_payload = {"target_type": "embedding_profile", "target_name": profile_name, "profile": asdict(profile)}
-        return ProviderSnapshot(provider, profile.model_name, None, _signature(provider_name, signature_payload, asdict(provider_config)))
-
     # 默认路径保持原来的 Agent 装配方式，避免影响搜索节点、阅读摘要和设置页模型连通性测试。
     agent = config.resolve_agent(agent_name)
     provider_name, provider_config = config.resolve_provider_config(agent)

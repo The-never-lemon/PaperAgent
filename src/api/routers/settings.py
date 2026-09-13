@@ -14,7 +14,6 @@ from src.services.settings import (
     delete_provider_settings,
     settings_payload,
     update_agent_settings,
-    update_embedding_profile,
     update_provider_settings,
 )
 
@@ -80,16 +79,6 @@ def create_settings_router(repo: SettingsRepository) -> APIRouter:
 
         try:
             return create_or_update_agent(repo, name, await _json_body(request))
-        except SettingsError as exc:
-            return _settings_error_response(exc)
-
-    @router.put("/embedding-profiles/{name}")
-    @router.post("/embedding-profiles/{name}")
-    async def save_embedding_profile(name: str, request: Request):
-        """保存嵌入模型配置。"""
-
-        try:
-            return update_embedding_profile(repo, name, await _json_body(request))
         except SettingsError as exc:
             return _settings_error_response(exc)
 

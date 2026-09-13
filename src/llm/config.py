@@ -42,17 +42,6 @@ class LLMDefaults:
 
 
 @dataclass(slots=True)
-class EmbeddingDefaults:
-    """系统级 embedding 默认参数。"""
-
-    dimensions: int | None = None
-    # 中文注释：单次 embedding 请求最多发几条文本。这里给的是"各家平台都不会超限"
-    # 的保守默认值——实测 DashScope 的上限只有 20 条，OpenAI 则有 2048 条，
-    # 所以宁可一次少发点（多发几次请求），也不要超限被整批打回。可按平台能力改。
-    batch_size: int | None = 16
-
-
-@dataclass(slots=True)
 class ReadDefaults:
     """保存阅读节点需要的本地处理参数。"""
 
@@ -84,7 +73,6 @@ class SystemConfig:
     """从 config/system.yaml 读取的系统默认值。"""
 
     llm: LLMDefaults = field(default_factory=LLMDefaults)
-    embedding: EmbeddingDefaults = field(default_factory=EmbeddingDefaults)
     paper_retrieval: PaperRetrievalConfig = field(default_factory=PaperRetrievalConfig)
     read: ReadDefaults = field(default_factory=ReadDefaults)
 
@@ -99,7 +87,6 @@ class SystemConfig:
     def from_dict(cls, data: Mapping[str, Any] | None) -> "SystemConfig":
         defaults = dict((data or {}).get("defaults") or {})
         llm = dict(defaults.get("llm") or {})
-        embedding = dict(defaults.get("embedding") or {})
         paper_retrieval = dict((data or {}).get("paper_retrieval") or {})
         read = dict((data or {}).get("read") or {})
         return cls(
@@ -108,10 +95,6 @@ class SystemConfig:
                 max_tokens=llm.get("max_tokens", 4000),
                 reasoning_effort=llm.get("reasoning_effort", "none"),
                 context_window_tokens=llm.get("context_window_tokens", 64000),
-            ),
-            embedding=EmbeddingDefaults(
-                dimensions=embedding.get("dimensions"),
-                batch_size=embedding.get("batch_size", 16),
             ),
             paper_retrieval=PaperRetrievalConfig(
                 # 中文说明：配置里的 null 或空白内容都按“没有配置密钥”处理，
@@ -150,26 +133,13 @@ class AgentConfig:
 
 
 @dataclass(slots=True)
-class EmbeddingProfile:
-    """单个 embedding profile 的模型配置。"""
-
-    provider: str
-    model_name: str
-    label: str | None = None
-    dimensions: int | None = None
-    batch_size: int | None = None
-
-
-@dataclass(slots=True)
 class ModelConfig:
-    """聚合 provider、agent 和 embedding profile 配置。"""
+    """聚合 provider 与 agent 配置。"""
 
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
     agents: dict[str, AgentConfig] = field(default_factory=dict)
-    embedding_profiles: dict[str, EmbeddingProfile] = field(default_factory=dict)
     system: SystemConfig = field(default_factory=SystemConfig)
     default_agent: str = "default_agent"
-    default_embedding_profile: str = "default_embedding"
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any], system: SystemConfig | Mapping[str, Any] | None = None) -> "ModelConfig":
@@ -180,16 +150,11 @@ class ModelConfig:
             for name, value in dict(raw.get("providers") or {}).items()
         }
         agents = _agents_from_dict(raw, system_config)
-        embedding_profiles = _embedding_profiles_from_dict(raw, system_config)
-        # 中文注释：默认嵌入档位名可以从配置里读，没写时沿用 default_embedding。
-        default_embedding = str(raw.get("default_embedding_profile") or "").strip()
         return cls(
             providers=providers,
             agents=agents,
-            embedding_profiles=embedding_profiles,
             system=system_config,
             default_agent="default_agent",
-            default_embedding_profile=default_embedding or "default_embedding",
         )
 
     def resolve_agent(self, name: str | None = None) -> AgentConfig:
@@ -227,52 +192,10 @@ class ModelConfig:
             include_stream_usage=provider_config.include_stream_usage,
         )
 
-    def resolve_embedding_profile(self, name: str | None = None) -> EmbeddingProfile:
-        profile_name = (name or self.default_embedding_profile).strip()
-        if profile_name in self.embedding_profiles:
-            return self.embedding_profiles[profile_name]
-        if self.default_embedding_profile in self.embedding_profiles:
-            return self.embedding_profiles[self.default_embedding_profile]
-        # 中文注释：只配了一个嵌入模型时就把它当默认档位用，不再强求名字必须叫 default_embedding。
-        # 否则用户明明配好了向量服务，却因为名字对不上而一直静默降级，很难排查。
-        if len(self.embedding_profiles) == 1:
-            return next(iter(self.embedding_profiles.values()))
-        available = "、".join(sorted(self.embedding_profiles)) or "未配置任何嵌入模型"
-        raise ValueError(f"找不到嵌入模型档位 {profile_name}，当前可用的档位：{available}")
-
-    def resolve_embedding_provider_config(self, name: str | None = None) -> tuple[EmbeddingProfile, ProviderConfig]:
-        """解析 embedding 模型及其连接配置，并补齐环境变量中的密钥和默认地址。"""
-
-        profile = self.resolve_embedding_profile(name)
-        try:
-            provider_config = self.providers[profile.provider]
-        except KeyError as exc:
-            raise ValueError(f"unknown embedding provider: {profile.provider}") from exc
-        spec = match_provider_backend(provider_config.backend)
-        env_key = provider_config.api_key_env or spec.env_key
-        api_key = provider_config.api_key or os.getenv(env_key)
-        api_base = provider_config.api_base or spec.default_api_base
-        if not api_base:
-            raise ValueError(f"embedding provider {profile.provider} requires api_base")
-        return profile, ProviderConfig(
-            backend=spec.name,
-            api_key=api_key,
-            api_key_env=env_key,
-            api_base=api_base,
-            extra_headers=provider_config.extra_headers,
-            extra_body=provider_config.extra_body,
-            timeout_s=provider_config.timeout_s,
-            max_retries=provider_config.max_retries,
-            max_concurrency=provider_config.max_concurrency,
-            include_stream_usage=provider_config.include_stream_usage,
-        )
-
-
 def _normalize_model_data(data: Mapping[str, Any]) -> JsonObject:
     raw = dict(data or {})
     raw.setdefault("providers", {})
     raw.setdefault("agents", {})
-    raw.setdefault("embedding_profiles", raw.pop("embeddingProfiles", {}))
     return raw
 
 
@@ -314,24 +237,6 @@ def _agent_from_dict(raw: Mapping[str, Any], defaults: LLMDefaults) -> AgentConf
         max_tokens=raw.get("max_tokens", raw.get("maxTokens", defaults.max_tokens)),
         reasoning_effort=raw.get("reasoning_effort", raw.get("reasoningEffort", defaults.reasoning_effort)),
         context_window_tokens=raw.get("context_window_tokens", raw.get("contextWindowTokens", defaults.context_window_tokens)),
-    )
-
-
-def _embedding_profiles_from_dict(data: Mapping[str, Any], system: SystemConfig) -> dict[str, EmbeddingProfile]:
-    raw_profiles = dict(data.get("embedding_profiles") or {})
-    profiles: dict[str, EmbeddingProfile] = {}
-    for name, raw in raw_profiles.items():
-        profiles[name] = _embedding_from_dict(raw, system.embedding)
-    return profiles
-
-
-def _embedding_from_dict(raw: Mapping[str, Any], defaults: EmbeddingDefaults) -> EmbeddingProfile:
-    return EmbeddingProfile(
-        provider=str(raw.get("provider") or "auto"),
-        model_name=str(raw.get("model_name") or raw.get("modelName") or raw.get("model") or ""),
-        label=raw.get("label"),
-        dimensions=raw.get("dimensions", defaults.dimensions),
-        batch_size=raw.get("batch_size", raw.get("batchSize", defaults.batch_size)),
     )
 
 

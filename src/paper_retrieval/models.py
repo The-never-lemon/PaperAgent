@@ -104,8 +104,8 @@ class SearchRequest:
     - concept_groups：组之间是 AND（必须同时命中），组内是同义/近义写法的 OR（命中任一即可）。
       例如 [["large language model", "LLM"], ["kv cache", "key-value cache"]] 表示
       必须同时命中 LLM 相关 AND kv cache 相关。每个 connector 把它渲染成自己源的原生语法。
-    - topic：用一句自然语言描述当前研究主题，不参与检索语法（布尔 API 不需要），
-      只作为 embedding 重排的查询向量来源。
+    - topic：用一句自然语言描述当前研究主题。它**不参与检索语法**，也不参与排序，
+      只用于日志和调试时说明"这次查询想找什么"。
 
     这样就把"模型怎么表达意图"与"每个源怎么执行检索"彻底隔离了。
     """

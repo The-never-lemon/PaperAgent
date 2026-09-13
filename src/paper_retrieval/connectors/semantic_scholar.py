@@ -33,7 +33,7 @@ class SemanticScholarPaperConnector(PaperSearchConnector):
     #                         支持服务端过滤（year / minCitationCount / fieldsOfStudy / openAccessPdf）
     #                         和按 citationCount 排序，作为高精确度检索的主端点最合适。
     # - /paper/search/match   单条标题精确匹配，不适合批量检索。
-    # 因此这里切到 bulk 端点；缺失的相关度排序在 Phase 3 用客户端 embedding 重排补。
+    # 因此这里切到 bulk 端点；缺失的相关度排序由 service 层的 RRF 融合和引用数排序弥补。
     _endpoint = "https://api.semanticscholar.org/graph/v1/paper/search/bulk"
     # 中文说明：bulk 端点请求的字段清单。相比旧版新增了 5 个关键字段：
     # - citationCount / influentialCitationCount / referenceCount：引用相关数据，
@@ -162,8 +162,8 @@ class SemanticScholarPaperConnector(PaperSearchConnector):
         - query：用概念组渲染的布尔串（+ AND / | OR / - NOT / "短语" / () 分组）。
         - fields：必填，指定返回哪些字段。
         - sort：bulk 只支持 paperId / publicationDate / citationCount（sort=relevance:desc 直接 400）。
-          这里默认用 citationCount:desc，把高引论文拉到前面，作为缺失的相关度排序的替代。
-          真正的相关度排序在 Phase 3 用客户端 embedding 重排补。
+          这里默认用 citationCount:desc，把高引论文拉到前面，作为缺失的相关度排序的替代；
+           它在多源合并时由 service 层的 RRF 融合与引用数排序一起补足。
         - year：服务端下推年份过滤（连字符区间，如 2020-2024）。
         - limit：bulk 端点会完全忽略这个参数（实测传 limit=5 仍返回 1000 条），所以不发送。
 

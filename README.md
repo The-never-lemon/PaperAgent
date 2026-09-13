@@ -62,12 +62,12 @@ Paper-Agent 2.0 是相对旧版 1.x 的一次**全新重写**。它保留了旧�
 
 | | 特性 | 一句话说明 |
 |--|------|-----------|
-| 🔍 | **多来源论文检索** | 内置 arXiv、OpenAlex、Semantic Scholar 连接器，统一为 `PaperDocument`，按年份、来源、数量和排除词筛选并去重；多源结果用 RRF（排名融合）排序——每篇论文按它在各源里给出的名次累计得分，被多个源同时命中、且名次靠前的排在前面；配好嵌入模型后，还会把主题与候选论文的语义相似度作为排序的最后一档参考（RRF、概念组匹配、引用数、年份都相同时才起作用） |
+| 🔍 | **多来源论文检索** | 内置 arXiv、OpenAlex、Semantic Scholar 连接器，统一为 `PaperDocument`，按年份、来源、数量和排除词筛选并去重；多源结果用 RRF（排名融合）排序——每篇论文按它在各源里给出的名次累计得分，被多个源同时命中、且名次靠前的排在前面 |
 | 📖 | **从摘要到全文的渐进式阅读** | 先读摘要判断相关性，满足条件的论文走下载 → PDF 转 Markdown → 分块 → 逐块精读并汇总；全文下载或转换失败时自动降级为「基于摘要的精读」，并把失败原因告知用户 |
 | 🔬 | **分层研究分析** | `AnalyseAgent` 先把工作区全部论文的结构化摘要做一次整体分析，再做一次全局综合，形成研究现状、共识、争议、空白、时间演化与展望等结构化内容 |
 | ✍️ | **证据约束下的综述写作** | `WritingOutlineAgent` 生成大纲与证据映射，`WritingAgent` 逐节写作、证据不足时检索补充、完成后审查并限次修改 |
 | 📡 | **实时会话工作台** | SSE 实时推送检索、阅读、分析、大纲与逐节写作进度，SQLite + 文件系统持久化，刷新后历史可恢复 |
-| 🎛️ | **可视化模型配置** | 在浏览器中管理 Provider 协议、API 地址、密钥、各 Agent 档位与 embedding 参数，一键测试连通性，保存即生效 |
+| 🎛️ | **可视化模型配置** | 在浏览器中管理 Provider 协议、API 地址、密钥与各 Agent 档位，一键测试连通性，保存即生效 |
 
 ---
 
@@ -128,7 +128,6 @@ flowchart TB
 | LLM 适配 | OpenAI 兼容协议、Anthropic Messages 协议 |
 | 论文来源 | arXiv、OpenAlex、Semantic Scholar |
 | 全文处理 | `PyMuPDF`（抽取表格 / 公式 / 图片，装不上时自动退回 `pypdf`）、Markdown 转换、文本分块 |
-| 语义重排 | 任意 OpenAI 兼容的 embedding 接口；作为检索排序的最后一档参考，未配置则该档不参与 |
 | 会话存储 | SQLite + 本地 JSON/Markdown 文件 |
 | 前端 | Vue 3、TypeScript、Vite、Vue Router、Lucide |
 
@@ -188,7 +187,6 @@ npm run front:install
 1. `providers` 中存在一个可用 Provider，并填写 `api_base`；
 2. `api_key` 或 `api_key_env` 能提供有效密钥；
 3. `agents.default_agent` 已配置；
-4. `embedding_profiles` 已指向可用的 embedding Provider（默认档位名是 `default_embedding`，也可以用顶层 `default_embedding_profile` 指定别的名字；只配一个档位时它自动就是默认档位）。
 
 ### 3. 启动后端
 
@@ -287,7 +285,7 @@ uv run python scripts/package.py    # 生成 Paper-Agent-<日期>.zip
 
 ### 系统参数
 
-`config/system.yaml` 存放系统级默认值和阅读参数：`defaults.llm` 是所有 Agent 档位未声明字段时的兜底生成参数，`defaults.embedding` 是嵌入档位默认值，`paper_retrieval` 是检索数据源密钥，`read` 是阅读与下载参数（缓存目录、连接/下载超时、最大文件大小）。
+`config/system.yaml` 存放系统级默认值和阅读参数：`defaults.llm` 是所有 Agent 档位未声明字段时的兜底生成参数，`paper_retrieval` 是检索数据源密钥，`read` 是阅读与下载参数（缓存目录、连接/下载超时、最大文件大小）。
 
 > 全文分块按 PDF 页切分、片段之间不重叠：单个片段上限 1200 字符，但遇到完整表格或公式块时会整块保留（上限 4000 字符），避免把表格和公式从中间切断。这些数字写在 `PageChunker` 类里，不通过配置文件调整。
 

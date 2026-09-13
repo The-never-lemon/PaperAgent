@@ -18,7 +18,6 @@ from .models import PaperDocument, SearchRequest, SearchResponse
 
 if TYPE_CHECKING:
     from src.graph.runtime_resources import WorkflowRuntimeResources
-    from src.llm.config import ModelConfig
 
 
 logger = get_logger(__name__)
@@ -36,11 +35,6 @@ _RETRYABLE_STATUS_CODES = (429, 500, 502, 503, 504)
 # 于是"被多个源同时命中"依然比"只在单个源里排得靠前"更有分量，
 # 与改造前"先看命中几个源"的排序意图一致，但不再是一刀切的阶跃比较。
 RRF_K = 60
-
-# 中文说明：单次 embedding 请求最多发几条文本。各平台的上限差别很大
-# （实测 DashScope 是 20 条，OpenAI 是 2048 条），所以正确做法是在档位里配；
-# 这个常量只在配置缺失或配得不合法时兜底，取一个各家都安全的保守值。
-EMBEDDING_BATCH_SIZE_FALLBACK = 16
 
 
 def _is_retryable_search_error(exc: Exception) -> bool:
@@ -127,164 +121,6 @@ class PaperSearchService:
     # 实测客户端过滤（年份、排除词）后通常剩 60-80%，取 3 保证最终能拿到用户期望的数量。
     # 超量拉取后再用 RRF 重排截断到用户期望的数量，能显著提升排序质量。
     OVER_FETCH_FACTOR = 3
-
-    @staticmethod
-    def _resolve_embedding_batch_size(config: "ModelConfig") -> int:
-        """取当前嵌入档位配置的单次请求条数；没配或配得不合法时退回保守值。
-
-        中文说明：这个值应该按平台能力配（实测 DashScope 20 条、OpenAI 2048 条），
-        所以优先读档位里的 batch_size；读不到、或读到的不是个合法条数，
-        就用 EMBEDDING_BATCH_SIZE_FALLBACK 兜底，保证一定有个能用的值。
-        """
-
-        try:
-            profile = config.resolve_embedding_profile(config.default_embedding_profile)
-        except Exception:
-            return EMBEDDING_BATCH_SIZE_FALLBACK
-        size = profile.batch_size
-        if isinstance(size, int) and size > 0:
-            return size
-        return EMBEDDING_BATCH_SIZE_FALLBACK
-
-    async def _embedding_rerank(
-        self,
-        candidates: list[PaperDocument],
-        topic: str,
-    ) -> dict[str, float]:
-        """对候选论文做 embedding 语义重排。
-
-        中文说明：
-        把 topic（用户研究主题）和每篇候选论文的 title + abstract 一起 embed，
-        算 topic 向量与每个候选向量的余弦相似度。调用方传进来的 candidates
-        应当是"合并去重后的代表论文"，这样每个候选对应唯一一个分数，
-        不会出现同一篇论文的兄弟记录互相覆盖分数的情况。
-
-        关键设计：
-        - 前置检查：没配嵌入档位、或档位引用的 provider 没配 API Key，直接跳过并
-          返回空 dict，不发那次注定失败的请求。
-        - 失败降级：provider 报错、返回数量不匹配、numpy 没装，都返回空 dict，
-          让 _rank_merged_papers 这一维给 0 分，不影响主流程。
-        - 分批请求：按档位配置的 batch_size 切开并发发送，避开各平台的单次条数上限。
-        - 不建全库向量索引，只对当次检索的候选（几十篇）做一次 embed。
-
-        返回：{paper_id 或 id: 余弦相似度} 的 dict。失败时返回空 dict。
-        """
-
-        if not topic or not candidates:
-            return {}
-
-        # 中文说明：provider 会持有网络连接池，无论成功还是失败，最后都要把它关掉。
-        snapshot = None
-        try:
-            # 中文说明：动态 import 避免循环依赖（factory → base → config）。
-            import json as _json
-            from pathlib import Path as _Path
-            from src.llm.config import ModelConfig, SystemConfig
-            from src.llm.factory import make_provider
-
-            # 中文说明：从 config/model.json 加载模型配置（default_embedding_profile 在这里）。
-            model_config_path = _Path("config/model.json")
-            if not model_config_path.exists():
-                logger.info("embedding 重排跳过：config/model.json 不存在")
-                return {}
-
-            model_data = _json.loads(model_config_path.read_text(encoding="utf-8"))
-            system_config = SystemConfig.load()
-            config = ModelConfig.from_dict(model_data, system_config)
-
-            # 中文说明：一个嵌入模型档位都没配时直接降级。先在这里判断清楚，
-            # 免得后面取不到 provider 才抛错，日志里反而看不出真正原因。
-            if not config.embedding_profiles:
-                logger.info("embedding 重排跳过：未配置任何嵌入模型档位")
-                return {}
-
-            # 中文说明：再看这个档位引用的 provider 到底有没有可用的 API Key。
-            # 密钥不在档位里，而在档位指向的 provider 上（明文 api_key，或
-            # api_key_env 指向的环境变量），所以要问 resolve_embedding_provider_config
-            # 才拿得到"最终真正生效的那把钥匙"。没有钥匙就直接跳过，
-            # 免得白发一次注定被拒的请求——省的不只是时间，还有日志噪音。
-            _, provider_config = config.resolve_embedding_provider_config(config.default_embedding_profile)
-            if not provider_config.api_key:
-                logger.info("embedding 重排跳过：嵌入档位引用的 provider 未配置 API Key")
-                return {}
-
-            snapshot = make_provider(config, embedding_profile_name=config.default_embedding_profile)
-            provider = snapshot.provider
-
-            # 中文说明：构造输入文本。第一个是 topic，后面是每篇候选的 title + abstract。
-            # 空白候选用 title 兜底，保证向量化输入不为空。
-            texts = [topic]
-            for p in candidates:
-                text = f"{p.title or ''} {p.abstract or ''}".strip()
-                texts.append(text or p.title or 'unknown')
-
-            # 中文说明：分批 embed。各平台对"单次请求最多几条"有硬上限
-            # （实测 DashScope 超过 20 条就直接返回 400），把几十篇候选一次性
-            # 发过去会被整批打回。这里按档位配置的 batch_size 切开、并发请求，
-            # 再把各批的向量按原顺序拼回来。
-            batch_size = self._resolve_embedding_batch_size(config)
-            batches = [texts[start : start + batch_size] for start in range(0, len(texts), batch_size)]
-            batch_responses = await asyncio.gather(*(provider.embed(batch) for batch in batches))
-            embeddings: list[list[float]] = []
-            for batch, batch_response in zip(batches, batch_responses):
-                if not batch_response.ok or len(batch_response.embeddings) != len(batch):
-                    logger.warning(
-                        "embedding 重排跳过：响应异常",
-                        extra={
-                            "ok": batch_response.ok,
-                            "expected": len(batch),
-                            "got": len(batch_response.embeddings),
-                        },
-                    )
-                    return {}
-                embeddings.extend(batch_response.embeddings)
-
-            # 中文说明：用 numpy 算余弦相似度，numpy 是项目直接依赖（见 pyproject.toml）。
-            import numpy as np
-
-            topic_vec = np.asarray(embeddings[0], dtype=np.float32)
-            topic_norm = float(np.linalg.norm(topic_vec))
-            if topic_norm == 0:
-                return {}
-
-            scores: dict[str, float] = {}
-            for i, p in enumerate(candidates):
-                cand_vec = np.asarray(embeddings[i + 1], dtype=np.float32)
-                cand_norm = float(np.linalg.norm(cand_vec))
-                if cand_norm == 0:
-                    sim = 0.0
-                else:
-                    sim = float(np.dot(topic_vec, cand_vec) / (topic_norm * cand_norm))
-                # 中文说明：用 paperId 作 key。调用方保证传进来的候选已经是
-                # 合并去重后的代表，所以键和值一一对应（不需要用去重键 _paper_key：
-                # 代表之间本来就不会重复，而 _paper_key 是另一套带归一化的规则）。
-                key = p.paperId or p.id
-                scores[key] = sim
-
-            logger.info(
-                "embedding 重排完成",
-                extra={
-                    "candidate_count": len(candidates),
-                    "avg_similarity": sum(scores.values()) / len(scores) if scores else 0,
-                },
-            )
-            return scores
-
-        except Exception as exc:
-            # 中文说明：任何异常都降级为纯词面排序，不阻塞主流程。
-            logger.warning(
-                "embedding 重排失败，降级为纯词面排序",
-                extra={"error": str(exc)},
-                exc_info=True,
-            )
-            return {}
-        finally:
-            # 中文说明：把本轮临时创建的 provider 关掉，否则每检索一次就漏一个连接池。
-            if snapshot is not None:
-                try:
-                    await snapshot.aclose()
-                except Exception:
-                    logger.warning("关闭 embedding provider 失败", exc_info=True)
 
     def search(
         self,
@@ -469,17 +305,11 @@ class PaperSearchService:
                 )
                 response.sources_used = [source_name]
                 response.source_results[source_name] = len(papers)
-                # 中文说明：先把重复记录合并成"每篇只留一条代表"，再只对代表做
-                # embedding 重排。这样每个代表对应唯一一个分数，不会和自己的兄弟
-                # 记录互相覆盖，也省掉了对重复内容的重复向量化。
+                # 中文说明：先把重复记录合并成"每篇只留一条代表"，再排序。
                 # 单源没有可融合的排名，所以不传 rrf_scores。
-                representatives = self._merge_duplicates(papers)
-                # 中文说明：没配嵌入密钥时这一步内部直接返回空 dict，排序退化成纯词面。
-                embedding_scores = await self._embedding_rerank(representatives, request.topic)
                 response.papers = self._rank_and_truncate(
-                    representatives,
+                    self._merge_duplicates(papers),
                     concept_groups=request.concept_groups,
-                    embedding_scores=embedding_scores,
                     limit=limit if truncate else None,
                 )
                 logger.info(
@@ -505,14 +335,11 @@ class PaperSearchService:
                 for rank, paper in enumerate(outcome):
                     key = self._paper_key(paper)
                     rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (RRF_K + rank + 1)
-            # 中文说明：先合并重复记录拿到代表列表，再只对代表做 embedding 重排（理由同单源路径）。
-            representatives = self._merge_duplicates(merged, rrf_scores)
-            embedding_scores = await self._embedding_rerank(representatives, request.topic)
-            # 中文说明：截断到用户期望的 limit（不是 effective_limit）。
+            # 中文说明：合并重复记录拿到代表列表，然后排序、截断到用户期望的 limit
+            # （不是 effective_limit）。
             response.papers = self._rank_and_truncate(
-                representatives,
+                self._merge_duplicates(merged, rrf_scores),
                 concept_groups=request.concept_groups,
-                embedding_scores=embedding_scores,
                 limit=limit if truncate else None,
             )
             logger.info(
@@ -804,16 +631,11 @@ class PaperSearchService:
     def _rank_and_truncate(
         self, papers: list[PaperDocument],
         concept_groups: list[list[str]] | None = None,
-        embedding_scores: dict[str, float] | None = None,
         limit: int | None = None,
     ) -> list[PaperDocument]:
         """对已经合并好的论文列表排序，再按 limit 截断。"""
 
-        ranked = self._rank_merged_papers(
-            papers,
-            concept_groups=concept_groups or [],
-            embedding_scores=embedding_scores or {},
-        )
+        ranked = self._rank_merged_papers(papers, concept_groups=concept_groups or [])
         if limit is None:
             return ranked
         return ranked[:limit]
@@ -821,32 +643,24 @@ class PaperSearchService:
     def _deduplicate_papers(
         self, papers: list[PaperDocument], limit: int | None,
         concept_groups: list[list[str]] | None = None,
-        embedding_scores: dict[str, float] | None = None,
         rrf_scores: dict[str, float] | None = None,
     ) -> list[PaperDocument]:
-        """合并去重后直接排序截断。
-
-        中文说明：这是"不需要在中间插一步"的调用方用的组合入口。
-        需要在去重与排序之间插入 embedding 重排的调用方（async_search 的两条路径），
-        自己依次调 _merge_duplicates → 算 embedding → _rank_and_truncate。
-        """
+        """合并去重后直接排序截断（同步检索与引文扩展走这个组合入口）。"""
 
         return self._rank_and_truncate(
             self._merge_duplicates(papers, rrf_scores),
             concept_groups=concept_groups,
-            embedding_scores=embedding_scores,
             limit=limit,
         )
 
     def _rank_merged_papers(
         self, papers: list[PaperDocument],
         concept_groups: list[list[str]] | None = None,
-        embedding_scores: dict[str, float] | None = None,
     ) -> list[PaperDocument]:
         """对多源合并后的论文做多维度排序。
 
         中文说明：
-        按六个维度排序（纯函数，不调用模型）。返回的是一个元组，Python 会从左到右
+        按五个维度排序（纯函数，不调用模型）。返回的是一个元组，Python 会从左到右
         逐个比较，所以越靠前的维度优先级越高：
         1. RRF 融合分：把这篇论文在各个源里的名次换算成分数再加起来
            （在某个源里排第 rank 名，就贡献 1/(RRF_K + rank)）。它同时反映了
@@ -858,18 +672,15 @@ class PaperSearchService:
            每组最多算 1 分，总匹配组数越多越靠前。
         4. 引用数：metadata["cited_by_count"]（OpenAlex + S2 都有值了）。
         5. 年份新近度：越新越靠前。
-        6. embedding 余弦相似度：语义相关度信号，只在前面几维全部相同时才起作用。
-           没配嵌入模型或调用失败时这一维给 0 分，不影响主流程。
         """
 
         if not papers:
             return []
 
         concept_groups = concept_groups or []
-        embedding_scores = embedding_scores or {}
 
-        def _score(paper: PaperDocument) -> tuple[float, int, int, int, int, float]:
-            """返回一个六维元组用于排序（大的在前）。"""
+        def _score(paper: PaperDocument) -> tuple[float, int, int, int, int]:
+            """返回一个五维元组用于排序（大的在前）。"""
 
             # 维度 1：多源排名融合分（合并阶段写在 metadata 里的 rrf_score）。
             rrf_score = 0.0
@@ -899,11 +710,7 @@ class PaperSearchService:
             # 维度 5：年份。
             year = int(paper.year) if paper.year else 0
 
-            # 维度 6：embedding 余弦相似度（没配模型或调用失败时为 0）。
-            paper_key = paper.paperId or paper.id
-            embedding_sim = float(embedding_scores.get(paper_key, 0.0))
-
-            return (rrf_score, source_count, group_hits, cited_by, year, embedding_sim)
+            return (rrf_score, source_count, group_hits, cited_by, year)
 
         return sorted(papers, key=_score, reverse=True)
 

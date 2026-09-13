@@ -12,17 +12,6 @@ export interface AgentItem {
   reasoning_effort_values: string[];
 }
 
-export interface EmbeddingProfileItem {
-  name: string;
-  label: string;
-  is_default: boolean;
-  provider: string;
-  model: string;
-  model_name: string;
-  dimensions: number | null;
-  batch_size: number | null;
-}
-
 export interface ProviderEditableConfig {
   backend: string;
   api_key: string | null;
@@ -64,10 +53,6 @@ export interface DefaultsPayload {
     reasoning_effort: string | null;
     context_window_tokens: number | null;
   };
-  embedding: {
-    dimensions: number | null;
-    batch_size: number | null;
-  };
 }
 
 export interface SettingsPayload {
@@ -75,7 +60,6 @@ export interface SettingsPayload {
   agents: AgentItem[];
   providers: ProviderItem[];
   provider_types: ProviderTypeItem[];
-  embedding_profiles: EmbeddingProfileItem[];
   defaults: DefaultsPayload;
   requires_restart: boolean;
   restart_required_sections: string[];
@@ -103,7 +87,7 @@ export interface ProviderModelsPayload {
 }
 
 export interface ModelConnectivityPayload {
-  target_type: "agent" | "embedding_profile";
+  target_type: "agent";
   name: string;
   provider: string;
   model: string;

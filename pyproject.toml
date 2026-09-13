@@ -9,7 +9,6 @@ dependencies = [
     "fastapi>=0.116.0",
     "httpx>=0.28.0",
     "langgraph>=1.2.6",
-    "numpy>=2.0.0",
     "openai>=2.43.0",
     "pymupdf>=1.28.2",
     "pypdf>=5.0.0",

@@ -5,9 +5,7 @@ import json
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
-import httpx
-
-from .base import EmbeddingResponse, JsonObject, LLMProvider, LLMResponse, Message, ProviderHttpError, StreamCallbacks, ToolCallRequest, merge_body
+from .base import JsonObject, LLMProvider, LLMResponse, Message, StreamCallbacks, ToolCallRequest
 from .registry import ProviderSpec
 from src.utils import get_logger
 
@@ -155,43 +153,6 @@ class OpenAICompatProvider(LLMProvider):
         except Exception as exc:
             return self._error_response(exc)
 
-    async def embed(
-        self,
-        inputs: Sequence[str],
-        *,
-        dimensions: int | None = None,
-    ) -> EmbeddingResponse:
-        """发起一次 OpenAI 兼容 embedding 请求，并统一处理重试、限流和耗时日志。"""
-
-        return await self._run_embedding_call("embed", lambda: self._embed_once(inputs, dimensions=dimensions))
-
-    async def _embed_once(
-        self,
-        inputs: Sequence[str],
-        *,
-        dimensions: int | None = None,
-    ) -> EmbeddingResponse:
-        """只执行一次真实 embedding 请求；是否重试由基类统一决定。"""
-
-        texts = list(inputs)
-        if not texts:
-            return EmbeddingResponse(embeddings=[], model=self._request_model_name(), finish_reason="stop")
-        endpoint = self.api_base.rstrip("/") + "/embeddings"
-        headers = {"Content-Type": "application/json", **self.extra_headers}
-        if self.api_key:
-            headers.setdefault("Authorization", f"Bearer {self.api_key}")
-        payload: JsonObject = {"model": self._request_model_name(), "input": texts}
-        if dimensions is not None:
-            payload["dimensions"] = dimensions
-        if self.extra_body:
-            # embedding 也允许复用 provider 上配置的额外请求体，便于兼容不同代理服务。
-            payload = merge_body(payload, self.extra_body)
-        try:
-            body = await self._post_embedding(endpoint, headers, payload)
-            return self._parse_embedding_response(body, len(texts))
-        except Exception as exc:
-            return self._embedding_error_response(exc)
-
     async def list_models(self) -> list[JsonObject]:
         """读取 OpenAI 兼容 provider 的模型目录，并转换成前端统一结构。"""
 
@@ -275,66 +236,6 @@ class OpenAICompatProvider(LLMProvider):
             return self.model.split("/", 1)[1]
         return self.model
 
-    async def _post_embedding(self, endpoint: str, headers: JsonObject, payload: JsonObject) -> JsonObject:
-        """发送 embedding HTTP 请求并返回 JSON 响应体。
-
-        Args:
-            endpoint: 已拼好的 `/embeddings` 地址。
-            headers: 请求头，包含鉴权信息和额外头。
-            payload: 请求体，包含模型名、输入文本和可选维度。
-
-        Returns:
-            供应商返回的 JSON 字典。
-
-        如果外部注入的 client 带有异步 post 方法，就优先复用它，方便设置页或测试传入
-        假客户端；正式运行时没有这种假客户端，就临时创建 httpx.AsyncClient 发请求。
-        """
-        # 中文注释：AsyncOpenAI 自己也可能有内部 post 方法，但那不是普通 HTTP client。
-        # 只有测试注入的轻量 HTTP 假客户端才走这里，正式 SDK client 走下面的 httpx.AsyncClient。
-        http_client = self.client if hasattr(self.client, "post") and not hasattr(self.client, "chat") else None
-        if http_client is not None:
-            response = http_client.post(endpoint, headers=headers, json=payload)
-            if inspect.isawaitable(response):
-                response = await response
-            response.raise_for_status()
-            return response.json()
-        async with httpx.AsyncClient(timeout=float(max(1, self.timeout_s))) as client:
-            response = await client.post(endpoint, headers=headers, json=payload)
-            if response.status_code >= 400:
-                raise ProviderHttpError(response.status_code, response.text, dict(response.headers))
-            return response.json()
-
-    def _parse_embedding_response(self, body: JsonObject, expected_count: int) -> EmbeddingResponse:
-        """把 OpenAI 兼容 embedding 响应解析成统一结构。
-
-        Args:
-            body: 供应商返回的 JSON 响应体。
-            expected_count: 本次请求发送的文本数量。
-
-        Returns:
-            解析后的 EmbeddingResponse。
-
-        OpenAI 兼容接口通常把向量放在 data 列表中，并用 index 表示原始输入顺序。
-        这里先按 index 排序，再逐条校验向量格式，避免错误数据写进本地向量库。
-        """
-        raw_items = body.get("data") if isinstance(body, dict) else None
-        if not isinstance(raw_items, list):
-            raise ValueError("embedding 服务没有返回 data 列表")
-        ordered = sorted(raw_items, key=lambda item: int(item.get("index", 0)) if isinstance(item, dict) else 0)
-        embeddings: list[list[float]] = []
-        for item in ordered:
-            vector = item.get("embedding") if isinstance(item, dict) else None
-            if not isinstance(vector, list) or not all(isinstance(value, int | float) for value in vector):
-                raise ValueError("embedding 服务返回了无效向量")
-            embeddings.append([float(value) for value in vector])
-        if len(embeddings) != expected_count:
-            raise ValueError("embedding 服务返回的向量数量与请求文本数量不一致")
-        return EmbeddingResponse(
-            embeddings=embeddings,
-            model=body.get("model") or self._request_model_name(),
-            usage=body.get("usage") if isinstance(body.get("usage"), dict) else None,
-            finish_reason="stop",
-        )
 
     def _parse_response(self, data: Any) -> LLMResponse:
         """把 SDK 原始响应转换成项目内部统一的 LLMResponse。

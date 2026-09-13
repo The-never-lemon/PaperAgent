@@ -10,12 +10,11 @@ from typing import Any
 from src.llm import make_provider
 from src.llm.config import (
     AgentConfig,
-    EmbeddingProfile,
     ModelConfig,
     ProviderConfig,
-    _embedding_profiles_from_dict,
     _provider_from_dict,
 )
+
 from src.llm.registry import PROVIDERS, ProviderSpec, match_provider_backend
 from src.repositories.settings.json import SettingsRepository
 
@@ -44,7 +43,7 @@ def settings_payload(repo: SettingsRepository, agent_name: str | None = None) ->
 
     中文说明：
     配置不完整时（例如只保存了 Provider、还没有 default_agent），页面仍然要展示
-    已经保存的部分：Provider 和嵌入模型照常返回，智能体列表留空。这样设置页
+    已经保存的部分：Provider 照常返回，智能体列表留空。这样设置页
     永远不会因为“还没配完”而打不开，用户可以在网页里逐步补全配置。
     """
 
@@ -53,15 +52,14 @@ def settings_payload(repo: SettingsRepository, agent_name: str | None = None) ->
     try:
         config = ModelConfig.from_dict(data, system)
     except ValueError:
-        # default_agent 缺失时 from_dict 会拒绝构建；但 Provider 和嵌入模型
-        # 不依赖 default_agent，单独解析出来用于展示，智能体部分暂时留空。
+        # default_agent 缺失时 from_dict 会拒绝构建；但 Provider 不依赖 default_agent，
+        # 可以单独解析出来用于展示，智能体部分暂时留空。
         config = ModelConfig(
             providers={
                 name: _provider_from_dict(name, value)
                 for name, value in (data.get("providers") or {}).items()
             },
             agents={},
-            embedding_profiles=_embedding_profiles_from_dict(data, system),
             system=system,
         )
 
@@ -83,10 +81,8 @@ def settings_payload(repo: SettingsRepository, agent_name: str | None = None) ->
         "agents": agent_items,
         "providers": _provider_items(config),
         "provider_types": _provider_type_items(),
-        "embedding_profiles": _embedding_items(config),
         "defaults": {
             "llm": _dataclass_like(system.llm),
-            "embedding": _dataclass_like(system.embedding),
         },
         # 中文注释：当前实现保存后下一轮请求即可生效，不需要进程重启。
         "requires_restart": False,
@@ -94,7 +90,6 @@ def settings_payload(repo: SettingsRepository, agent_name: str | None = None) ->
         "apply_state": "applied_next_request",
         "runtime_capabilities": {
             "agent_model_settings": True,
-            "embedding_profiles": True,
             "provider_model_catalog": True,
             "configured_model_connectivity_test": True,
         },
@@ -161,10 +156,10 @@ def update_provider_settings(repo: SettingsRepository, name: str, patch: JsonObj
 
 
 def delete_provider_settings(repo: SettingsRepository, name: str) -> JsonObject:
-    """删除一个 provider 配置，并清理引用它的智能体和嵌入模型。
+    """删除一个 provider 配置，并清理引用它的智能体。
 
     中文说明：
-    如果某个智能体或嵌入模型还引用着被删的 Provider，配置里会留下悬空引用，
+    如果某个智能体还引用着被删的 Provider，配置里会留下悬空引用，
     之后跑任务时会报“找不到 Provider”的怪错，所以删除时一起清掉。
     """
 
@@ -176,35 +171,11 @@ def delete_provider_settings(repo: SettingsRepository, name: str) -> JsonObject:
     agents = _agents(data)
     for agent_name in [n for n, a in agents.items() if a.get("provider") == name]:
         del agents[agent_name]
-    profiles = _embedding_profiles(data)
-    for profile_name in [n for n, p in profiles.items() if p.get("provider") == name]:
-        del profiles[profile_name]
 
     repo.save(data)
     return settings_payload(repo)
 
 
-def update_embedding_profile(repo: SettingsRepository, name: str, patch: JsonObject) -> JsonObject:
-    """更新嵌入模型配置。"""
-
-    data = _normalized_config(repo.load())
-    profile = _embedding_profiles(data).setdefault(name, {})
-    allowed = {
-        "label": "label",
-        "provider": "provider",
-        "model": "model_name",
-        "model_name": "model_name",
-        "modelName": "model_name",
-        "dimensions": "dimensions",
-        "batch_size": "batch_size",
-        "batchSize": "batch_size",
-    }
-    for incoming, target in allowed.items():
-        if incoming in patch:
-            profile[target] = patch[incoming]
-    _validate_embedding(data, profile)
-    repo.save(data)
-    return settings_payload(repo)
 
 
 def provider_models_payload(repo: SettingsRepository, provider: str, client: Any | None = None) -> JsonObject:
@@ -270,19 +241,12 @@ def model_connectivity_payload(
     name: str,
     *,
     client: Any | None = None,
-    embedding_client: Any | None = None,
 ) -> JsonObject:
     """按当前保存的模型配置做一次最小真实调用，用来判断这条配置能不能用。"""
 
     # 中文注释：这是旧同步入口，只做临时兼容；FastAPI 路由已经改用 async_model_connectivity_payload。
     return _run_async_for_legacy(
-        async_model_connectivity_payload(
-            repo,
-            target_type,
-            name,
-            client=client,
-            embedding_client=embedding_client,
-        )
+        async_model_connectivity_payload(repo, target_type, name, client=client)
     )
 
 
@@ -292,7 +256,6 @@ async def async_model_connectivity_payload(
     name: str,
     *,
     client: Any | None = None,
-    embedding_client: Any | None = None,
 ) -> JsonObject:
     """按当前保存的模型配置做一次最小真实异步调用。"""
 
@@ -310,10 +273,6 @@ async def async_model_connectivity_payload(
         if target_name not in config.agents:
             raise SettingsError(f"unknown agent: {target_name}", 404)
         return await _test_agent_connectivity(config, target_name, client=client)
-    if normalized_target == "embedding_profile":
-        if target_name not in config.embedding_profiles:
-            raise SettingsError(f"unknown embedding profile: {target_name}", 404)
-        return await _test_embedding_connectivity(config, target_name, client=embedding_client)
     raise SettingsError(f"unsupported target_type: {normalized_target}")
 
 
@@ -337,7 +296,6 @@ def _normalized_config(data: JsonObject) -> JsonObject:
     data = copy.deepcopy(data)
     data.setdefault("providers", {})
     data.setdefault("agents", {})
-    data.setdefault("embedding_profiles", data.pop("embeddingProfiles", {}))
     return data
 
 
@@ -414,101 +372,6 @@ async def _test_agent_connectivity(config: ModelConfig, name: str, *, client: An
         await snapshot.aclose()
 
 
-async def _test_embedding_connectivity(config: ModelConfig, name: str, *, client: Any | None = None) -> JsonObject:
-    """对指定嵌入模型配置发起一次最小 embedding 请求。
-
-    中文说明：
-    1. 这里不会去拉 provider 的模型目录；
-    2. 而是直接调用当前 profile 绑定的 model_name；
-    3. 只要返回了一条非空向量，就说明这条嵌入配置能真正参与索引和检索。
-    """
-
-    profile = config.resolve_embedding_profile(name)
-    started_at = perf_counter()
-    try:
-        # 这里和阅读节点使用同一套 provider 装配方式，避免设置页通过、真实索引却失败。
-        snapshot = make_provider(
-            config,
-            embedding_profile_name=name,
-            client=client,
-            timeout_s=float(max(1, config.system.read.download_timeout_seconds)),
-        )
-    except Exception as exc:
-        return _connectivity_payload(
-            target_type="embedding_profile",
-            name=name,
-            provider=profile.provider,
-            model=profile.model_name,
-            status="not_configured",
-            message=f"当前嵌入配置还不能发起调用：{exc}",
-            latency_ms=_elapsed_ms(started_at),
-        )
-
-    try:
-        try:
-            response = await snapshot.provider.embed(["连通性测试"], dimensions=profile.dimensions)
-        except NotImplementedError as exc:
-            return _connectivity_payload(
-                target_type="embedding_profile",
-                name=name,
-                provider=profile.provider,
-                model=profile.model_name,
-                status="failed",
-                message=f"当前 provider 不支持 embedding：{exc}",
-                latency_ms=_elapsed_ms(started_at),
-            )
-        except Exception as exc:
-            return _connectivity_payload(
-                target_type="embedding_profile",
-                name=name,
-                provider=profile.provider,
-                model=profile.model_name,
-                status="failed",
-                message=f"嵌入模型调用失败：{exc}",
-                latency_ms=_elapsed_ms(started_at),
-            )
-
-        if not response.ok:
-            detail = response.content.strip() or response.error_code or response.error_type or response.error_kind or "模型没有返回成功结果"
-            return _connectivity_payload(
-                target_type="embedding_profile",
-                name=name,
-                provider=profile.provider,
-                model=profile.model_name,
-                status="failed",
-                message=f"嵌入模型调用失败：{detail}",
-                latency_ms=_elapsed_ms(started_at),
-                error_kind=response.error_kind,
-                error_status_code=response.error_status_code,
-                finish_reason=response.finish_reason,
-            )
-
-        vector = response.embeddings[0] if response.embeddings else None
-        if not isinstance(vector, list) or not vector:
-            return _connectivity_payload(
-                target_type="embedding_profile",
-                name=name,
-                provider=profile.provider,
-                model=profile.model_name,
-                status="failed",
-                message="嵌入模型返回的向量为空或格式不正确",
-                latency_ms=_elapsed_ms(started_at),
-                finish_reason=response.finish_reason,
-            )
-
-        return _connectivity_payload(
-            target_type="embedding_profile",
-            name=name,
-            provider=profile.provider,
-            model=profile.model_name,
-            status="passed",
-            message=f"嵌入模型已成功返回 {len(vector)} 维向量",
-            latency_ms=_elapsed_ms(started_at),
-            vector_dimensions=len(vector),
-        )
-    finally:
-        # 中文注释：设置页测试结束后释放 provider 自己创建的异步连接，避免出现未关闭连接警告。
-        await snapshot.aclose()
 
 
 def _apply_optional_provider_field(provider: JsonObject, patch: JsonObject, snake_name: str, camel_name: str) -> None:
@@ -532,10 +395,6 @@ def _agents(data: JsonObject) -> JsonObject:
     return data.setdefault("agents", {})
 
 
-def _embedding_profiles(data: JsonObject) -> JsonObject:
-    """返回 embedding profile 配置字典，并在缺失时补空对象。"""
-
-    return data.setdefault("embedding_profiles", {})
 
 
 def _resolve_agent_name(config: ModelConfig, requested: str | None) -> str:
@@ -608,28 +467,8 @@ def _agent_description(name: str, agent: AgentConfig) -> str:
     return "通用模型能力，适合按需分配任务。"
 
 
-def _embedding_items(config: ModelConfig) -> list[JsonObject]:
-    """构造全部 embedding profile 列表响应。"""
-
-    return [
-        _embedding_item(name, profile, name == config.default_embedding_profile)
-        for name, profile in config.embedding_profiles.items()
-    ]
 
 
-def _embedding_item(name: str, profile: EmbeddingProfile, is_default: bool) -> JsonObject:
-    """构造单个 embedding profile 的列表项结构。"""
-
-    return {
-        "name": name,
-        "label": profile.label or name,
-        "is_default": is_default,
-        "provider": profile.provider,
-        "model": profile.model_name,
-        "model_name": profile.model_name,
-        "dimensions": profile.dimensions,
-        "batch_size": profile.batch_size,
-    }
 
 
 def _provider_items(config: ModelConfig) -> list[JsonObject]:
@@ -707,16 +546,6 @@ def _validate_agent(data: JsonObject, agent: JsonObject) -> None:
     _validate_provider_for_save(data, str(provider))
 
 
-def _validate_embedding(data: JsonObject, profile: JsonObject) -> None:
-    """校验 embedding profile 配置是否完整。"""
-
-    provider = profile.get("provider")
-    model_name = profile.get("model_name") or profile.get("model")
-    if not provider:
-        raise SettingsError("embedding provider is required")
-    if not model_name:
-        raise SettingsError("embedding model_name is required")
-    _validate_provider_for_save(data, str(provider))
 
 
 def _validate_provider_for_save(data: JsonObject, provider: str | None) -> None:
@@ -810,7 +639,6 @@ def _connectivity_payload(
     error_kind: str | None = None,
     error_status_code: int | None = None,
     finish_reason: str | None = None,
-    vector_dimensions: int | None = None,
 ) -> JsonObject:
     """把连通性测试结果整理成统一结构，方便前端直接展示。"""
 
@@ -825,7 +653,6 @@ def _connectivity_payload(
         "error_kind": error_kind,
         "error_status_code": error_status_code,
         "finish_reason": finish_reason,
-        "vector_dimensions": vector_dimensions,
         "tested_at": datetime.now(timezone.utc).isoformat(),
     }
 

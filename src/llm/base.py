@@ -157,47 +157,6 @@ def normalize_token_usage(usage: Mapping[str, Any] | None) -> JsonObject:
 
 
 @dataclass(slots=True)
-class EmbeddingResponse:
-    # embedding 的主结果是向量列表，所以单独定义响应对象，不和文本回复混在一起。
-    """统一封装一次 embedding 调用结果。
-
-    Attributes:
-        embeddings: 与输入文本一一对应的向量列表。
-        model: 实际完成向量化的模型名，便于前端和日志展示。
-        usage: 供应商返回的 token 用量等统计信息。
-        finish_reason: 结束原因；失败时统一为 `"error"`。
-        error_status_code: HTTP 状态码；仅失败时可能存在。
-        error_kind: 归一化后的错误类别，例如 rate_limit、auth、server_error。
-        error_type: 供应商错误体中的更细粒度错误类型。
-        error_code: 供应商错误体中的业务错误码。
-        error_retry_after_s: 建议等待多久再重试，单位秒。
-        error_should_retry: 是否建议重试；若为空则由通用策略继续判断。
-        content: 错误说明或供应商原始错误文本。
-
-    chat 返回的是自然语言文本，embedding 返回的是数字向量。这里单独建一个
-    响应对象，让调用方不用在文本字段里猜测向量数据放在哪里；但错误字段保持和
-    LLMResponse 一致，方便上层用同一套展示和重试逻辑。
-    """
-    embeddings: list[list[float]] = field(default_factory=list)
-    model: str | None = None
-    usage: JsonObject | None = None
-    finish_reason: str | None = None
-    error_status_code: int | None = None
-    error_kind: str | None = None
-    error_type: str | None = None
-    error_code: str | None = None
-    error_retry_after_s: float | None = None
-    error_should_retry: bool | None = None
-    content: str = ""
-
-    @property
-    def ok(self) -> bool:
-        """判断 embedding 请求是否成功。"""
-
-        return self.finish_reason != "error"
-
-
-@dataclass(slots=True)
 class StreamCallbacks:
     # 流式输出拆成文本、思考、工具调用三类增量，方便 runner 按需消费。
     """定义流式输出时可选的三类回调。
@@ -328,26 +287,6 @@ class LLMProvider(ABC):
         """
         raise NotImplementedError
 
-    @abstractmethod
-    async def embed(
-        self,
-        inputs: Sequence[str],
-        *,
-        dimensions: int | None = None,
-    ) -> EmbeddingResponse:
-        """执行一次文本向量化请求。
-
-        Args:
-            inputs: 需要转成向量的文本列表，返回结果需要与它一一对应。
-            dimensions: 可选的目标向量维度，只传给支持该参数的 embedding 服务。
-
-        Returns:
-            统一的 EmbeddingResponse。支持 embedding 的 provider 需要返回向量；
-            不支持 embedding 的 provider 应在自己的实现里抛出清楚错误，告诉用户
-            为什么不能用它生成向量。
-        """
-        raise NotImplementedError
-
     def chat_with_retry(self, messages: Sequence[Message], **kwargs: Any) -> LLMResponse:
         """兼容旧同步调用名，后续图执行改成 async 后会删除。"""
 
@@ -365,11 +304,6 @@ class LLMProvider(ABC):
 
         return self._run_async_compat(self.chat_stream(messages, callbacks, **kwargs))
 
-    def embed_with_retry(self, inputs: Sequence[str], **kwargs: Any) -> EmbeddingResponse:
-        """兼容旧同步 embedding 调用名，后续图执行改成 async 后会删除。"""
-
-        return self._run_async_compat(self.embed(inputs, **kwargs))
-
     async def async_chat(self, messages: Sequence[Message], **kwargs: Any) -> LLMResponse:
         """旧异步调用名；现在直接转到 async 主接口，不再用线程包装。"""
 
@@ -379,11 +313,6 @@ class LLMProvider(ABC):
         """旧异步流式调用名；现在直接转到 async 主接口，不再用线程包装。"""
 
         return await self.chat_stream(messages, callbacks, **kwargs)
-
-    async def async_embed(self, inputs: Sequence[str], **kwargs: Any) -> EmbeddingResponse:
-        """旧异步 embedding 调用名；现在直接转到 async 主接口，不再用线程包装。"""
-
-        return await self.embed(inputs, **kwargs)
 
     async def list_models(self) -> list[JsonObject]:
         """列出 provider 可用模型；不支持的 provider 直接给出清楚提示。"""
@@ -417,10 +346,10 @@ class LLMProvider(ABC):
                 self._sync_runner = asyncio.Runner()
             return self._sync_runner.run(awaitable)
         # 中文注释：如果已经在 async 环境中，就不能再走同步桥，否则会把事件循环套住。
-        # 这种场景说明调用方已经具备 await 条件，应直接 await provider.chat/embed。
+        # 这种场景说明调用方已经具备 await 条件，应直接 await provider.chat。
         if hasattr(awaitable, "close"):
             awaitable.close()
-        raise RuntimeError("同步兼容接口不能在已有事件循环中调用，请改用 await provider.chat(...) / await provider.embed(...)")
+        raise RuntimeError("同步兼容接口不能在已有事件循环中调用，请改用 await provider.chat(...)")
 
     def _close_sync_runner(self) -> None:
         """关闭旧同步桥使用的 Runner。"""
@@ -458,34 +387,7 @@ class LLMProvider(ABC):
         self._log_call_result(operation, last, attempts, started_at)
         return last
 
-    async def _run_embedding_call(self, operation: str, call_once: Callable[[], Awaitable[EmbeddingResponse]]) -> EmbeddingResponse:
-        """按统一规则执行一次 embedding 调用，包含限流、重试和耗时日志。"""
-
-        last = EmbeddingResponse(finish_reason="error", error_kind="unknown", error_should_retry=True)
-        started_at = time.perf_counter()
-        attempts = 0
-        for attempt in range(self.max_retries):
-            attempts = attempt + 1
-            # 中文注释：和文本调用一样，排队名额只在实际请求时占用，等待重试时把名额让给别人。
-            async with self._semaphore:
-                try:
-                    # 中文注释：embedding 也是网络 I/O，请直接 await 异步客户端，不再阻塞线程。
-                    last = await call_once()
-                except NotImplementedError:
-                    # 不支持 embedding 是明确能力问题，不应吞掉或重试。
-                    # 异常往外抛时 async with 会自动把名额还回去，不会把名额卡死。
-                    raise
-                except Exception as exc:
-                    last = self._embedding_error_response(exc)
-            if last.ok or not self._should_retry(last) or attempt == self.max_retries - 1:
-                self._log_call_result(operation, last, attempts, started_at)
-                return last
-            # 中文注释：睡在信号量外面，这样等待期间名额是空着的；等待时长还会听服务端 Retry-After 的话。
-            await asyncio.sleep(self._retry_delay(attempts, last))
-        self._log_call_result(operation, last, attempts, started_at)
-        return last
-
-    def _retry_delay(self, attempt: int, response: LLMResponse | EmbeddingResponse | None = None) -> float:
+    def _retry_delay(self, attempt: int, response: LLMResponse | None = None) -> float:
         """计算这次重试前要等多久，返回值单位为秒。
 
         Args:
@@ -516,7 +418,7 @@ class LLMProvider(ABC):
             return max(our_delay_s, capped_retry_after_s)
         return our_delay_s
 
-    def _log_call_result(self, operation: str, response: LLMResponse | EmbeddingResponse, attempts: int, started_at: float) -> None:
+    def _log_call_result(self, operation: str, response: LLMResponse, attempts: int, started_at: float) -> None:
         """记录一次 provider 调用摘要，避免把完整模型内容写进日志。"""
 
         duration_ms = int((time.perf_counter() - started_at) * 1000)
@@ -586,30 +488,6 @@ class LLMProvider(ABC):
             content=error["content"],
         )
 
-    def _embedding_error_response(self, exc: Exception) -> EmbeddingResponse:
-        """把 embedding 调用异常统一折叠为 `EmbeddingResponse` 错误对象。
-
-        Args:
-            exc: embedding 调用过程中抛出的异常，可能是 HTTP 错误、SDK 错误或连接错误。
-
-        Returns:
-            `finish_reason="error"` 的统一 embedding 响应，方便上层按同一套字段展示。
-
-        这个函数和 `_error_response` 的思路相同，只是返回对象不同。这样调用方可以
-        清楚地区分“文本生成失败”和“向量生成失败”，不会把两类结果混在一起。
-        """
-        error = self._error_fields(exc)
-        return EmbeddingResponse(
-            finish_reason="error",
-            error_status_code=error["error_status_code"],
-            error_kind=error["error_kind"],
-            error_retry_after_s=error["error_retry_after_s"],
-            error_should_retry=error["error_should_retry"],
-            error_type=error["error_type"],
-            error_code=error["error_code"],
-            content=error["content"],
-        )
-
     def _error_fields(self, exc: Exception) -> JsonObject:
         """把各种异常提取成通用错误字段。"""
 
@@ -653,7 +531,7 @@ class LLMProvider(ABC):
             "content": str(exc),
         }
 
-    def _should_retry(self, response: LLMResponse | EmbeddingResponse) -> bool:
+    def _should_retry(self, response: LLMResponse) -> bool:
         """判断某个错误响应是否值得重试。
 
         Args:

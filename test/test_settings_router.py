@@ -52,12 +52,6 @@ class SettingsFastApiTest(unittest.TestCase):
                         "context_window_tokens": 8192,
                     }
                 },
-                "embedding_profiles": {
-                    "default_embedding": {
-                        "model_name": "text-embedding-3-small",
-                        "provider": "openai",
-                    }
-                },
             }
         )
         app = create_app(settings_repo=repo, config=GatewayConfig())
@@ -75,7 +69,6 @@ class SettingsFastApiTest(unittest.TestCase):
         self.assertEqual(payload["agent"]["resolved_provider"], "openai")
         self.assertTrue(payload["providers"][0]["name"])
         self.assertTrue(payload["agents"][0]["is_default"])
-        self.assertTrue(payload["embedding_profiles"][0]["is_default"])
 
     def test_create_agent_configuration_returns_named_agent(self):
         """验证创建命名 agent 后响应中会切换到该 agent。"""
