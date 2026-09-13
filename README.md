@@ -2,7 +2,7 @@
 
 # 知枢Paper-Agent · 个性化科研工作台
 
-**输入一个研究主题 → 收获一份可全程追踪的领域综述**
+**输入一个研究主题 → 收获论文调研、阅读以及综述撰写的全周期信息**
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
