@@ -338,7 +338,7 @@ async function deleteCurrentProvider() {
     return;
   }
   const confirmed = window.confirm(
-    `确定删除 Provider「${name}」吗？\n引用它的智能体和嵌入模型也会一起被删除。`,
+    `确定删除 Provider「${name}」吗？\n引用它的智能体会一起被删除。`,
   );
   if (!confirmed) {
     return;
@@ -649,7 +649,7 @@ function handleError(error: unknown, title: string) {
         <span class="eyebrow">Runtime Configuration</span>
         <h1>系统配置工作台</h1>
         <p>
-          用一个干净的控制台统一管理模型上游、智能体与嵌入配置。
+          用一个干净的控制台统一管理模型上游与智能体配置。
           每次保存都会即时落盘，下一次请求直接生效。
         </p>
       </div>
@@ -865,7 +865,7 @@ function handleError(error: unknown, title: string) {
                 <div class="mini-note">
                   <span class="eyebrow">Model Catalog</span>
                   <p>
-                    目录抓取只用于辅助选择模型名，不能代表当前智能体或嵌入配置已经真实可调用。
+                    目录抓取只用于辅助选择模型名，不能代表当前智能体配置已经真实可调用。
                   </p>
                 </div>
                 <StatusPill

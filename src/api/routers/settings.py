@@ -93,7 +93,7 @@ def create_settings_router(repo: SettingsRepository) -> APIRouter:
 
     @router.delete("/providers/{name}")
     async def remove_provider(name: str):
-        """删除一个 provider 配置（引用它的智能体和嵌入模型也会一起删掉）。"""
+        """删除一个 provider 配置（引用它的智能体会一起删掉）。"""
 
         try:
             return delete_provider_settings(repo, name)

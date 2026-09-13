@@ -97,6 +97,5 @@ export interface ModelConnectivityPayload {
   error_kind: string | null;
   error_status_code: number | null;
   finish_reason: string | null;
-  vector_dimensions: number | null;
   tested_at: string;
 }
