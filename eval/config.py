@@ -105,9 +105,11 @@ THRESHOLDS = {
     "l1_golden_recall": 0.6,
     "l1_abstract_completeness": 0.9,
     "l1_errors_empty_rate": 0.8,
-    "l1_reranking_diff": 0.4,
+    # 中文注释：下面两项是"绝对分数"型阈值，会随裁判分制一起变。
+    # 旧的 0~2 分制下它们是 0.4 和 1.2，改成 0~4 分制后按比例翻倍。
+    "l1_reranking_diff": 0.8,
     "l1_expansion_success_rate": 0.9,
-    "l1_expansion_relevance": 1.2,
+    "l1_expansion_relevance": 2.4,
     "l1_search_p95_latency_s": 15,
 
     # L2 端到端评估阈值

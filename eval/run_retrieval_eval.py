@@ -74,6 +74,9 @@ class AggregateMetrics:
     expand_success_rate: float | None
     expand_relevance_avg: float | None
     latency_s: dict  # {"p50": ..., "p95": ...}
+    # 中文注释：被评为"裁判饱和"的用例数——这些用例里所有论文拿到的分数完全相同，
+    # nDCG 必然等于 1。它们已经从裁判类指标的均值里排除，只在这里计数留痕。
+    judge_saturated_cases: int = 0
 
 
 # ==================== 指标计算函数 ====================
@@ -81,7 +84,7 @@ class AggregateMetrics:
 def calculate_ndcg_at_k(scores: list[float], k: int = 10) -> float:
     """计算 nDCG@k 指标。
 
-    分数应该是 [0, 1, 2] 之间的相关性得分（0 无关，1 背景价值，2 直接命中）。
+    分数应该是 0~4 之间的相关性得分（0 无关，1 顺带提及，2 相邻领域，3 直接研究某侧面，4 核心工作）。
     使用标准公式：DCG = sum(relevance_i / log2(i+1))，其中 i 是 1-based 位置。
     理想增益(ideal DCG)用分数降序排列计算。
 
@@ -113,13 +116,14 @@ def calculate_ndcg_at_k(scores: list[float], k: int = 10) -> float:
     return dcg / ideal_dcg
 
 
-def calculate_precision_at_k(scores: list[float], k: int = 10, threshold: float = 1.0) -> float:
+def calculate_precision_at_k(scores: list[float], k: int = 10, threshold: float = 2.0) -> float:
     """计算 Precision@k 指标（相关性≥threshold 的占比）。
 
     Args:
-        scores: 论文相关性分数列表（0/1/2）
+        scores: 论文相关性分数列表（0~4）
         k: 取前 k 个计算
-        threshold: 判定为相关的最小分数
+        threshold: 判定为相关的最小分数。默认 2.0（"属于同一大领域及以上"）——
+            在旧的 0~2 分制里，同样口径对应的是 1.0
 
     Returns:
         P@k（0~1）
@@ -193,6 +197,7 @@ async def run_case(
     skip_judge: bool = False,
     replay_raw_dir: Path | None = None,
     out_raw_dir: Path | None = None,
+    rejudge: bool = False,
 ) -> tuple[CaseMetrics, dict | None, dict | None]:
     """执行一条评估用例。
 
@@ -202,6 +207,8 @@ async def run_case(
         skip_judge: 是否跳过 LLM 裁判
         replay_raw_dir: 若非空，从此目录读历史 search_response.json 而不调 API
         out_raw_dir: 输出目录中的 raw/ 子目录
+        rejudge: 重放模式下是否仍然跑裁判。默认 False（重放 = 零成本）；
+            想验证裁判提示词改动的效果时传 True，就不必重新做一次真实检索
 
     Returns:
         (CaseMetrics, judge_output, expand_response)
@@ -313,7 +320,8 @@ async def run_case(
         judge_output = None
 
         # 第三步：LLM 裁判（可选）
-        if not skip_judge and not replay_raw_dir and papers:
+        # 中文注释：重放模式默认不判分（保持零成本）；只有显式传了 rejudge 才重新判一次。
+        if not skip_judge and (not replay_raw_dir or rejudge) and papers:
             # 只对前 10 篇裁判
             papers_to_judge = papers[:10]
             judge_result = await run_relevance_judge(
@@ -330,8 +338,13 @@ async def run_case(
 
                 # 从裁判分数计算排序指标
                 scores = [s.get("score", 0) for s in judge_result.get("scores", [])]
+                # 中文注释：如果这些论文拿到的分数**完全相同**，那么"实际顺序"和"理想顺序"
+                # 必然一致，nDCG 恒等于 1。这不是"排序好"，而是"裁判根本没给出区分度"。
+                # 标出来，聚合时把它排除，免得满分假绿灯继续通过阈值。
+                metrics["judge_saturated"] = len(set(scores)) < 2
+                metrics["judge_score_span"] = (max(scores) - min(scores)) if scores else 0
                 metrics["ndcg_at_10"] = calculate_ndcg_at_k(scores, k=10)
-                metrics["precision_at_10"] = calculate_precision_at_k(scores, k=10, threshold=1.0)
+                metrics["precision_at_10"] = calculate_precision_at_k(scores, k=10, threshold=2.0)
                 metrics["rerank_monotonicity_gap"] = calculate_rerank_monotonicity(scores)
 
                 # 落盘 judge_output
@@ -505,15 +518,22 @@ def aggregate_metrics(all_cases: list[CaseMetrics]) -> AggregateMetrics:
     expand_relevances = []
     rerank_monotonicity = []
 
+    # 中文注释：把"裁判饱和"的用例单独拎出来计数。它们只在下面三个**裁判类**指标上
+    # 被排除——分数全同意味着 nDCG 必然是 1，混进均值只会抬高分数、掩盖真实排序质量。
+    # 金标召回是确定性指标、扩展成功率与裁判无关，都照常统计。
+    saturated_cases = [c for c in judged_cases if c.metrics.get("judge_saturated")]
+
     for case in judged_cases:
-        if "ndcg_at_10" in case.metrics:
-            ndcg_values.append(case.metrics["ndcg_at_10"])
-        if "precision_at_10" in case.metrics:
-            precision_values.append(case.metrics["precision_at_10"])
+        saturated = bool(case.metrics.get("judge_saturated"))
+        if not saturated:
+            if "ndcg_at_10" in case.metrics:
+                ndcg_values.append(case.metrics["ndcg_at_10"])
+            if "precision_at_10" in case.metrics:
+                precision_values.append(case.metrics["precision_at_10"])
+            if "rerank_monotonicity_gap" in case.metrics:
+                rerank_monotonicity.append(case.metrics["rerank_monotonicity_gap"])
         if "golden_recall" in case.metrics:
             golden_recalls.append(case.metrics["golden_recall"])
-        if "rerank_monotonicity_gap" in case.metrics:
-            rerank_monotonicity.append(case.metrics["rerank_monotonicity_gap"])
         if case.metrics.get("expand_success"):
             expand_success_count += 1
         if "expand_relevance_avg" in case.metrics:
@@ -562,6 +582,7 @@ def aggregate_metrics(all_cases: list[CaseMetrics]) -> AggregateMetrics:
             "p50": percentile(latencies, 50) if latencies else 0,
             "p95": percentile(latencies, 95) if latencies else 0,
         },
+        judge_saturated_cases=len(saturated_cases),
     )
 
 
@@ -678,6 +699,9 @@ def generate_retrieval_markdown(all_cases: list[CaseMetrics], mode: str) -> str:
     # nDCG@10
     ndcg_val = format_threshold_warning(aggregate.ndcg_at_10, eval_config.THRESHOLDS.get("l1_ndcg_at_10", 0.75), "ge")
     lines.append(f"| nDCG@10 | {ndcg_val} | ≥ 0.75 |")
+    # 中文注释：显式报告有几条用例因为"裁判给出的分数完全相同"被排除在均值之外。
+    # 这个数字越大，说明裁判的区分度越差，上面几行裁判类指标的参考价值就越低。
+    lines.append(f"| 裁判饱和用例数 | {aggregate.judge_saturated_cases} | 0 |")
 
     # Precision@10
     p10_val = format_threshold_warning(aggregate.precision_at_10, eval_config.THRESHOLDS.get("l1_precision_at_10", 0.7), "ge")
@@ -724,8 +748,8 @@ def generate_retrieval_markdown(all_cases: list[CaseMetrics], mode: str) -> str:
     lines.append("")
     lines.append("## 用例详情")
     lines.append("")
-    lines.append("| case_id | domain | difficulty | status | latency_s | nDCG@10 | P@10 | Golden | Duplicates | Fields | Errors | Expand |")
-    lines.append("|---------|--------|-----------|--------|-----------|---------|------|--------|-----------|--------|--------|--------|")
+    lines.append("| case_id | domain | difficulty | status | latency_s | nDCG@10 | 裁判饱和 | P@10 | Golden | Duplicates | Fields | Errors | Expand |")
+    lines.append("|---------|--------|-----------|--------|-----------|---------|---------|------|--------|-----------|--------|--------|--------|")
 
     for case in all_cases:
         status = case.status
@@ -741,7 +765,8 @@ def generate_retrieval_markdown(all_cases: list[CaseMetrics], mode: str) -> str:
         ndcg_str = f"{ndcg:.3f}" if ndcg is not None else "未测"
         p10_str = f"{p10:.3f}" if p10 is not None else "未测"
 
-        lines.append(f"| {case.case_id} | {case.domain} | {case.difficulty} | {status} | {latency} | {ndcg_str} | {p10_str} | {golden:.1%} | {dups} | {complete_title:.1%} | {errors} | {expand} |")
+        sat_str = "⚠️饱和" if case.metrics.get("judge_saturated") else "-"
+        lines.append(f"| {case.case_id} | {case.domain} | {case.difficulty} | {status} | {latency} | {ndcg_str} | {sat_str} | {p10_str} | {golden:.1%} | {dups} | {complete_title:.1%} | {errors} | {expand} |")
 
     lines.append("")
     return "\n".join(lines)
@@ -768,7 +793,16 @@ async def main():
     parser.add_argument(
         "--replay",
         type=str,
-        help="不调用任何 API，从指定历史目录的 raw/ 重读 search_response.json（零成本）",
+        help="不调用任何 API，重放历史检索结果（零成本）。"
+             "参数要传报告目录下的 raw/ 子目录本身，"
+             "例如 --replay eval/reports/20260913_120000/raw",
+    )
+    parser.add_argument(
+        "--rejudge",
+        action="store_true",
+        help="配合 --replay 使用：重放历史检索结果的同时重新跑一遍 LLM 裁判。"
+             "默认重放不判分（保持零成本）；想验证提示词改动效果时用它，"
+             "就不必重新做一次真实检索了。",
     )
     parser.add_argument(
         "--out-dir",
@@ -800,7 +834,8 @@ async def main():
     # 装配 judge deps
     judge_deps = None
     usage_total = {"input_tokens": 0, "output_tokens": 0}
-    if not args.skip_judge and not args.replay:
+    # 中文注释：--rejudge（配合 --replay）时也要装配裁判，否则重放就没法重新判分。
+    if not args.skip_judge and (not args.replay or args.rejudge):
         deps_result = await build_judge_deps()
         if deps_result["status"] == "ok":
             judge_deps = deps_result["deps"]
@@ -855,6 +890,7 @@ async def main():
             skip_judge=args.skip_judge,
             replay_raw_dir=replay_raw_dir,
             out_raw_dir=out_raw_dir,
+            rejudge=args.rejudge,
         )
         all_results.append(case_metric)
 
@@ -865,7 +901,7 @@ async def main():
 
     # 确定执行模式
     if args.replay:
-        mode = "replay"
+        mode = "replay+rejudge" if args.rejudge else "replay"
     elif args.skip_judge:
         mode = "skip-judge"
     else:

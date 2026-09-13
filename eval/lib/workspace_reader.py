@@ -182,10 +182,13 @@ def check_field_completeness(papers: list[dict]) -> dict:
         }
 
     total = len(papers)
-    title_count = sum(1 for p in papers if p.get("title", "").strip())
+    title_count = sum(1 for p in papers if (p.get("title") or "").strip())
     year_count = sum(1 for p in papers if p.get("year"))
-    abstract_count = sum(1 for p in papers if p.get("abstract", "").strip())
-    id_count = sum(1 for p in papers if p.get("doi", "").strip() or p.get("paperId", "").strip())
+    abstract_count = sum(1 for p in papers if (p.get("abstract") or "").strip())
+    # 中文注释：这里必须写成 (p.get(...) or "")。p.get(key, "") 的默认值只在"键不存在"
+    # 时才生效，兜不住"键存在但值是 None"——论文没有 DOI 时 doi 就是 None，
+    # 直接 .strip() 会抛 AttributeError，让整个用例被判成 infra_error。
+    id_count = sum(1 for p in papers if (p.get("doi") or "").strip() or (p.get("paperId") or "").strip())
 
     return {
         "total": total,

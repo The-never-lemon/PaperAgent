@@ -5,7 +5,7 @@
 详细指标和 token 用量统计。
 
 主要函数：
-- run_relevance_judge: 判断论文与研究主题的相关性（0-2分）
+- run_relevance_judge: 判断论文与研究主题的相关性（0-4分）
 - run_faithfulness_judge: 判断最终答案是否被引用论文支撑（1-5分）
 - run_review_judge: 判断综述内容是否被引用论文支撑（1-5分）
 - run_completeness_judge: 判断答案完整性和组织质量（1-5分）
@@ -229,10 +229,17 @@ async def run_relevance_judge(
 ) -> dict:
     """判断论文与研究主题的相关性。
 
-    一次批量调用判多篇论文的相关性。相关性分为三个等级：
-    - 0: 论文与主题无关或仅靠关键词碰瓷
-    - 1: 同大领域或相邻问题，有背景价值
-    - 2: 直接命中研究主题且涉及至少一个概念组的核心工作
+    一次批量调用判多篇论文的相关性。相关性分五档（0~4）：
+    - 0: 仅靠关键词字面匹配被检索到，实质与该主题无关
+    - 1: 只是顺带提及该主题（当作背景、工具或应用场景之一）
+    - 2: 同大领域、研究相邻问题，可作背景参考
+    - 3: 直接研究该主题的某个具体侧面，但范围较窄或非核心工作
+    - 4: 核心贡献就是解决该主题，是该方向的代表性工作
+
+    为什么必须显式排除"关键词匹配"：检索本身是用概念组做 AND 过滤出来的，
+    所以出现在这里的每篇论文**必然**涉及这些概念组。旧版把"涉及至少一个概念组"
+    写成了 2 分的条件之一，于是所有结果都被判满分、nDCG 恒等于 1，指标彻底失效。
+    现在的标准要求判断"论文的核心研究问题是否落在主题上"，并强制要求给出比较性理由。
 
     Args:
         deps: JudgeDeps 依赖
@@ -281,21 +288,33 @@ async def run_relevance_judge(
 【待评论文列表】
 {papers_text}
 
-【评分标准】
-0 分：论文与主题完全无关，或仅因为关键词出现而看起来相关（"碰瓷"）
-1 分：论文涉及同一大领域或相邻问题，可作为背景知识参考，但不是直接研究对象
-2 分：论文直接解决或贡献于研究主题，且涉及上述至少一个概念组的核心工作
+【关于这批论文的重要提示】
+这批论文是用上面这些概念组检索出来的，所以**每一篇都会涉及这些关键词**。
+因此"关键词出现了"不能作为打高分的理由——请判断论文的**核心研究问题**是否落在
+该主题上，而不是它有没有提到这些词。
+
+【评分标准】请用 0~4 五档，逐档拉开差距：
+4 分：论文的核心贡献就是解决该主题，是该方向的代表性工作
+3 分：论文直接研究该主题的某个具体侧面，但范围较窄或非核心工作
+2 分：论文属于同一大领域、研究相邻问题，可作为背景参考
+1 分：论文只是顺带提及该主题（当作背景、工具或应用场景之一）
+0 分：仅因关键词字面匹配被检索到，实质内容与该主题无关
+
+【打分要求】
+1. 请先通读全部论文，再统一打分，保证前后标准一致
+2. 这 {len(papers)} 篇论文的相关程度客观上是存在差异的，请如实反映，不要都挤在同一档
+3. reason 必须说明"它为什么比同批其它论文更相关 / 更不相关"，而不是复述摘要
 
 【输出要求】
 请只输出 JSON 格式的评分结果，格式如下：
 {{
   "scores": [
-    {{"index": 1, "score": 0, "reason": "此论文讨论的是...与研究主题无关"}},
-    {{"index": 2, "score": 2, "reason": "该论文直接针对...问题提出了..."}}
+    {{"index": 1, "score": 0, "reason": "..."}},
+    {{"index": 2, "score": 4, "reason": "..."}}
   ]
 }}
 
-每个 score 对象必须包含 index（论文序号）、score（0/1/2）、reason（一句话理由）。"""
+每个 score 对象必须包含 index（论文序号）、score（0~4）、reason（一句话理由）。"""
 
     # 中文注释：调用 judge LLM
     result = await _call_judge_llm(deps, prompt, max_retries=1)
@@ -321,14 +340,14 @@ async def run_relevance_judge(
     # 中文注释：验证每个分数的有效性
     for score_obj in scores:
         score_val = score_obj.get("score")
-        if score_val not in (0, 1, 2):
+        if score_val not in (0, 1, 2, 3, 4):
             logger.warning(
                 "相关性评估分数无效",
                 extra={"score": score_val, "case_id": case_id},
             )
             return {
                 "status": "judge_failed",
-                "reason": f"分数无效：{score_val}（应为 0/1/2）",
+                "reason": f"分数无效：{score_val}（应为 0~4）",
             }
 
     # 中文注释：检查 index 覆盖
@@ -773,7 +792,7 @@ async def run_calibration(deps, *, calibration_cases: list[dict]) -> dict:
     - ±1 一致率：|judge_score - human_score| <= 1 的比例
     - 精确一致率：judge_score == human_score 的比例
     - Spearman 秩相关（样本 < 3 时为 None）
-    - 3x3 混淆矩阵
+    - 5x5 混淆矩阵（0~4 五档，行 = 人工分，列 = 裁判分）
 
     Args:
         deps: JudgeDeps 依赖
@@ -893,13 +912,14 @@ async def run_calibration(deps, *, calibration_cases: list[dict]) -> dict:
         except Exception as exc:
             logger.warning("Spearman 秩相关计算失败", extra={"error": str(exc)})
 
-    # 中文注释：3x3 混淆矩阵（行 = human，列 = judge）
+    # 中文注释：5x5 混淆矩阵（行 = human，列 = judge），与 0~4 五档评分对齐
+    levels = (0, 1, 2, 3, 4)
     confusion = {}
-    for h_score in (0, 1, 2):
-        confusion[str(h_score)] = {str(j): 0 for j in (0, 1, 2)}
+    for h_score in levels:
+        confusion[str(h_score)] = {str(j): 0 for j in levels}
 
     for h, j in zip(human_scores, judge_scores):
-        if h in (0, 1, 2) and j in (0, 1, 2):
+        if h in levels and j in levels:
             confusion[str(h)][str(j)] += 1
 
     return {
