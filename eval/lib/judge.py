@@ -227,19 +227,27 @@ async def run_relevance_judge(
     concept_groups: list[list[str]],
     papers: list[dict],
 ) -> dict:
-    """判断论文与研究主题的相关性。
+    """判断论文与研究主题的相关性（逐篇独立打分）。
 
-    一次批量调用判多篇论文的相关性。相关性分五档（0~4）：
+    相关性分五档（0~4）：
     - 0: 仅靠关键词字面匹配被检索到，实质与该主题无关
     - 1: 只是顺带提及该主题（当作背景、工具或应用场景之一）
     - 2: 同大领域、研究相邻问题，可作背景参考
     - 3: 直接研究该主题的某个具体侧面，但范围较窄或非核心工作
     - 4: 核心贡献就是解决该主题，是该方向的代表性工作
 
-    为什么必须显式排除"关键词匹配"：检索本身是用概念组做 AND 过滤出来的，
-    所以出现在这里的每篇论文**必然**涉及这些概念组。旧版把"涉及至少一个概念组"
-    写成了 2 分的条件之一，于是所有结果都被判满分、nDCG 恒等于 1，指标彻底失效。
-    现在的标准要求判断"论文的核心研究问题是否落在主题上"，并强制要求给出比较性理由。
+    两个关键设计：
+
+    1. **显式排除"关键词匹配"**。检索本身就是用概念组做 AND 过滤出来的，所以出现在
+       这里的每篇论文必然涉及这些概念组。旧版把"涉及至少一个概念组"写成了 2 分的
+       条件之一，于是所有结果都被判满分、nDCG 恒等于 1，指标彻底失效。现在的标准
+       要求判断"论文的核心研究问题是否落在主题上"。
+
+    2. **逐篇独立打分，不做批量**。一次只看一篇，模型没有"这批都不错"的基调可以依附，
+       只能按绝对标准判断。批量版实测会把跨领域论文齐刷刷判成满分——某条用例里横跨
+       交通信号控制、控制理论、语言设计的 7 篇论文，全被写成"直接贡献于多智能体协作
+       与协调"。代价是调用次数等于论文数，但每次输入只含一篇摘要，多出来的只是重复
+       的提示词模板，总 token 增幅有限。
 
     Args:
         deps: JudgeDeps 依赖
@@ -257,117 +265,147 @@ async def run_relevance_judge(
         }
         失败: {"status": "failed"|"judge_failed", "reason": "..."}
     """
-    # 中文注释：截断 abstract 到配置长度
-    truncated_papers = []
-    for paper in papers:
-        p = dict(paper)
-        if p.get("abstract"):
-            p["abstract"] = p["abstract"][: config.ABSTRACT_TRUNCATE_CHARS]
-        truncated_papers.append(p)
+    if not papers:
+        return {
+            "status": "ok",
+            "case_id": case_id,
+            "scores": [],
+            "usage": dict(deps.usage_total),
+        }
 
-    # 中文注释：构造 prompt
     concept_text = " ".join(
         [f"【{i + 1}】" + " 或 ".join(group) for i, group in enumerate(concept_groups)]
     )
 
-    papers_text = "\n".join(
-        [
-            f"{i + 1}. 【{p.get('title', '')}】\n"
-            f"   摘要：{p.get('abstract', '')}\n"
-            f"   年份：{p.get('year', 'N/A')} | 会议/期刊：{p.get('venue', 'N/A')}"
-            for i, p in enumerate(truncated_papers)
+    # 中文注释：逐篇并发判分，用信号量把并发压在上游能接受的范围内。
+    semaphore = asyncio.Semaphore(deps.semaphore_limit)
+    results = await asyncio.gather(
+        *[
+            _judge_single_paper(
+                deps,
+                semaphore,
+                case_id=case_id,
+                topic=topic,
+                concept_text=concept_text,
+                index=i + 1,
+                paper=paper,
+            )
+            for i, paper in enumerate(papers)
         ]
     )
 
-    prompt = f"""请评价以下论文与研究主题的相关性。
+    # 中文注释：只要有一篇判失败，整条用例就判失败。nDCG 需要一条完整的分数序列，
+    # 缺一篇就算不出来——与其拿默认分糊过去，不如如实报失败，由调用方决定要不要重试。
+    for r in results:
+        if r["status"] != "ok":
+            logger.warning(
+                "相关性评估有论文判分失败",
+                extra={"case_id": case_id, "index": r["index"], "reason": r.get("reason")},
+            )
+            return {
+                "status": r["status"],
+                "reason": f"第 {r['index']} 篇判分失败：{r.get('reason')}",
+            }
+
+    return {
+        "status": "ok",
+        "case_id": case_id,
+        "scores": [
+            {"index": r["index"], "score": r["score"], "reason": r["reason"]}
+            for r in results
+        ],
+        "usage": dict(deps.usage_total),
+    }
+
+
+async def _judge_single_paper(
+    deps: JudgeDeps,
+    semaphore: asyncio.Semaphore,
+    *,
+    case_id: str,
+    topic: str,
+    concept_text: str,
+    index: int,
+    paper: dict,
+) -> dict:
+    """对单篇论文独立打一次分。
+
+    中文说明：一次只给模型看一篇论文，它没有别的东西可以参照，只能老老实实对照
+    评分标准的五档选一档。这是为了消除批量打分时的"锚定效应"——10 篇塞进同一条
+    提示词，模型先读了最相关的几篇、定下"这批都不错"的基调，后面每一篇都往这个
+    基调上靠，于是分数全挤在高档位上。
+
+    尺度校准示例是刻意放的：逐篇独立判断时模型看不到同批其它论文，如果不给
+    绝对参照，不同调用之间的标准会漂移（这次把某篇判 3、下次判 2）。
+
+    Returns:
+        {"status": "ok", "index": n, "score": 0~4, "reason": "..."}
+        或 {"status": "failed"|"judge_failed", "index": n, "reason": "..."}
+    """
+
+    abstract = (paper.get("abstract") or "")[: config.ABSTRACT_TRUNCATE_CHARS]
+
+    prompt = f"""请评价下面这篇论文与研究主题的相关性。
 
 【研究主题】{topic}
 
 【核心概念分组】{concept_text}
 
-【待评论文列表】
-{papers_text}
+【待评论文】
+标题：{paper.get("title", "")}
+摘要：{abstract}
+年份：{paper.get("year", "N/A")} | 会议/期刊：{paper.get("venue", "N/A")}
 
-【关于这批论文的重要提示】
-这批论文是用上面这些概念组检索出来的，所以**每一篇都会涉及这些关键词**。
-因此"关键词出现了"不能作为打高分的理由——请判断论文的**核心研究问题**是否落在
-该主题上，而不是它有没有提到这些词。
+【重要提示】
+这篇论文是用上面这些概念组检索出来的，所以它**必然涉及这些关键词**。
+"关键词出现了"不能作为打高分的理由——请判断论文的**核心研究问题**是否落在该主题上。
 
-【评分标准】请用 0~4 五档，逐档拉开差距：
+【评分标准】0~4 五档：
 4 分：论文的核心贡献就是解决该主题，是该方向的代表性工作
 3 分：论文直接研究该主题的某个具体侧面，但范围较窄或非核心工作
 2 分：论文属于同一大领域、研究相邻问题，可作为背景参考
 1 分：论文只是顺带提及该主题（当作背景、工具或应用场景之一）
 0 分：仅因关键词字面匹配被检索到，实质内容与该主题无关
 
-【打分要求】
-1. 请先通读全部论文，再统一打分，保证前后标准一致
-2. 这 {len(papers)} 篇论文的相关程度客观上是存在差异的，请如实反映，不要都挤在同一档
-3. reason 必须说明"它为什么比同批其它论文更相关 / 更不相关"，而不是复述摘要
+【尺度校准示例】（假设主题是「KV cache 压缩」，用来理解档位边界，不是待评论文）
+- 4 分：论文提出了一种新的 KV cache 压缩 / 量化方法，核心贡献正是该主题
+- 2 分：论文做的是「大模型推理加速」整体优化，KV cache 只是其中一节
+- 0 分：论文标题里出现 "RAG"，但那是基因组学里的基因名，与检索增强生成无关
 
 【输出要求】
-请只输出 JSON 格式的评分结果，格式如下：
+只输出 JSON，格式如下：
 {{
-  "scores": [
-    {{"index": 1, "score": 0, "reason": "..."}},
-    {{"index": 2, "score": 4, "reason": "..."}}
-  ]
-}}
+  "score": 0,
+  "reason": "一句话说明它为什么落在这一档"
+}}"""
 
-每个 score 对象必须包含 index（论文序号）、score（0~4）、reason（一句话理由）。"""
-
-    # 中文注释：调用 judge LLM
-    result = await _call_judge_llm(deps, prompt, max_retries=1)
+    result = await _call_llm_with_semaphore(deps, prompt, semaphore, max_retries=1)
 
     if result["status"] != "ok":
-        return result
-
-    # 中文注释：验证返回结果的格式和内容
-    data = result["data"]
-    scores = data.get("scores", [])
-
-    # 中文注释：检查分数数量是否与论文数量一致
-    if len(scores) != len(papers):
-        logger.warning(
-            "相关性评估分数数量不匹配",
-            extra={"expected": len(papers), "got": len(scores), "case_id": case_id},
-        )
         return {
-            "status": "judge_failed",
-            "reason": f"返回分数数量({len(scores)})与论文数量({len(papers)})不匹配",
+            "status": result["status"],
+            "index": index,
+            "reason": result.get("reason", "调用失败"),
         }
 
-    # 中文注释：验证每个分数的有效性
-    for score_obj in scores:
-        score_val = score_obj.get("score")
-        if score_val not in (0, 1, 2, 3, 4):
-            logger.warning(
-                "相关性评估分数无效",
-                extra={"score": score_val, "case_id": case_id},
-            )
-            return {
-                "status": "judge_failed",
-                "reason": f"分数无效：{score_val}（应为 0~4）",
-            }
-
-    # 中文注释：检查 index 覆盖
-    indices = sorted([s.get("index") for s in scores])
-    expected_indices = list(range(1, len(papers) + 1))
-    if indices != expected_indices:
+    data = result["data"]
+    score = data.get("score")
+    if score not in (0, 1, 2, 3, 4):
         logger.warning(
-            "相关性评估 index 不连续",
-            extra={"got": indices, "expected": expected_indices, "case_id": case_id},
+            "相关性评估分数无效",
+            extra={"score": score, "case_id": case_id, "index": index},
         )
         return {
             "status": "judge_failed",
-            "reason": f"论文编号不连续或缺失",
+            "index": index,
+            "reason": f"分数无效：{score}（应为 0~4）",
         }
 
     return {
         "status": "ok",
-        "case_id": case_id,
-        "scores": scores,
-        "usage": result["usage"],
+        "index": index,
+        "score": score,
+        "reason": str(data.get("reason") or ""),
     }
 
 
