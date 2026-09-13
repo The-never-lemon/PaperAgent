@@ -15,7 +15,7 @@
 
 ## 🆕 3.0 版本更新
 
-Paper-Agent 3.0 是相对旧版<a href="https://github.com/GreatZack">@GreatZack</a>项目的的一次**全新重写**。它保留了旧版「检索 → 阅读 → 分析 → 写作」的相关思路，但在工程实现上做了全面升级：
+Paper-Agent 3.0 是相对旧版<a href="https://github.com/GreatZack">@GreatZack</a>项目的的一次**全新重写**。它保留了旧版「检索 → 阅读 → 分析 → 写作」的相关思路，但在Agent化实现上做了全面升级：
 
 - **前端**改为 Vue 3 + TypeScript + Vite，交互更现代、响应更快；
 - **包管理**统一使用 `uv`，一条命令即可完成 Python 依赖安装；
