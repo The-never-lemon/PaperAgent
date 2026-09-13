@@ -129,7 +129,7 @@ flowchart TB
 | Agent | 主对话 Agent（researchAgent）+ 精读 / 追问 / 综述三个子 Agent |
 | LLM 适配 | OpenAI 兼容协议、Anthropic Messages 协议 |
 | 论文来源 | arXiv、OpenAlex、Semantic Scholar |
-| 全文处理 | `PyMuPDF`（抽取表格 / 公式 / 图片，装不上时自动退回 `pypdf`）、Markdown 转换、文本分块 |
+| 全文处理 | `PyMuPDF`（抽取表格 / 公式 / 图片）、Markdown 转换、文本分块 |
 | 会话存储 | SQLite + 本地 JSON/Markdown 文件 |
 | 前端 | Vue 3、TypeScript、Vite、Vue Router、Lucide |
 
