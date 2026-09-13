@@ -571,6 +571,41 @@ class SessionWorkspace:
         self.save()
         return True
 
+    def update_paper_metadata(
+        self,
+        paper_id: str,
+        *,
+        title: str | None = None,
+        authors: list[str] | None = None,
+        year: int | None = None,
+        abstract: str | None = None,
+    ) -> bool:
+        """更新论文的元数据（标题、作者、年份、摘要）。
+
+        中文注释：
+        用户上传本地 PDF 后，界面上会弹一个确认框让他核对并修改自动认出来的信息，
+        这里就是把用户改过的内容写回工作区。传 None 表示这一项不动。
+        改完立即落盘。返回 True 表示成功，False 表示论文不存在。
+        """
+
+        entry = self.papers.get(paper_id)
+        if entry is None:
+            return False
+        paper = dict(entry.paper)
+        if title is not None:
+            paper["title"] = title
+        if authors is not None:
+            paper["authors"] = list(authors)
+        if year is not None:
+            # 中文注释：年份统一存成数字。检索来的论文里"没有年份"是用空字符串
+            # 表示的，而这里要么用户没改（None，跳过），要么给的是一个真年份。
+            paper["year"] = int(year)
+        if abstract is not None:
+            paper["abstract"] = abstract
+        entry.paper = paper
+        self.updated_at = utc_now()
+        self.save()
+        return True
 
     def query_papers(
         self,

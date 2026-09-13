@@ -29,6 +29,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.paper_retrieval.models import PaperDocument  # noqa: E402
+from src.utils.read_utils.cache import PRIMARY_PDF_NAME  # noqa: E402
 from src.utils.read_utils.chunkers import (  # noqa: E402
     CHUNKER_VERSION,
     PageChunker,
@@ -243,7 +244,7 @@ def check_fallback() -> None:
         del sys.modules[name]
     sys.modules["pymupdf"] = None  # type: ignore[assignment]
     try:
-        result = PyMuPdfParser().parse(ROOT / "data" / "paper_cache" / DEFAULT_PAPER_ID / "original.pdf")
+        result = PyMuPdfParser().parse(ROOT / "data" / "paper_cache" / DEFAULT_PAPER_ID / PRIMARY_PDF_NAME)
         check(isinstance(result, PdfParseResult), "PyMuPdfParser 在库缺失时仍返回结果")
     except FileNotFoundError:
         check(True, "PyMuPdfParser 库缺失回退（本机没有缓存样本，跳过实际解析）")

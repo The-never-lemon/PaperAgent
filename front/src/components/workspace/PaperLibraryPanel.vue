@@ -15,11 +15,20 @@
  *           需要 Agent 产出的动作（精读）走主 Agent 工具。
  */
 import { computed, ref, watch } from "vue";
-import { Star, Trash2, Download, BookOpenCheck, FileText, X, Filter, SortAsc } from "lucide-vue-next";
+import { Star, Trash2, Download, BookOpenCheck, FileText, X, Filter, SortAsc, Upload } from "lucide-vue-next";
 
 import type { WorkspacePaperItem, WorkspaceSnapshot } from "../../types/chat";
-import { batchRemovePapers, exportWorkspace, fetchWorkspace, updatePaperAnnotations } from "../../api/workspace";
+import {
+  batchRemovePapers,
+  exportWorkspace,
+  fetchWorkspace,
+  updatePaperAnnotations,
+  uploadPaper,
+  type UploadPaperResult,
+} from "../../api/workspace";
 import { pushToast } from "../../stores/notifications";
+import PaperMetadataDialog from "./PaperMetadataDialog.vue";
+import MathText from "../chat/MathText.vue";
 
 defineOptions({ name: "PaperLibraryPanel" });
 
@@ -64,6 +73,64 @@ watch(() => props.sessionKey, refresh, { immediate: true });
 
 // 暴露给父组件调用的刷新方法（turn_end 时调用，保证面板和对话流同步）。
 defineExpose({ refresh });
+
+// ---------------------------------------------------------------------------
+// 上传本地 PDF
+// ---------------------------------------------------------------------------
+
+const uploading = ref(false);
+const dragging = ref(false);
+const fileInputRef = ref<HTMLInputElement | null>(null);
+// 中文注释：上传成功后后端返回的核对信息，交给确认弹窗预填；用户点"保存修改"时用里面的论文编号。
+const uploadedResult = ref<UploadPaperResult | null>(null);
+const metaDialogVisible = ref(false);
+
+function pickFile() {
+  fileInputRef.value?.click();
+}
+
+/** 处理用户选中或拖进来的文件：先传上去，再让他核对一下自动认出来的信息。 */
+async function handleFiles(files: FileList | null) {
+  const file = files?.[0];
+  if (!file) return;
+  // 中文注释：先按文件后缀做一次很轻的检查，选错文件时立刻就有反馈，
+  // 不用等把几十兆传完才被后端拒绝（后端还会按文件内容再检查一次）。
+  if (!file.name.toLowerCase().endsWith(".pdf")) {
+    pushToast({ tone: "error", title: "只能上传 PDF", description: "请选择 .pdf 格式的论文文件" });
+    return;
+  }
+  uploading.value = true;
+  try {
+    const result = await uploadPaper(props.sessionKey, file);
+    // 中文注释：提示语直接用后端给的那一句，它已经分好了"扫描版""没抽到摘要""重复上传"几种情况。
+    pushToast({
+      tone: result.has_text_layer === false ? "warning" : "success",
+      title: result.is_new ? "已加入工作区" : "工作区里已经有这篇了",
+      description: result.notice,
+    });
+    await refresh();
+    emit("workspaceChanged");
+    uploadedResult.value = result;
+    metaDialogVisible.value = true;
+  } catch (err) {
+    pushToast({ tone: "error", title: "上传失败", description: (err as Error).message });
+  } finally {
+    uploading.value = false;
+    // 中文注释：把选择框清空，否则同一个文件连着选两次不会触发选择事件。
+    if (fileInputRef.value) fileInputRef.value.value = "";
+  }
+}
+
+function onDrop(event: DragEvent) {
+  dragging.value = false;
+  if (props.busy || uploading.value) return;
+  handleFiles(event.dataTransfer?.files ?? null);
+}
+
+/** 来源在界面上的显示名。上传的论文来源标成 local，这里翻成中文，免得冒出个英文词。 */
+function sourceLabel(source: string): string {
+  return source === "local" ? "本地上传" : source;
+}
 
 // ---------------------------------------------------------------------------
 // 筛选 / 排序 / 搜索
@@ -211,10 +278,39 @@ function statusLabel(status: string): string {
 </script>
 
 <template>
-  <aside class="paper-library-panel">
+  <!-- 中文注释：整块面板就是一个拖拽区。@dragover.prevent 必须加，否则浏览器
+       默认行为是直接打开这个文件，页面会整个跳走。 -->
+  <aside
+    class="paper-library-panel"
+    :class="{ 'drag-active': dragging }"
+    @dragover.prevent="dragging = !busy && !uploading"
+    @dragleave="dragging = false"
+    @drop.prevent="onDrop"
+  >
     <header class="panel-header">
       <h3>论文工作区</h3>
-      <span v-if="snapshot" class="paper-count">{{ snapshot.papers.length }} 篇</span>
+      <div class="panel-header-actions">
+        <span v-if="snapshot" class="paper-count">{{ snapshot.papers.length }} 篇</span>
+        <!-- 中文注释：对话正在跑的时候不让上传。因为这一轮 run 手里攥着它开始时那份
+             工作区内容，它下一次保存会把刚加上去的论文盖掉。 -->
+        <button
+          type="button"
+          class="panel-upload-button"
+          :disabled="busy || uploading"
+          :title="busy ? '对话进行中，等这一轮结束再上传' : '上传本地 PDF 论文'"
+          @click="pickFile"
+        >
+          <Upload :size="13" />
+          {{ uploading ? "上传中…" : "上传 PDF" }}
+        </button>
+        <input
+          ref="fileInputRef"
+          type="file"
+          accept="application/pdf,.pdf"
+          class="hidden-file-input"
+          @change="handleFiles(($event.target as HTMLInputElement).files)"
+        />
+      </div>
     </header>
 
     <!-- 筛选栏 -->
@@ -228,7 +324,7 @@ function statusLabel(status: string): string {
         </select>
         <select v-model="sourceFilter" class="filter-select">
           <option value="all">全部来源</option>
-          <option v-for="src in sources" :key="src" :value="src">{{ src }}</option>
+          <option v-for="src in sources" :key="src" :value="src">{{ sourceLabel(src) }}</option>
         </select>
       </div>
       <div class="filter-row">
@@ -317,10 +413,10 @@ function statusLabel(status: string): string {
             >
               <Star :size="14" :class="{ filled: paper.starred }" />
             </button>
-            <h4 class="paper-title" :title="paper.title">{{ paper.title }}</h4>
+            <h4 class="paper-title" :title="paper.title"><MathText :text="paper.title" /></h4>
           </div>
           <p class="paper-meta">
-            <span v-if="paper.authors.length">{{ paper.authors.slice(0, 2).join(", ") }}{{ paper.authors.length > 2 ? " 等" : "" }}</span>
+            <span v-if="paper.authors.length"><MathText :text="paper.authors.slice(0, 2).join(', ')" />{{ paper.authors.length > 2 ? " 等" : "" }}</span>
             <span v-if="paper.year">{{ paper.year }}</span>
             <span class="status-badge" :data-status="paper.status">{{ statusLabel(paper.status) }}</span>
             <span v-if="paper.score !== null" class="score-badge">{{ paper.score }} 分</span>
@@ -359,10 +455,19 @@ function statusLabel(status: string): string {
 
     <div v-else-if="loading" class="panel-loading">加载中…</div>
     <div v-else-if="snapshot && snapshot.papers.length === 0" class="panel-empty">
-      工作区暂无论文，先在对话里检索。
+      工作区暂无论文：可以在对话里检索，也可以点右上角「上传 PDF」把本地论文加进来。
     </div>
     <div v-else-if="filteredPapers.length === 0" class="panel-empty">
       没有匹配的论文，调整筛选条件试试。
     </div>
   </aside>
+
+  <!-- 中文注释：上传成功后弹出来让用户核对自动认出来的标题、作者等信息。 -->
+  <PaperMetadataDialog
+    :visible="metaDialogVisible"
+    :session-key="sessionKey"
+    :result="uploadedResult"
+    @close="metaDialogVisible = false"
+    @saved="refresh"
+  />
 </template>

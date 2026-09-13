@@ -54,6 +54,70 @@ export function updatePaperAnnotations(
   );
 }
 
+/** 上传一篇本地 PDF 后，后端返回的核对信息。 */
+export interface UploadPaperResult {
+  paper_id: string;
+  title: string;
+  authors: string[];
+  year: number | null;
+  /** true 表示新加入；false 表示工作区里本来就有这一篇（同一个文件重复上传）。 */
+  is_new: boolean;
+  page_count: number | null;
+  /** false 说明这份 PDF 读不出文字（扫描版）；null 表示判断不了。 */
+  has_text_layer: boolean | null;
+  /** 从 PDF 第一页认出来的摘要，认不出就是空字符串。 */
+  abstract: string;
+  /** 一句给用户看的中文提示，直接显示即可。 */
+  notice: string;
+}
+
+/**
+ * 上传本地 PDF 到论文工作区。
+ *
+ * 中文说明：
+ * 这里不能套用上面的 request()，因为它写死了 Content-Type: application/json。
+ * 上传文件必须让浏览器自己生成 multipart 的分隔标记（boundary），手动写
+ * Content-Type 会把 boundary 漏掉，后端就解析不出文件。所以单独写一个
+ * 不设 Content-Type 的请求，其余错误处理逻辑和 request() 保持一致。
+ */
+export async function uploadPaper(sessionKey: string, file: File): Promise<UploadPaperResult> {
+  const form = new FormData();
+  // 中文注释：第三个参数是文件名。不显式传的话，某些浏览器会把它丢掉，
+  // 后端就拿不到原始文件名，认不出标题时只能写成一个默认名字。
+  form.append("file", file, file.name);
+  const response = await fetch(
+    `/api/sessions/${encodeURIComponent(sessionKey)}/workspace/papers/upload`,
+    { method: "POST", body: form },
+  );
+  const data = (await response.json().catch(() => ({}))) as {
+    error?: { message?: string };
+    detail?: string | unknown[];
+  } & Partial<UploadPaperResult>;
+  if (!response.ok) {
+    // 中文注释：后端正常报错时 detail 是一句中文；请求格式不对时（比如根本没带文件）
+    // FastAPI 返回的 detail 是一个数组，这里兜一句通用提示，免得界面显示成 [object Object]。
+    const detail = typeof data.detail === "string" ? data.detail : "";
+    throw new Error(data.error?.message || detail || "上传失败，请重试");
+  }
+  return data as UploadPaperResult;
+}
+
+/**
+ * 更新论文的元数据（标题、作者、年份、摘要）。不启动 run，不消耗模型。
+ * 中文注释：用户上传 PDF 后，在确认框里改标题这些信息走这里。
+ * 它和上面的 updatePaperAnnotations 是同一个后端接口，只是改的字段不同。
+ */
+export function updatePaperMetadata(
+  sessionKey: string,
+  paperId: string,
+  meta: { title?: string; authors?: string[]; year?: number | null; abstract?: string },
+): Promise<{ paper_id: string; title: string; authors: string[]; year: number | null; abstract: string }> {
+  return request(
+    `/api/sessions/${encodeURIComponent(sessionKey)}/workspace/papers/${encodeURIComponent(paperId)}`,
+    { method: "PATCH", body: JSON.stringify(meta) },
+  );
+}
+
 /** 批量删除工作区论文。不启动 run，不消耗模型。 */
 export function batchRemovePapers(sessionKey: string, paperIds: string[]): Promise<{ removed: number }> {
   return request(`/api/sessions/${encodeURIComponent(sessionKey)}/workspace/papers`, {

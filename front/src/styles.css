@@ -4673,6 +4673,21 @@ h6.chat-md-heading { font-size: 14px; }
   font-weight: 700;
 }
 
+/* 公式渲染（精读报告字段与聊天消息里都可能夹着公式，见 MathFormula.vue）。
+   中文说明：KaTeX 默认把公式放大到 1.21em，直接放进正文段落里会比周围文字明显
+   大一号。这里收回到贴近正文字号，只略微强调一点点。 */
+.math-formula .katex {
+  font-size: 1.05em;
+}
+
+/* 独立成行的大公式：太长时让它自己横向滚动，不要把容器撑破。
+   与上面 .chat-md-table-wrap 的处理方式保持一致。 */
+.math-formula .katex-display {
+  margin: 6px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
 .chat-md a {
   color: var(--accent);
   text-decoration: underline;
@@ -4780,6 +4795,124 @@ h6.chat-md-heading { font-size: 14px; }
 .paper-library-panel .paper-count {
   font-size: 0.8rem;
   color: var(--text-secondary, #666);
+}
+
+/* 中文注释：面板标题栏右侧那一组东西（论文数 + 上传按钮）。 */
+.paper-library-panel .panel-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+/* 中文注释：上传本地 PDF 的按钮。 */
+.paper-library-panel .panel-upload-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.78rem;
+  font-family: inherit;
+  border: 1px solid var(--border-color, #e0e0e0);
+  border-radius: 4px;
+  background: var(--bg-primary, #fff);
+  color: var(--text-secondary, #666);
+  cursor: pointer;
+}
+
+.paper-library-panel .panel-upload-button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.paper-library-panel .panel-upload-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* 中文注释：真正接收文件的输入框藏起来，用户只看得见上面那个按钮。 */
+.hidden-file-input {
+  display: none;
+}
+
+/* 中文注释：文件拖到面板上方时，给面板描一圈虚线，示意"松手就传到这里"。 */
+.paper-library-panel.drag-active {
+  outline: 2px dashed var(--accent);
+  outline-offset: -4px;
+}
+
+/* ---------------------------------------------------------------------------
+   上传论文后的信息确认弹窗（PaperMetadataDialog）
+   --------------------------------------------------------------------------- */
+
+.paper-meta-dialog {
+  max-width: 560px;
+}
+
+.paper-meta-hint {
+  margin: 0 0 0.75rem;
+  font-size: 0.82rem;
+  color: var(--text-secondary, #666);
+  line-height: 1.5;
+}
+
+/* 中文注释：扫描版 PDF 的提醒。用主题里的警示色，换主题时跟着变。 */
+.paper-meta-warning {
+  margin: 0 0 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.paper-meta-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.paper-meta-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.paper-meta-field-narrow {
+  max-width: 130px;
+}
+
+.paper-meta-label {
+  font-size: 0.78rem;
+  color: var(--text-secondary, #666);
+}
+
+.paper-meta-input {
+  width: 100%;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.85rem;
+  font-family: inherit;
+  border: 1px solid var(--border-color, #e0e0e0);
+  border-radius: 4px;
+  background: var(--bg-primary, #fff);
+  color: inherit;
+  box-sizing: border-box;
+}
+
+.paper-meta-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.paper-meta-textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+
+/* 中文注释：弹窗里那个"保存修改"按钮，比旁边的"先这样"更显眼。 */
+.paper-card-action-primary {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .paper-library-panel .filter-bar {

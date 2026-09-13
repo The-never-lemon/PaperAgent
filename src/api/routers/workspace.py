@@ -1,24 +1,31 @@
-"""会话工作区的只读 REST 接口（实施方案第五节新增的 2 个端点）。
+"""会话工作区的 REST 接口。
 
-前端刷新页面后除了从 webui-thread 恢复消息流，还需要直接读取工作区的
-论文清单和精读报告，这两个端点就是为此服务的：
-1. GET /api/sessions/{key}/workspace                       —— 工作区论文清单快照；
-2. GET /api/sessions/{key}/workspace/papers/{paper_id}/report —— 单篇论文的精读报告。
+前端刷新页面后除了从 webui-thread 恢复消息流，还需要直接读取工作区的论文清单和
+精读报告，这由两个读接口提供；用户在工作区面板上的操作（上传本地 PDF、改标注、
+批量删除、导出）由写接口提供：
+1. GET    /api/sessions/{key}/workspace                          —— 工作区论文清单快照；
+2. POST   /api/sessions/{key}/workspace/papers/upload            —— 上传本地 PDF；
+3. PATCH  /api/sessions/{key}/workspace/papers/{paper_id}        —— 改用户标注或论文元数据；
+4. DELETE /api/sessions/{key}/workspace/papers                   —— 批量删除；
+5. GET    /api/sessions/{key}/workspace/export                   —— 导出清单；
+6. GET    /api/sessions/{key}/workspace/papers/{paper_id}/report —— 单篇论文的精读报告。
 
-路由层只做请求解析与响应适配，数据统一从 SessionWorkspace 读取（工程规范：
-路由不承载业务逻辑）。
+路由层只做请求解析与响应适配，具体的读写分别交给 SessionWorkspace 和
+services/workspace_upload.py（工程规范：路由不承载业务逻辑）。
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 
 from src.models.workspace import SessionWorkspace
 from src.repositories.sessions.base import SessionRepository
 from src.services.workspace_export import export_workspace
+from src.services.workspace_upload import save_uploaded_pdf
 
 
 JsonObject = dict[str, Any]
@@ -81,25 +88,74 @@ def create_workspace_router(repo: SessionRepository) -> APIRouter:
             "papers": papers,
         }
 
-    @router.patch("/{session_key}/workspace/papers/{paper_id:path}")
-    async def update_paper_annotations(session_key: str, paper_id: str, request: Request) -> JsonObject:
-        """更新论文的用户标注（加星、标签、笔记）。不启动 run，不消耗模型。
+    @router.post("/{session_key}/workspace/papers/upload")
+    async def upload_paper(session_key: str, file: UploadFile = File(...)) -> JsonObject:
+        """上传本地 PDF 论文到工作区。不启动 run，不消耗模型。
 
         中文注释：
-        纯状态动作，直接写工作区 JSON。前端面板的「加星」「打标签」「写笔记」
-        都走这里，不需要等 Agent 响应。
+        表单里的文件字段固定叫 file。文件存到哪、标题怎么认、怎么登记进工作区，
+        全部交给 services/workspace_upload.py，这里只负责把上传的内容转过去。
+        """
+
+        workspace = await _load_workspace(session_key)
+        result = await save_uploaded_pdf(
+            workspace,
+            filename=file.filename or "",
+            chunks=_upload_chunks(file),
+        )
+        return {
+            "paper_id": result.paper_id,
+            "title": result.title,
+            "authors": result.authors,
+            "year": result.year,
+            "is_new": result.is_new,
+            "page_count": result.page_count,
+            "has_text_layer": result.has_text_layer,
+            "abstract": result.abstract,
+            "notice": result.notice,
+        }
+
+    @router.patch("/{session_key}/workspace/papers/{paper_id:path}")
+    async def update_paper(session_key: str, paper_id: str, request: Request) -> JsonObject:
+        """更新论文的用户标注（加星、标签、笔记）或论文元数据（标题、作者、年份、摘要）。
+
+        中文注释：
+        纯状态动作，直接写工作区 JSON，不用等 Agent 响应。
+        面板上的「加星」「打标签」「写笔记」走这里；用户上传本地 PDF 后，在确认框里
+        改标题这些信息也走这里。请求里带了哪一项就改哪一项，没带的保持原样。
         """
 
         body = await _json_body(request)
         workspace = await _load_workspace(session_key)
+
+        # 中文注释：标注和元数据要分开处理——标注（加星、标签、笔记）是工作区条目
+        # 自己的字段，元数据（标题、作者……）是嵌在该条目里那份论文信息上的字段。
         starred = body.get("starred") if "starred" in body else None
         tags = body.get("tags") if "tags" in body else None
         note = body.get("note") if "note" in body else None
-        if not workspace.update_paper_annotations(paper_id, starred=starred, tags=tags, note=note):
-            raise HTTPException(status_code=404, detail=f"paper not found: {paper_id}")
+        if any(value is not None for value in (starred, tags, note)):
+            if not workspace.update_paper_annotations(paper_id, starred=starred, tags=tags, note=note):
+                raise HTTPException(status_code=404, detail=f"paper not found: {paper_id}")
+
+        title = body.get("title") if "title" in body else None
+        authors = body.get("authors") if "authors" in body else None
+        year = body.get("year") if "year" in body else None
+        abstract = body.get("abstract") if "abstract" in body else None
+        if any(value is not None for value in (title, authors, year, abstract)):
+            if not workspace.update_paper_metadata(
+                paper_id, title=title, authors=authors, year=year, abstract=abstract
+            ):
+                raise HTTPException(status_code=404, detail=f"paper not found: {paper_id}")
+
         entry = workspace.get_paper(paper_id)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"paper not found: {paper_id}")
         return {
             "paper_id": paper_id,
+            "title": str(entry.paper.get("title") or ""),
+            "authors": list(entry.paper.get("authors") or []),
+            "year": entry.paper.get("year") or None,
+            "abstract": str(entry.paper.get("abstract") or ""),
             "starred": entry.starred,
             "tags": list(entry.tags),
             "note": entry.note,
@@ -163,6 +219,20 @@ def create_workspace_router(repo: SessionRepository) -> APIRouter:
         }
 
     return router
+
+
+async def _upload_chunks(file: UploadFile, chunk_size: int = 1024 * 1024) -> AsyncIterator[bytes]:
+    """把上传的文件按 1MB 一块读出来。
+
+    中文注释：不一次性读完，是为了让"文件太大"能在收到一半时就拦下来，
+    而不是先把几十兆整个读进内存再判断。
+    """
+
+    while True:
+        chunk = await file.read(chunk_size)
+        if not chunk:
+            return
+        yield chunk
 
 
 async def _json_body(request: Request) -> JsonObject:

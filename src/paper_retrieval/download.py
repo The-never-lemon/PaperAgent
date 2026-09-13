@@ -18,7 +18,13 @@ from src.paper_retrieval.models import PaperDocument
 # 出了问题（比如下回来的其实是 HTML 介绍页而不是全文）完全没法排查。
 # 现在下载成功、失败都会在日志里留下记录，方便定位问题。
 from src.utils import get_logger
-from src.utils.read_utils.cache import paper_cache_dir, read_cached_source_url, write_metadata
+from src.utils.read_utils.cache import (
+    CACHED_FULLTEXT_NAMES,
+    PRIMARY_PDF_NAME,
+    paper_cache_dir,
+    read_cached_source_url,
+    write_metadata,
+)
 
 
 # 中文注释：模块级日志器，本文件里所有下载相关的日志都通过它输出。
@@ -137,8 +143,10 @@ async def async_download_paper_fulltext(
 
     # 文件写入仍是本地阻塞操作，先放到线程里，避免在异步流程里直接卡住事件循环。
     await asyncio.to_thread(paper_dir.mkdir, parents=True, exist_ok=True)
-    suffix = ".pdf" if content_kind == "pdf" else ".html"
-    file_path = paper_dir / f"original{suffix}"
+    # 中文注释：PDF 用共享常量规定的主文件名。这个名字必须和 cache.CACHED_FULLTEXT_NAMES
+    # 里的一致，否则刚存下去的全文下一次就找不到了（会被当成"本地没有"而重新下载）。
+    file_name = PRIMARY_PDF_NAME if content_kind == "pdf" else "original.html"
+    file_path = paper_dir / file_name
     await asyncio.to_thread(file_path.write_bytes, content)
     await asyncio.to_thread(write_metadata, paper_dir, paper, source_url=final_url, content_type=content_type)
     # 中文注释：下载成功时记一条 info 日志，写清楚从哪个站点、下回来的是 PDF 还是 HTML、有多少字节。
@@ -253,9 +261,14 @@ def _paper_cache_name(paper: PaperDocument) -> str:
 
 
 def _find_cached_file(paper_dir: Path) -> Path | None:
-    """读取已成功保存的原始全文，避免相同论文重复下载。"""
+    """读取已成功保存的原始全文，避免相同论文重复下载。
 
-    for name in ("original.pdf", "original.html", "source.pdf", "source.html"):
+    中文注释：认哪些文件名由 cache.CACHED_FULLTEXT_NAMES 统一规定。用户在界面上
+    上传的本地 PDF 也是放在同一个目录、用同一个文件名，所以这里不必区分全文是
+    "网上下回来的"还是"用户传上来的"——本地有就直接拿来用。
+    """
+
+    for name in CACHED_FULLTEXT_NAMES:
         candidate = paper_dir / name
         if candidate.is_file() and candidate.stat().st_size > 0:
             return candidate
