@@ -19,3 +19,7 @@ read:
   max_file_size_mb: 50
   # PDF 转 Markdown 用哪个解析器：auto（优先 PyMuPDF，装不上就退回 pypdf）/ pymupdf / pypdf
   pdf_parser: auto
+  # 公式识别：打开后会把论文里的公式截图交给模型转写成 LaTeX 写进 Markdown，
+  # 这样精读、问答、写作拿到的才是模型读得懂的公式。会多花一些模型调用（每篇论文
+  # 大约几十次，同一页的公式合并成一次请求）。关掉就退回"把公式字形原样写进 $$ 块"。
+  formula_ocr: true

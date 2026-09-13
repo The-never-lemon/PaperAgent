@@ -56,6 +56,10 @@ class ReadDefaults:
     # 中文注释：用哪个工具把 PDF 转成 Markdown。可选 auto / pymupdf / pypdf。
     # auto 的意思是"装了 PyMuPDF 就用它"，PyMuPDF 能多提取出表格、公式和图片。
     pdf_parser: str = "auto"
+    # 中文注释：要不要把论文里的公式截图交给模型转写成 LaTeX。
+    # 默认开着——转写之后公式才是模型能读懂的写法，关掉就退回"把公式字形原样
+    # 放进 $$ 块"的老做法。没配这一项算开，只有明确写 false 才关。
+    formula_ocr: bool = True
 
 
 @dataclass(slots=True)
@@ -109,6 +113,9 @@ class SystemConfig:
                 download_timeout_seconds=_read_positive_int(read.get("download_timeout_seconds"), 60),
                 max_file_size_mb=_read_positive_int(read.get("max_file_size_mb"), 50),
                 pdf_parser=_read_pdf_parser(read.get("pdf_parser")),
+                # 中文注释：这一项的默认值是"开"，所以只在配置里明确写了 false 时才关；
+                # 没写、或者写了个读不懂的值，都按开处理。
+                formula_ocr=_optional_bool(read.get("formula_ocr")) is not False,
             ),
         )
 
@@ -179,12 +186,15 @@ class ModelConfig:
         if not api_base:
             raise ValueError(f"provider {agent.provider} requires api_base")
         # 返回补齐环境变量和默认 base_url 后的副本，避免把运行时值写回原始配置。
+        # 中文注释：有些厂商要求每次请求都必须带上固定的请求头（例如 OpenCode 的
+        # x-opencode-session），这些头记在 spec 里，在这里一并补上。如果用户自己在
+        # 配置里写了同名的头，以用户写的为准，方便临时覆盖。
         return agent.provider, ProviderConfig(
             backend=spec.name,
             api_key=api_key,
             api_key_env=env_key,
             api_base=api_base,
-            extra_headers=provider_config.extra_headers,
+            extra_headers={**spec.default_headers, **provider_config.extra_headers},
             extra_body=provider_config.extra_body,
             timeout_s=provider_config.timeout_s,
             max_retries=provider_config.max_retries,

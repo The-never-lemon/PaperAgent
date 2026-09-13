@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True, slots=True)
@@ -13,6 +14,8 @@ class ProviderSpec:
         backend: 实际使用的适配器后端类型，例如 `openai_compat`、`anthropic`。
         default_api_base: 默认 API 基础地址；兼容网关通常留空，由用户显式提供。
         env_key: 默认读取 API Key 的环境变量名。
+        default_headers: 厂商要求每次请求都必须带上的固定请求头，由代码自动补，
+            不需要用户在配置里手工填（用户若填了同名的头，以用户填的为准）。
         keywords: 在 `auto` 模式下用于根据模型名猜测 provider 的关键字。
         strip_model_prefix: 是否在真正请求上游前移除 `provider/model` 前缀。
         supports_max_completion_tokens: 是否优先使用 `max_completion_tokens` 参数。
@@ -24,6 +27,7 @@ class ProviderSpec:
     backend: str
     default_api_base: str
     env_key: str
+    default_headers: Mapping[str, str] = field(default_factory=dict)
     keywords: tuple[str, ...] = ()
     strip_model_prefix: bool = False
     supports_max_completion_tokens: bool = False
@@ -58,6 +62,21 @@ PROVIDERS: dict[str, ProviderSpec] = {
         default_api_base="",
         env_key="ANTHROPIC_API_KEY",
         strip_model_prefix=True,
+    ),
+    "opencode_go": ProviderSpec(
+        name="opencode_go",
+        backend="openai_compat",
+        default_api_base="https://opencode.ai/zen/go/v1",
+        env_key="OPENCODE_API_KEY",
+        # 中文注释：OpenCode Go 是 OpenAI 兼容协议，但它强制要求每次请求都带上
+        # x-opencode-session，少这个头上游会直接返回 400 MissingSessionID。
+        # 官方还要求客户端用自己的名字做 User-Agent，而不是 SDK 的默认名字。
+        # 这两项都是"必须带"，所以写在这里由代码自动补，不留给用户手工填。
+        default_headers={
+            # 官方说明这个值用来做路由和缓存亲和：保持稳定即可，不需要每个会话换一个。
+            "x-opencode-session": "paper-agent",
+            "User-Agent": "paper-agent/1.0",
+        },
     ),
 }
 

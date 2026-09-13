@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urljoin, urlparse
 
 from src.llm.config import SystemConfig
@@ -15,7 +15,9 @@ from src.paper_retrieval.models import PaperDocument
 # 中文注释：引入项目统一的日志工具。正文质量闸拦下坏内容时记一条日志，
 # 排查问题时能看到"哪一篇论文的全文被判为不合格、原因是什么"。
 from src.utils import get_logger
-from src.utils.read_utils.pdf_parsers import get_pdf_parser
+from src.utils.read_utils.formula_ocr import transcribe_formula_regions
+from src.utils.read_utils.pdf_parsers import PdfFormulaRegion, PdfTableRegion, get_pdf_parser
+from src.utils.read_utils.table_ocr import transcribe_table_regions
 
 
 logger = get_logger(__name__)
@@ -27,7 +29,13 @@ _UNSUPPORTED_FULLTEXT_WARNING = "暂不支持该全文文件格式"
 # 不然升级之后大家读到的还是旧版转出来的、没有表格公式图片的正文。
 # 2 -> 3：HTML 解析器修掉了"表格跨行跨列不展开导致整行左移""省略结束标签导致正文倒序"等问题，
 # 旧缓存里存的正是那些错位的表格，必须让它们作废重转。
-CONVERTER_VERSION = 3
+# 3 -> 4：公式从"把字形原样展平进 $$ 块"改成"截图交给模型转写成真正的 LaTeX"，
+# 正文里多了 $...$ 包裹的行内公式，旧的展平结果必须作废。
+# 4 -> 5：插图改成"位图 + 矢量图"一起收（矢量画出来的框架图、折线图以前完全抽不到），
+# 图片引用的说明文字从"Figure 3"改成论文自己的图注原文，图里的文字不再混进正文。
+# 5 -> 6：有图注的表格改成"截图交给模型重排表头"再写回正文，替掉以前那份表头被
+# 糊成一格、列名对不上指标的 Markdown 表。
+CONVERTER_VERSION = 6
 
 # 中文注释：正文质量闸的两个阈值——
 # 1) 转换出来的正文（去掉首尾空白后）不足 3000 字符，就认为"不是正文"：
@@ -48,6 +56,29 @@ class MarkdownConversion:
     # 这里记下目录位置，方便上层需要时找到图片文件。目录里没有写出任何图片时是空的。
     assets_dir: Path | None = None
     warnings: list[str] = field(default_factory=list)
+    # 中文注释：公式转写用掉的 token 数。上层要把它并进整篇精读的用量里一起上报，
+    # 不然后台看到的用量会比真实花的少。没开公式识别、或者一篇论文没有公式时都是 0。
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+@dataclass(slots=True)
+class _PdfMarkdownDraft:
+    """PDF 刚解析完、但还没写进文件的 Markdown 草稿。
+
+    中文注释：为什么不解析完就直接写文件——公式还要交给模型转写，而转写是异步的、
+    可能失败、也可能被用户中途取消。要是这时候就把带占位符的半成品写下去，
+    下次再读会命中这份残次品（缓存只比对版本号，不看内容），公式就永远换不回来了。
+    所以写文件统一放到最后一步，中途出任何意外磁盘上都干干净净。
+    """
+
+    markdown: str = ""
+    page_count: int | None = None
+    # 中文注释：这一篇认出来的公式，连位置一起带着，转写那一步要用。
+    formulas: list[PdfFormulaRegion] = field(default_factory=list)
+    # 中文注释：有图注的表格，同样要交给模型重排表头。
+    tables: list[PdfTableRegion] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
 # 中文注释：这里以前有一个"同步版全文解析入口"的兼容壳（convert_fulltext_to_markdown），
@@ -58,8 +89,17 @@ async def async_convert_fulltext_to_markdown(
     *,
     source_path: Path,
     source_url: str | None,
+    llm: Any | None = None,
+    on_progress: Callable[[str], None] | None = None,
+    raise_if_cancelled: Callable[[], None] | None = None,
 ) -> MarkdownConversion:
-    """异步全文转换入口，供后续 async 阅读流程直接调用。"""
+    """异步全文转换入口，供后续 async 阅读流程直接调用。
+
+    中文注释：llm 是"用来把公式截图转成 LaTeX"的模型，可以不给——不给就跳过公式识别，
+    公式退回原来的展平写法。on_progress 用来在转写过程中报进度，
+    raise_if_cancelled 用来让长时间转写能中途停下。三个都是可选的，
+    不传调用方的行为和以前完全一样。
+    """
 
     markdown_path = _markdown_output_path(source_path)
     # 中文注释：哪怕只是看缓存文件存不存在，本质上也是本地磁盘操作。
@@ -70,14 +110,60 @@ async def async_convert_fulltext_to_markdown(
 
     suffix = source_path.suffix.lower()
     if suffix == ".pdf":
-        # 中文注释：PDF 解析和 Markdown 写入都是最容易卡住主流程的本地重操作。
-        # 这里只把真正重的那一小段丢进线程，不把整个阅读节点都包进线程里。
-        return await asyncio.to_thread(_convert_pdf_with_parser, paper, source_path, source_url, markdown_path)
+        # 中文注释：PDF 这一步分三段走，顺序不能变——
+        # ① 先解析成草稿（同步、重活、丢线程跑），这一步不写文件；
+        # ② 再把公式截图交给模型转写（异步）；
+        # ③ 最后才质量检查 + 写文件。
+        # 这样中途取消或转写崩溃，磁盘上不会留下一份"带着占位符的 paper.md"。
+        draft = await asyncio.to_thread(_parse_pdf_markdown, paper, source_path, source_url, markdown_path)
+        if draft.warnings:
+            return MarkdownConversion(warnings=draft.warnings)
+        markdown_text, input_tokens, output_tokens = await transcribe_formula_regions(
+            pdf_path=source_path,
+            regions=draft.formulas,
+            markdown_text=draft.markdown,
+            # 中文注释：开关关掉时传空值进去，转写那一步就不调模型，
+            # 但占位符照样会被换成展平的兜底内容，正文不会留下记号。
+            llm=llm if _formula_ocr_enabled() else None,
+            on_progress=on_progress,
+            raise_if_cancelled=raise_if_cancelled,
+        )
+        # 中文注释：公式换完之后再重排表格。两步都要改写正文，串着做最省事——
+        # 各改各的占位符，互不干扰。
+        markdown_text, table_input, table_output = await transcribe_table_regions(
+            pdf_path=source_path,
+            regions=draft.tables,
+            markdown_text=markdown_text,
+            llm=llm,
+            on_progress=on_progress,
+            raise_if_cancelled=raise_if_cancelled,
+        )
+        return await asyncio.to_thread(
+            _finalize_markdown,
+            draft,
+            markdown_text,
+            markdown_path,
+            input_tokens + table_input,
+            output_tokens + table_output,
+        )
     if suffix in {".html", ".htm"}:
         # 中文注释：HTML 读取、正文提取、Markdown 落盘同样都是阻塞型本地操作。
         # 处理方式和 PDF 保持一致，边界清楚，后面接异步阅读流程会更稳。
         return await asyncio.to_thread(_convert_html, paper, source_path, source_url, markdown_path)
     return MarkdownConversion(warnings=[_UNSUPPORTED_FULLTEXT_WARNING])
+
+
+def _formula_ocr_enabled() -> bool:
+    """看配置里"公式识别"这个开关开没开。
+
+    中文注释：读配置本身出了意外时按"开"处理——这个开关的默认值是开，
+    因为读不到配置就说"关"会让所有论文悄悄退回旧行为，反而更难发现。
+    """
+
+    try:
+        return SystemConfig.load().read.formula_ocr
+    except Exception:
+        return True
 
 
 def _markdown_output_path(source_path: Path) -> Path:
@@ -261,12 +347,17 @@ def _read_page_count(markdown_path: Path) -> int | None:
     return page_count if isinstance(page_count, int) else None
 
 
-def _convert_pdf_with_parser(paper: PaperDocument, source_path: Path, source_url: str | None, markdown_path: Path) -> MarkdownConversion:
-    """使用可替换的 PDF 解析器生成 Markdown。
+def _parse_pdf_markdown(
+    paper: PaperDocument, source_path: Path, source_url: str | None, markdown_path: Path
+) -> _PdfMarkdownDraft:
+    """用可替换的 PDF 解析器把 PDF 读成 Markdown 草稿，但不写文件。
 
     中文注释：阅读节点只需要 Markdown，不应该关心 PDF 到底是 pypdf、PyMuPDF
     还是其它工具解析的。用哪个由配置里的 read.pdf_parser 决定，
     auto 表示"装了 PyMuPDF 就用 PyMuPDF"，PyMuPDF 能多提取出表格、公式和图片。
+
+    为什么只是"草稿"、不在这里写文件——正文里的公式位置上留的是占位符，
+    还要等模型把它换成 LaTeX。写盘统一放到 _finalize_markdown。
     """
 
     parser = get_pdf_parser(SystemConfig.load().read.pdf_parser)
@@ -275,13 +366,33 @@ def _convert_pdf_with_parser(paper: PaperDocument, source_path: Path, source_url
     assets_dir = markdown_path.parent / "assets"
     parsed = parser.parse(source_path, assets_dir=assets_dir)
     if parsed.warnings:
-        return MarkdownConversion(warnings=parsed.warnings)
+        return _PdfMarkdownDraft(warnings=parsed.warnings)
     if not parsed.pages:
-        return MarkdownConversion(warnings=["PDF 中没有可读取的正文"])
+        return _PdfMarkdownDraft(warnings=["PDF 中没有可读取的正文"])
     body: list[str] = [_markdown_header(paper, source_url, len(parsed.pages))]
     for page in parsed.pages:
         body.extend([f"<!-- page: {page.page_number} -->", page.text])
-    markdown_text = "\n\n".join(body).strip() + "\n"
+    return _PdfMarkdownDraft(
+        markdown="\n\n".join(body).strip() + "\n",
+        page_count=len(parsed.pages),
+        formulas=parsed.formulas,
+        tables=parsed.tables,
+    )
+
+
+def _finalize_markdown(
+    draft: _PdfMarkdownDraft,
+    markdown_text: str,
+    markdown_path: Path,
+    input_tokens: int,
+    output_tokens: int,
+) -> MarkdownConversion:
+    """把转写完成的正文过一遍质量闸，然后写进文件。
+
+    中文注释：这是整条链路上唯一写 paper.md 的地方。到这里公式该转的已经转完、
+    转不出来的也都换成了兜底内容，写下去的一定是一份完整成品。
+    """
+
     # 中文注释：和 HTML 分支一样，写文件之前先过正文质量闸。
     # PDF 有可能每一页都解析成功、但抽出来的文字全是乱码（比如文件损坏），
     # 这种内容不能拿去精读，拦下来让上层降级为摘要精读。
@@ -289,16 +400,16 @@ def _convert_pdf_with_parser(paper: PaperDocument, source_path: Path, source_url
     if quality_problem is not None:
         logger.warning(
             "PDF 全文转换结果未通过正文质量检查",
-            extra={"source_path": str(source_path), "reason": quality_problem},
+            extra={"markdown_path": str(markdown_path), "reason": quality_problem},
         )
         return MarkdownConversion(warnings=[quality_problem])
     markdown_path.write_text(markdown_text, encoding="utf-8")
     return MarkdownConversion(
         markdown_path=markdown_path,
-        page_count=len(parsed.pages),
-        # 中文注释：只有真往这个目录里写出过图片，才把它报给上层；
-        # 空目录对上层没有任何用处。
+        page_count=draft.page_count,
         assets_dir=_existing_assets_dir(markdown_path),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
     )
 
 

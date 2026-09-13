@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
+import unicodedata
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -10,12 +12,21 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # 中文注释：TeX 排版数学公式时会换成一套专门的"数学字体"（CMMI、CMSY 这种），
-# 而正文用的是 Computer Modern Roman（CMR）这类字体。判断某一行是不是公式，
-# 最可靠的办法就是看这一行里"数学字体字符"占多大比例。
+# 而正文用的是 Computer Modern Roman（CMR）这类字体。所以"这一行用的字体是不是
+# 数学字体"曾经是判断公式的唯一办法。
+#
+# 但这个办法有个治不好的毛病：期刊用的数学字体成千上万，白名单永远追不上。
+# 实测一篇用 TeX Gyre Pagella 排版的论文，它的数学字体是 NewPXMI / pxsys / pxmiaX，
+# 三个都不在名单里，结果全文 3308 行文字一个公式都没认出来。所以现在改成
+# "看字符本身长得像不像数学符号"为主、"看字体"只用来补漏（见下面 _is_math_line）。
 #
 # 这里必须把 CMR / CMBX / CMSS / CMTT / CMTI 明确排除掉：它们也是 CM 开头的 TeX
 # 字体，但装的是普通文字。实测三篇论文里 CMR10 分别出现 243 / 709 / 844 个字符，
 # 一旦把它们误当成数学字体，整页正文都会被判定成公式，输出就全毁了。
+#
+# 加新字体名时有个必须守住的规矩：**只能写数学字体自己的名字，不能写正文也在用的名字**。
+# 比如绝不能把 "TeXGyre" 加进来——上面那篇论文的正文正好叫 TeXGyrePagellaX-Regular，
+# 加上去整篇正文都会被当成公式（实测第 6 页 51 行普通文字全部误判）。
 _MATH_FONT_TOKENS = (
     "CMMI",
     "CMSY",
@@ -29,14 +40,103 @@ _MATH_FONT_TOKENS = (
     "MathematicalPi",
     "STIX",
     "Euclid",
+    # TeX Gyre / newpx 系列（Palatino 那一支论文常用来排数学）
+    "NewPXMI",
+    "NewPXSY",
+    "NewPXEX",
+    "pxmi",
+    "pxmiaX",
+    "pxsys",
+    "pxex",
+    # 另一支 txfonts / Times 系的数学字体
+    "txmi",
+    "txsys",
+    "txexs",
+    # Office 的数学字体，Word 排版的论文会用
+    "CambriaMath",
+    # 其他常见独立数学字体包
+    "XITSMath",
+    "LatinModernMath",
+    "TeXGyrePagellaMath",
+    "TeXGyreTermesMath",
+    "TeXGyreBonumMath",
+    "AsanaMath",
+    "MnSymbol",
 )
 _TEXT_FONT_TOKENS = ("CMR", "CMBX", "CMSS", "CMTT", "CMTI", "CMB")
 
-# 一行里数学字体字符占比超过这个值，就认为整行是公式。
+# 一行里"数学字符"占比超过这个值，就认为整行是公式。
 _MATH_CHARACTER_RATIO = 0.5
+
+# 中文注释：下面这批区间是"一眼就能看出是数学"的字符。和前端
+# front/src/lib/math-text.ts 里判断伪公式用的是同一套思路，改了这边那边也要看一眼。
+#
+# 最要紧的是 U+1D400–U+1D7FF 这一段（数学字母数字符号）：论文里那些斜体的
+# 𝑆、𝛼、𝑊、𝑙 全在这里。TeX Gyre 这类现代数学字体抽出来的就是这些字符，
+# 靠它就能认出公式，不用管字体叫什么名字。
+_MATH_UNICODE_RANGES = (
+    (0x0370, 0x03FF),  # 希腊字母：α β γ θ λ ω
+    (0x2070, 0x209F),  # 上下标：⁰ ¹ ₂ ₃
+    (0x2100, 0x214F),  # 字母式符号：ℐ ℓ ℬ
+    (0x2190, 0x21FF),  # 箭头：← → ⇒
+    (0x2200, 0x22FF),  # 数学运算符：∑ ∏ ∈ ≤ √ ∇ ∂
+    (0x27C0, 0x27EF),  # 数学符号 A：⟦ ⟧
+    (0x2980, 0x29FF),  # 数学符号 B：⦀ ⦁
+    (0x2A00, 0x2AFF),  # 补充数学运算符：⨀ ⨁
+    (0x1D400, 0x1D7FF),  # 数学字母数字：𝑆 𝛼 𝑊 𝑙（现代论文公式的主要来源）
+)
+
+# 中文注释：这几个符号不在上面任何一段区间里，但也是明确的数学符号，单独列出来。
+_MATH_SYMBOL_CHARS = frozenset("±·×÷∓∗∘√∞∂∇‖−′″")
+
+# 一行至少要这么多非空白字符才算公式。中文注释：加这条是为了挡掉页码、孤立的
+# 单个斜体字母这类噪声——实测页码 "5" 和孤立的 "𝑖" 都会被单字符判据误抓。
+_MIN_MATH_LINE_CHARS = 2
+
+# ---------- 公式区域的形状参数 ----------
+# 中文注释：上下标在 PDF 里是分开排的，同一行公式会被切成好几小块。所以判定完
+# "哪些行是公式"之后，还要把这些行按位置粘回一块，才能截出一张完整的公式图。
+_REGION_VERTICAL_GAP = 6.0  # 两行上下相距不超过这么多点，就算挨在一起
+_REGION_HORIZONTAL_GAP = 8.0  # 两行左右相距不超过这么多点，就算挨在一起
+_REGION_PADDING_X = 10.0  # 截图时左右各多留一点，避免把分数线、根号切掉
+_REGION_PADDING_Y = 4.0  # 截图时上下各多留一点
+_MAX_REGION_AREA_RATIO = 0.5  # 一块区域要是占了半个页面，那肯定是认错了
+_MAX_REGION_ROWS = 10  # 一块区域超过这么多行，也当认错处理
+# 中文注释：判断"这个公式是不是夹在句子中间"时，看同一水平位置左右离它多近才算同一行。
+_INLINE_NEIGHBOR_GAP = 3.0
+# 中文注释：算作"邻近正文"的文字至少要这么长。公式旁边常散着逗号、单个斜体字母这类
+# 一两个字符的碎片（它们够不上"整行是公式"的门槛），要是拿它们当"句子里的文字"，
+# 好好一条独立公式会被误判成行内公式，也就不会被送去转写了。
+_MIN_INLINE_NEIGHBOR_CHARS = 3
+
+# 内容占位符：先把公式或表格在正文里的位置留一个记号，等截图转写完成再换回来。
+# 中文注释：这个记号必须单独占一行，而且不能被"删除重复页眉页脚"那一步误删——
+# 因为那一步会把数字统一换成 #，两页的 <!-- formula: 5_1 --> 和 <!-- formula: 6_1 -->
+# 会被看成同一行，多页首行都是公式时就会被整批删掉，公式就悄悄丢了。
+# 所以下面 _protected_lines 里专门给它留了保护。
+_MARKER_PATTERN = re.compile(r"^\s*<!--\s*(?:formula|table):\s*\d+_\d+\s*-->\s*$")
+
+# 公式编号的样子：单独一行、形如 (2) 或 (2a)。
+_EQUATION_NUMBER_PATTERN = re.compile(r"^\(\s*(\d+[a-z]?)\s*\)$")
 
 # 小于这个字节数的图片基本都是 logo、图标、装饰线，写出来只会给正文添乱。
 _MIN_IMAGE_BYTES = 10240
+
+# ---------- 矢量图截图的参数 ----------
+# 中文注释：论文里的插图和照片不同，很多是用线条"画"出来的（方法框架图、折线图都是），
+# 这类图 get_images 抽不到，只能按线条的位置把那一块截成图片。下面是判断
+# "聚出来的一块到底是不是插图"的几个门槛，都很保守。
+_VECTOR_FIGURE_DPI = 150  # 截图清晰度：插图上的小字要能看清
+_MAX_FIGURE_PX_WIDTH = 1600  # 图宽上限，太宽就按比例降清晰度
+_MIN_VECTOR_FIGURE_HEIGHT = 60.0  # 比这矮的，是分隔线、下划线
+_MIN_VECTOR_FIGURE_WIDTH = 80.0  # 比这窄的，是竖线、装饰
+_MIN_VECTOR_FIGURE_STROKES = 8  # 线条太少的，多半只是个表格框
+_MIN_VECTOR_FIGURE_AREA_RATIO = 0.02  # 占页面太小的一块，不是插图
+_MAX_VECTOR_FIGURE_AREA_RATIO = 0.6  # 占了大半页的，是把整页正文当成图了
+# 中文注释：这块地方已经有位图或表格时，重合超过这个比例就不再截一遍，避免同一张图收两次。
+_VECTOR_FIGURE_OVERLAP_LIMIT = 0.3
+# 中文注释：一张候选插图有一半以上压在表格范围里，就当它是表格的一部分，不再当插图收。
+_TABLE_REGION_OVERLAP_LIMIT = 0.5
 
 # 图注的样子：以 Figure / Fig. / TABLE / Table 加一个编号开头。
 _CAPTION_PATTERN = re.compile(r"^(Figure|Fig\.?|TABLE|Table)\s*\d+")
@@ -44,6 +144,11 @@ _CAPTION_PATTERN = re.compile(r"^(Figure|Fig\.?|TABLE|Table)\s*\d+")
 # 不能"在整句里随便找一个数字"——否则 "Figure 2: accuracy at 50% coverage"
 # 这种图注会被当成第 50 张图。
 _CAPTION_NUMBER = re.compile(r"^(?:Figure|Fig\.?|TABLE|Table)\s*(\d+)")
+# 表注的样子：以 TABLE / Table 加编号开头。
+_TABLE_CAPTION_PATTERN = re.compile(r"^(?:TABLE|Table)\s*(\d+)")
+# 中文注释：图注/表注的"正文部分"至少要这么长才算真的。加这条是因为"Table 1"这种
+# 三个字也可能只是正文里的一句引用，不是表注——真表注后面一定还跟着说明这张表在讲什么。
+_MIN_CAPTION_BODY_CHARS = 10
 
 # 表格行：去掉空格后以 "|" 开头。这类行绝不能被当成页眉页脚删掉。
 _TABLE_LINE_PATTERN = re.compile(r"^\s*\|")
@@ -72,15 +177,86 @@ class ParsedPdfPage:
 
 
 @dataclass(slots=True)
+class PdfFormulaRegion:
+    """页面上认出的一处公式，以及它在正文里留下的位置记号。
+
+    中文注释：解析 PDF 的时候还不能立刻把公式转成 LaTeX——那一步要调模型、是异步的，
+    而读 PDF 是同步的。所以这里先把公式的"照片地址"（在第几页、什么位置）记下来，
+    正文里只放一个占位符。等上层拿到模型以后，再照着这份记录去截图、转写、把占位符换掉。
+
+    is_display 表示这是"单独占一行的公式"还是"夹在句子里的公式"。只有前者需要截图转写；
+    后者留在正文里，把数学字符包上 $ 就够了。
+    """
+
+    page_number: int  # 在第几页（从 1 开始）
+    index: int  # 这一页里的第几个公式（从 1 开始）
+    rect: tuple[float, float, float, float]  # 截图范围（左, 上, 右, 下），已经留过白边
+    is_display: bool  # 真 = 单独占一行，需要转写；假 = 夹在句子里的
+    text: str  # 这块区域里的原始文字（转写失败时用它兜底）
+    number: str  # 公式编号，比如 "2"；没有编号就是空字符串
+    members: list[tuple[int, int]]  # 组成这块区域的行，记着它们属于第几个文字块的第几行
+
+    @property
+    def placeholder(self) -> str:
+        """正文里占位用的记号。转写完成后按它把内容换回去。"""
+
+        return f"<!-- formula: {self.page_number}_{self.index} -->"
+
+    @property
+    def fallback(self) -> str:
+        """转写失败时写回正文的内容。
+
+        中文注释：退回到"把这块区域的原始文字原样放进 $$ 块"。虽然还是没法当 LaTeX 读，
+        但比改动前强——以前这些碎片会被排版换行切成一堆独立段落，现在至少是完整的一块。
+        """
+
+        return "$$\n" + self.text.strip() + "\n$$"
+
+
+@dataclass(slots=True)
+class PdfTableRegion:
+    """页面上认出的一张有图注的表格，以及它在正文里留下的位置记号。
+
+    中文注释：为什么要单独拎出来交给模型——PDF 里表格是"排"出来的，程序只能靠
+    "框线在哪"去猜哪个格子属于哪一列。遇到跨两层的表头（一层写数据集、一层写指标），
+    猜出来的表头会把好几列的名字糊成一格，结果是"数字都在、但哪一列是哪个指标全没了"。
+    实测一篇论文的表头被糊成 "LLaVA-OV-7B 64 + ReKV 0.5 fps + LiveVLM 0.5 fps" 这么一长串。
+
+    整张表截成图交给模型，它能按看到的排版把表头和列对齐写回 Markdown 表格。
+    转写失败就退回 fallback（也就是现在那份会糊表头的 Markdown 表），保证不会更差。
+    """
+
+    page_number: int
+    index: int  # 这一页里的第几张表
+    rect: tuple[float, float, float, float]  # 整张表的范围
+    caption: str
+    fallback: str  # 转写失败时写回正文的 Markdown 表
+    # 中文注释：这张表由哪几个 find_tables 找到的区拼起来。一张大表常被拆成好几块，
+    # 靠图注把它们归到一起。正文输出时要按这个把对应位置换成占位符。
+    members: list[int] = field(default_factory=list)
+
+    @property
+    def placeholder(self) -> str:
+        """正文里占位用的记号。转写完成后按它把内容换回去。"""
+
+        return f"<!-- table: {self.page_number}_{self.index} -->"
+
+
+@dataclass(slots=True)
 class PdfParseResult:
     """保存一次 PDF 解析的统一结果。
 
     中文注释：不管底层用 pypdf、PyMuPDF 还是更高级的解析器，最终都整理成
-    pages + warnings。调用方只关心这个统一形状。
+    pages + warnings。调用方只关心这个统一形状。formulas 和 tables 里记着这一篇
+    认出了哪些需要模型帮忙的内容，只有 PyMuPDF 解析器会填，pypdf 那条件里永远是空的。
     """
 
     pages: list[ParsedPdfPage] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    formulas: list[PdfFormulaRegion] = field(default_factory=list)
+    # 中文注释：有图注、需要交给模型重排的表格。没有图注的表走原来的 Markdown 转换，
+    # 不进这个清单。
+    tables: list["PdfTableRegion"] = field(default_factory=list)
 
 
 class BasePdfParser(ABC):
@@ -170,6 +346,9 @@ class PyMuPdfParser(BasePdfParser):
         # 中文注释：同一张图可能被好几页引用（xref 相同），全局记住已经写过的，
         # 避免同一张图重复落盘。
         written_xrefs: set[int] = set()
+        # 中文注释：全篇已经写过的图片内容（按内容算的指纹 → 文件名）。同一张图在论文里
+        # 可能被引用好几次、每次都是不同的对象编号，按内容记才能挡住重复落盘。
+        written_digests: dict[str, str] = {}
         # 有些图附近找不到图注，这时用一个从头到尾递增的编号兜底。
         figure_counter = 0
         # 中文注释：全篇已经用过的图号。图注里写的编号和兜底计数器有可能撞号
@@ -178,19 +357,26 @@ class PyMuPdfParser(BasePdfParser):
         used_figure_numbers: set[int] = set()
         page_texts: list[str] = []
         page_metadatas: list[dict[str, Any]] = []
+        # 中文注释：把每页认出的公式攒到一起。上层拿到这份清单后，才能照着它去截图转写。
+        formulas: list[PdfFormulaRegion] = []
+        # 中文注释：有图注、要交给模型重排表头的表格，和公式一样攒起来。
+        tables: list[PdfTableRegion] = []
         for page_index in range(doc.page_count):
             page = doc[page_index]
-            text, table_count, figure_count = self._render_page(
+            text, table_count, figure_count, page_formulas, page_tables = self._render_page(
                 pymupdf,
                 doc,
                 page,
                 page_index + 1,
                 assets_dir,
                 written_xrefs,
+                written_digests,
                 figure_counter,
                 used_figure_numbers,
             )
             figure_counter += figure_count
+            formulas.extend(page_formulas)
+            tables.extend(page_tables)
             page_texts.append(text)
             page_metadatas.append(
                 {"parser": self.name, "table_count": table_count, "figure_count": figure_count}
@@ -205,7 +391,7 @@ class PyMuPdfParser(BasePdfParser):
             pages.append(ParsedPdfPage(page_number=index + 1, text=normalised, metadata=page_metadatas[index]))
         if not pages:
             return PdfParseResult(warnings=["PDF 中没有可读取的文字，可能是扫描文件"])
-        return PdfParseResult(pages=pages)
+        return PdfParseResult(pages=pages, formulas=formulas, tables=tables)
 
     def _render_page(
         self,
@@ -215,10 +401,11 @@ class PyMuPdfParser(BasePdfParser):
         page_number: int,
         assets_dir: Path | None,
         written_xrefs: set[int],
+        written_digests: dict[str, str],
         figure_offset: int,
         used_figure_numbers: set[int],
-    ) -> tuple[str, int, int]:
-        """把一页内容拼成 Markdown，返回 (正文, 表格数, 写出的图片数)。"""
+    ) -> tuple[str, int, int, list[PdfFormulaRegion], list[PdfTableRegion]]:
+        """把一页内容拼成 Markdown，返回 (正文, 表格数, 写出的图片数, 认出的公式)。"""
 
         table_rects, table_markdowns = _collect_tables(page)
         blocks = [block for block in page.get_text("dict")["blocks"] if block.get("type") == 0]
@@ -233,25 +420,49 @@ class PyMuPdfParser(BasePdfParser):
             if block_text.strip():
                 text_blocks.append((block, block_text))
 
-        figures, figure_count = _collect_figures(
-            doc, page, page_number, assets_dir, written_xrefs, text_blocks, figure_offset, used_figure_numbers
-        )
+        # 中文注释：有图注的表格要交给模型重排表头，先在这一页把它们找出来。
+        page_tables = _collect_table_regions(table_rects, table_markdowns, text_blocks, page_number)
+        region_of_table = {member: region for region in page_tables for member in region.members}
+
+        # 中文注释：调用方没给图片目录时完全跳过图片：不写文件，也不往正文里塞引用。
+        if assets_dir is None:
+            figures: list[dict[str, Any]] = []
+            figure_internal_rects: list[tuple[float, float, float, float]] = []
+            figure_count = 0
+        else:
+            figures, figure_internal_rects, figure_count = _collect_page_figures(
+                doc,
+                page,
+                page_number,
+                assets_dir,
+                written_xrefs,
+                written_digests,
+                # 中文注释：表格占的地方不能再算成插图。把表格区域的整块范围也交过去，
+                # 免得一张表既被重排成 Markdown 表、又被当成插图讲一遍。
+                table_rects + [region.rect for region in page_tables],
+                text_blocks,
+                figure_offset,
+                used_figure_numbers,
+            )
+
+        # 中文注释：先在这一页上把公式找出来。找出来的每一处都带着自己的位置，
+        # 截图转写那一步会用到。这一步只做几何计算，不调模型、很快。
+        page_regions = _collect_formula_regions(page, blocks, table_rects, page_number)
+
+        # 中文注释：单独占一行的公式不直接写进正文，而是留一个占位符，等转写完再换。
+        # 这里先记下"哪一块文字的第几行属于哪个公式"，待会儿按行号去查。
+        # 夹在句子里的公式不进这张表，它们照旧留在正文段落里。
+        display_region_of_line: dict[tuple[int, int], PdfFormulaRegion] = {}
+        for region in page_regions:
+            if not region.is_display:
+                continue
+            for member in region.members:
+                display_region_of_line[member] = region
 
         items: list[_PageItem] = []
         first_item_of_block: dict[int, _PageItem] = {}
         emitted_tables: set[int] = set()
-        math_buffer: list[str] = []
-
-        def flush_math(y: float) -> None:
-            """把攒起来的连续公式行合成一个 $$ 块。
-
-            中文注释：一条长公式常常一行放不下、被拆成好几行。分开输出会变成一堆
-            看不懂的碎片，所以要合并回一整块。
-            """
-
-            if math_buffer:
-                items.append(_PageItem("$$\n" + "\n".join(math_buffer) + "\n$$", y))
-                math_buffer.clear()
+        emitted_regions: set[int] = set()
 
         def flush_plain(lines: list[str], y: float, block: Any) -> None:
             """把一个文字块里攒下的普通正文行合成一个段落。
@@ -271,32 +482,51 @@ class PyMuPdfParser(BasePdfParser):
             # 所以需要拿到"图注那个块的第一个项"作为插入位置。
             first_item_of_block.setdefault(id(block), item)
 
-        for block in blocks:
+        for block_index, block in enumerate(blocks):
             block_top = float(block["bbox"][1])
             table_index = _covered_by_table(_rect_tuple(block["bbox"]), table_rects)
             if table_index is not None:
                 # 中文注释：表格里的文字已经被拼进 Markdown 表格了。这些原始文字块要是
                 # 再输出一遍，表格内容就会在正文里出现两次，所以整块跳过。
+                region = region_of_table.get(table_index)
+                if region is not None:
+                    # 中文注释：这张表要交给模型重排表头，先在原位留个记号，
+                    # 等转写完了再换成真正的 Markdown 表。
+                    if id(region) not in emitted_regions:
+                        emitted_regions.add(id(region))
+                        items.append(_PageItem(region.placeholder, region.rect[1]))
+                    continue
                 if table_index not in emitted_tables:
                     emitted_tables.add(table_index)
-                    flush_math(block_top)
                     items.append(_PageItem(table_markdowns[table_index], float(table_rects[table_index][1])))
                 continue
             plain_lines: list[str] = []
-            for line in block["lines"]:
+            for line_index, line in enumerate(block["lines"]):
                 line_text = "".join(span["text"] for span in line["spans"])
                 if not line_text.strip():
                     continue
-                if _is_math_line(line):
+                if _inside_any(_rect_tuple(line["bbox"]), figure_internal_rects):
+                    # 中文注释：这行是插图肚子里的字——坐标轴刻度、图例、框里的说明。
+                    # 图本身已经整块截出来交给模型看了，这些散落的词再当正文输出一遍，
+                    # 只会让模型读到一堆没头没尾的名词。实测一篇论文的方法框架图被这样
+                    # 拆成"Observation / Privileged Critic / Local Occupancy"散在正文里。
+                    continue
+                region = display_region_of_line.get((block_index, line_index))
+                if region is not None:
+                    # 中文注释：这行属于某个单独占一行的公式。先把攒着的正文落定，
+                    # 再放下占位符。一条公式可能横跨好几行，只在第一行时放一次。
                     flush_plain(plain_lines, block_top, block)
                     plain_lines = []
-                    math_buffer.append(line_text.strip())
+                    if id(region) not in emitted_regions:
+                        emitted_regions.add(id(region))
+                        items.append(_PageItem(region.placeholder, region.rect[1]))
                     continue
-                # 中文注释：普通正文行出现，说明上面攒的公式已经结束了，先把它落定。
-                flush_math(block_top)
-                plain_lines.append(line_text)
+                # 中文注释：其余的行都留在段落里。行内公式不再被整行抽走，
+                # 只是在它那几个数学字符外面包一层 $，方便下游和前端认出来。
+                plain_lines.append(_with_inline_math(line))
             flush_plain(plain_lines, block_top, block)
-        flush_math(float(blocks[-1]["bbox"][1]) if blocks else 0.0)
+
+        figures = _fold_table_figures_into_regions(figures, page_tables, page_number)
 
         for figure in figures:
             caption_block = figure["caption_block"]
@@ -312,7 +542,7 @@ class PyMuPdfParser(BasePdfParser):
         # find_tables 报的数量会虚高，有两种情况：一是把一张表里套着的小表也单独找出来
         # （实测一篇论文的第一页报了 3 张，其实那 3 个矩形是层层嵌套的同一个区域）；
         # 二是把图的标注区当成表格（_looks_like_table 会把它筛掉）。所以按检测数报不准。
-        return "\n\n".join(item.text for item in items), len(emitted_tables), figure_count
+        return "\n\n".join(item.text for item in items), len(emitted_tables), figure_count, page_regions, page_tables
 
 
 def get_pdf_parser(name: str = "pypdf") -> BasePdfParser:
@@ -390,6 +620,131 @@ def _collect_tables(page: Any) -> tuple[list[tuple[float, float, float, float]],
         rects.append(table_rect)
         markdowns.append(markdown)
     return rects, markdowns
+
+
+def _collect_table_regions(
+    table_rects: list[tuple[float, float, float, float]],
+    table_markdowns: list[str],
+    text_blocks: list[tuple[Any, str]],
+    page_number: int,
+) -> list[PdfTableRegion]:
+    """把"有图注的表格"挑出来，准备交给模型重排。
+
+    中文注释：只挑有图注的。图注（"Table 1: ..."）是"这确实是一张表、而且我们知道它是第几张"
+    的确凿信号；没有图注的表格区照样走原来的 Markdown 转换，不惊动模型。
+
+    一张大表常被 find_tables 拆成好几块，所以按图注分组：归同一条表注的几块合并成一张表，
+    整块截给模型看，它才能把表头和列正确对齐。
+    """
+
+    if not table_rects:
+        return []
+    captions = [entry for entry in _caption_candidates(text_blocks) if _is_table_caption(entry[1])]
+    if not captions:
+        return []
+
+    grouped: dict[int, list[int]] = {}
+    for table_index, rect in enumerate(table_rects):
+        caption_index = _nearest_caption_index(rect, captions)
+        if caption_index is None:
+            continue
+        grouped.setdefault(caption_index, []).append(table_index)
+
+    regions: list[PdfTableRegion] = []
+    for caption_index in sorted(grouped):
+        members = grouped[caption_index]
+        rect = table_rects[members[0]]
+        for member in members[1:]:
+            rect = _union_rect(rect, table_rects[member])
+        # 中文注释：把表注也框进来。模型看到"Table 1: ..."就知道这是第几张表、在讲什么，
+        # 排表头时心里有数。
+        rect = _union_rect(rect, captions[caption_index][2])
+        regions.append(
+            PdfTableRegion(
+                page_number=page_number,
+                index=len(regions) + 1,
+                rect=rect,
+                caption=captions[caption_index][1].strip(),
+                fallback="\n\n".join(table_markdowns[member] for member in members),
+                members=members,
+            )
+        )
+    return regions
+
+
+def _is_table_caption(text: str) -> bool:
+    """判断一段文字是不是"表注"（以 Table 加编号开头，而且后面还有像样的内容）。"""
+
+    match = _TABLE_CAPTION_PATTERN.match(text.strip())
+    if not match:
+        return False
+    return len(text[match.end():].strip(" :：.、")) >= _MIN_CAPTION_BODY_CHARS
+
+
+def _fold_table_figures_into_regions(
+    figures: list[dict[str, Any]], page_tables: list[PdfTableRegion], page_number: int
+) -> list[dict[str, Any]]:
+    """把"其实是表格"的插图交给表格那条线去处理。
+
+    中文注释：为什么会有"其实是表格的插图"——find_tables 只认得出有框线的规则表格。
+    遇到没框线、或者排版特殊的表，它一张都找不到，那些表就会被当成普通插图收进来。
+    实测一篇论文的 Table 5 就是这样：find_tables 报 0 张，整张表被当位图收成了左右两半。
+
+    所以这里做一次归拢：图注写着 "Table N" 的，本来就不是插图。给它配一条表格区域
+    （同一页已经有同一个表号的区域就并进去，别重复），正文里改成放表格占位符。
+    表里那些数值最后会由重排那一步变成表头正确的 Markdown 表。
+    """
+
+    kept: list[dict[str, Any]] = []
+    for figure in figures:
+        caption = str(figure.get("caption_text") or "")
+        if not _is_table_caption(caption):
+            kept.append(figure)
+            continue
+        rect = figure["rect"]
+        region = _region_with_same_table_number(page_tables, caption)
+        if region is None:
+            region = PdfTableRegion(
+                page_number=page_number,
+                index=len(page_tables) + 1,
+                rect=rect,
+                caption=caption,
+                # 中文注释：重排不出来时退回图片引用。图本身还在 assets 里，
+                # 用户和后续的插图解读照样看得到，只是没有重排好的表头。
+                fallback=str(figure["markdown"]),
+            )
+            page_tables.append(region)
+        else:
+            region.rect = _union_rect(region.rect, rect)
+        figure["markdown"] = region.placeholder
+        kept.append(figure)
+    return kept
+
+
+def _region_with_same_table_number(
+    regions: list[PdfTableRegion], caption: str
+) -> PdfTableRegion | None:
+    """找同一页里表号相同的表格区域。
+
+    中文注释：靠表号认，不靠位置。实测有一页的表格被 find_tables 认成了 31 点高的一条
+    表头碎片，而真正的表格图在页面下方老远的地方——按位置根本对不上，按"都是 Table 13"
+    才对得上。
+    """
+
+    number = _table_number(caption)
+    if not number:
+        return None
+    for region in regions:
+        if _table_number(region.caption) == number:
+            return region
+    return None
+
+
+def _table_number(caption: str) -> str:
+    """从表注里取出表号（"Table 13: ..." 里的 13）。取不到返回空字符串。"""
+
+    match = _TABLE_CAPTION_PATTERN.match(caption.strip())
+    return match.group(1) if match else ""
 
 
 def _page_image_rects(page: Any) -> list[tuple[float, float, float, float]]:
@@ -491,24 +846,180 @@ def _clean_table_cell(value: Any) -> str:
     return text.replace("|", "\\|")
 
 
-def _collect_figures(
+@dataclass(slots=True)
+class _FigureCandidate:
+    """还没落盘的一张候选插图。
+
+    中文注释：先只记位置和内容、不写文件，是因为"一张图被切成好几块"的情况要等
+    配完图注才知道该不该合并。合并之后要用整块的画面重新截一次，先前那些碎片的
+    图片内容就作废了，写下去也是白写。
+    """
+
+    rect: tuple[float, float, float, float]
+    payload: bytes | None  # 位图的原始字节；矢量图是现场截的，这里是空的
+    extension: str
+    is_vector: bool
+
+
+def _collect_page_figures(
     doc: Any,
     page: Any,
     page_number: int,
-    assets_dir: Path | None,
+    assets_dir: Path,
     written_xrefs: set[int],
+    written_digests: dict[str, str],
+    table_rects: list[tuple[float, float, float, float]],
     text_blocks: list[tuple[Any, str]],
     figure_offset: int,
     used_figure_numbers: set[int],
-) -> tuple[list[dict[str, Any]], int]:
-    """把页面上的图片存成文件，并给每张图配好图注和 Markdown 引用。"""
+) -> tuple[list[dict[str, Any]], list[tuple[float, float, float, float]], int]:
+    """把一页上的插图收齐、配好图注、落盘，返回 (图列表, 要抹掉的内部文字范围, 图片数)。
 
-    if assets_dir is None:
-        # 中文注释：调用方没给图片目录时完全跳过图片：不写文件，也不往正文里塞引用。
-        return [], 0
+    中文注释：一段话讲清为什么这么绕——
 
-    # 第一步：先把够大的图片落盘，把位置和文件名记下来。
-    pending: list[tuple[tuple[float, float, float, float], str]] = []
+    位图（照片、截图、导出的 PNG）用 get_images 就能拿到。但论文里大量插图是"矢量画"出来的：
+    用线条、色块、箭头直接在 PDF 里画。机器人、强化学习这类论文的方法框架图、折线图
+    基本都是这么画的。这类图 get_images 完全看不见——实测一篇论文第 4 页有 1763 条矢量线条
+    （占页面 61%），一张图都没抽出来，正文里只剩图里散落的几个标签词。
+
+    收完还要解决第二件事：一张多面板的图（左右三个子图那种）在 PDF 里是好几块独立内容，
+    会被当成好几张图，论文里明明只有 11 张图，正文里却冒出 64 条引用。办法是看它们
+    "归属同一条图注"，是的话就合并成一张、按整块重新截一次。
+    """
+
+    candidates = [
+        candidate
+        for candidate in _figure_candidates(doc, page, written_xrefs, table_rects)
+        # 中文注释：落在表格里的东西不算插图——那张表交给表格那边单独处理。
+        # 不筛的话同一张表会被讲两遍：一遍是重排好的 Markdown 表，一遍是"这是一张表格"的图片描述。
+        if not _overlaps_any(candidate.rect, table_rects, _TABLE_REGION_OVERLAP_LIMIT)
+    ]
+    if not candidates:
+        return [], [], 0
+    assets_dir.mkdir(parents=True, exist_ok=True)
+
+    captions = _caption_candidates(text_blocks)
+    # 中文注释：先给每张候选图各找一个"离我最近的图注"，这里故意不排他——
+    # 一张多面板图的几块碎片本来就该配到同一条图注，排他的话只有一块配得上、
+    # 其余几块就变成"没有图注的图"，正文里还是一堆引用。
+    captions_of: dict[int, int | None] = {
+        index: _nearest_caption_index(candidate.rect, captions)
+        for index, candidate in enumerate(candidates)
+    }
+
+    captions_used: set[int] = set()
+    figures: list[dict[str, Any]] = []
+    internal_rects: list[tuple[float, float, float, float]] = []
+    emitted_captions: set[int] = set()
+    order = 0
+
+    # 中文注释：按从上到下的顺序处理。这里排的是"下标"而不是候选图本身——
+    # 候选图是普通数据对象，两张位置用内容比较会相等，拿对象去查位置会认错人。
+    for original_index in sorted(
+        range(len(candidates)), key=lambda index: (candidates[index].rect[1], candidates[index].rect[0])
+    ):
+        candidate = candidates[original_index]
+        caption_index = captions_of.get(original_index)
+        if caption_index is not None and caption_index in emitted_captions:
+            # 这条图注已经配给同一张图的另一块了，这块是它的兄弟面板，跳过。
+            continue
+        if caption_index is not None:
+            emitted_captions.add(caption_index)
+            captions_used.add(caption_index)
+            panel_rects = _panel_rects(candidates, captions_of, caption_index)
+        else:
+            panel_rects = [candidate.rect]
+
+        if len(panel_rects) > 1:
+            # 中文注释：多块面板合成一张图，按整块范围重新截一次，这样截出来的是完整的图，
+            # 而不是几块被切开的碎片。
+            rect = panel_rects[0]
+            for panel in panel_rects[1:]:
+                rect = _union_rect(rect, panel)
+            try:
+                payload = page.get_pixmap(clip=_clip_rect(rect), dpi=_capped_figure_dpi(rect)).tobytes("png")
+            except Exception:
+                continue
+            extension, is_vector = "png", False
+        else:
+            rect = panel_rects[0]
+            is_vector = candidate.is_vector
+            extension = candidate.extension
+            payload = candidate.payload
+            if is_vector or payload is None:
+                try:
+                    payload = page.get_pixmap(clip=_clip_rect(rect), dpi=_capped_figure_dpi(rect)).tobytes("png")
+                except Exception:
+                    continue
+                extension = "png"
+
+        file_name = _store_figure(assets_dir, written_digests, payload, extension, page_number, order)
+        caption_text = captions[caption_index][1] if caption_index is not None else ""
+        figure_number = _figure_number(caption_text, figure_offset + order + 1, used_figure_numbers)
+        used_figure_numbers.add(figure_number)
+        if is_vector and caption_text:
+            # 中文注释：矢量图内部的文字（坐标轴刻度、图例、框里的说明）也会被当成正文抽出来，
+            # 结果正文里散着一堆"Observation""Privileged Critic"这种没头没尾的词。配到图注的
+            # 矢量图说明它确实是张插图，那它肚子里的文字就不该再当正文输出。
+            internal_rects.append(rect)
+        figures.append(
+            {
+                "caption_block": captions[caption_index][0] if caption_index is not None else None,
+                "caption_text": caption_text,
+                "rect": rect,
+                "y": rect[1],
+                "markdown": f"![{_image_alt_text(caption_text, figure_number)}](assets/{file_name})",
+            }
+        )
+        order += 1
+
+    return figures, internal_rects, order
+
+
+def _panel_rects(
+    candidates: list[_FigureCandidate], captions_of: dict[int, int | None], caption_index: int
+) -> list[tuple[float, float, float, float]]:
+    """找出所有归属同一条图注的碎片。
+
+    中文注释：一条图注对应论文里的一张图，所以"归属同一条图注"就说明这几块碎片
+    本来就是同一张图的几个面板（左边一个、中间一个、右边一个那种）。图注是论文自己写的、
+    一条只标一张图，用它来分组很可靠。
+    """
+
+    return [
+        candidate.rect
+        for index, candidate in enumerate(candidates)
+        if captions_of.get(index) == caption_index
+    ]
+
+
+def _nearest_caption_index(
+    rect: tuple[float, float, float, float],
+    captions: list[tuple[Any, str, tuple[float, float, float, float]]],
+) -> int | None:
+    """找离这张图最近的一条图注，返回它在列表里的位置。"""
+
+    best_index: int | None = None
+    best_distance: float | None = None
+    for index, (_, _, caption_rect) in enumerate(captions):
+        distance = _vertical_distance(rect, caption_rect)
+        if best_distance is None or distance < best_distance:
+            best_distance = distance
+            best_index = index
+    return best_index
+
+
+def _figure_candidates(
+    doc: Any,
+    page: Any,
+    written_xrefs: set[int],
+    table_rects: list[tuple[float, float, float, float]],
+) -> list[_FigureCandidate]:
+    """把一页上的插图候选收下来，但先不写文件。"""
+
+    candidates: list[_FigureCandidate] = []
+
+    # ---- 位图 ----
     for image in page.get_images(full=True):
         xref = image[0]
         if xref in written_xrefs:
@@ -519,7 +1030,7 @@ def _collect_figures(
             continue
         payload = info.get("image") or b""
         if len(payload) < _MIN_IMAGE_BYTES:
-            # 中文注释：小图基本是 logo、图标、装饰线。实测第三篇论文 56 个图片里
+            # 中文注释：小图基本是 logo、图标、装饰线。实测一篇论文 56 个图片里
             # 只有 18 个达到 10KB，剩下全是这种装饰品。
             continue
         rects = page.get_image_rects(xref)
@@ -527,34 +1038,179 @@ def _collect_figures(
             # 图片对象挂在页面上但实际没显示出来，没有位置就没法找图注。
             continue
         written_xrefs.add(xref)
-        image_rect = _rect_tuple(rects[0])
-        assets_dir.mkdir(parents=True, exist_ok=True)
-        extension = info.get("ext") or "png"
-        file_name = f"fig_p{page_number}_{len(pending) + 1}.{extension}"
-        (assets_dir / file_name).write_bytes(payload)
-        pending.append((image_rect, file_name))
-
-    # 第二步：按纵向位置从上到下排好，跟图注一对一地配。
-    # 中文注释：一页里有多张图时，如果每张图都各自去找"离我最近的图注"，
-    # 两张图可能抢到同一条图注，结果两张图拿到同一个图号，正文里就分不清谁是谁了。
-    # 所以这里按从上到下的顺序配，配过的图注不再给别人用。
-    captions = _caption_candidates(text_blocks)
-    used_captions: set[int] = set()
-    figures: list[dict[str, Any]] = []
-    for order, (image_rect, file_name) in enumerate(sorted(pending, key=lambda item: (item[0][1], item[0][0]))):
-        caption_block, caption_text, caption_index = _best_caption(image_rect, captions, used_captions)
-        if caption_index is not None:
-            used_captions.add(caption_index)
-        figure_number = _figure_number(caption_text, figure_offset + order + 1, used_figure_numbers)
-        used_figure_numbers.add(figure_number)
-        figures.append(
-            {
-                "caption_block": caption_block,
-                "y": image_rect[1],
-                "markdown": f"![Figure {figure_number}](assets/{file_name})",
-            }
+        candidates.append(
+            _FigureCandidate(
+                rect=_rect_tuple(rects[0]), payload=payload, extension=info.get("ext") or "png", is_vector=False
+            )
         )
-    return figures, len(pending)
+
+    # ---- 矢量图 ----
+    occupied = [candidate.rect for candidate in candidates] + list(table_rects)
+    for rect in _vector_figure_rects(page, occupied):
+        candidates.append(_FigureCandidate(rect=rect, payload=None, extension="png", is_vector=True))
+
+    return candidates
+
+
+def _store_figure(
+    assets_dir: Path,
+    written_digests: dict[str, str],
+    payload: bytes,
+    extension: str,
+    page_number: int,
+    index: int,
+) -> str:
+    """把一张图写进 assets 目录，返回它的文件名。
+
+    中文注释：按图片"内容"去重，而不是按 PDF 里的对象编号。同一张图在论文里可能被
+    引用好几次、每次都是一个新的对象编号，按编号去重挡不住——实测一篇论文的 64 个
+    图片文件里只有 50 个内容互不相同，最大一组有 5 个文件字节完全一样。
+    内容一样的就直接指回已经写好的那一份，不再重复落盘。
+    """
+
+    digest = hashlib.md5(payload).hexdigest()
+    existing = written_digests.get(digest)
+    if existing is not None:
+        return existing
+    file_name = f"fig_p{page_number}_{index + 1}.{extension}"
+    (assets_dir / file_name).write_bytes(payload)
+    written_digests[digest] = file_name
+    return file_name
+
+
+def _vector_figure_rects(
+    page: Any, occupied: list[tuple[float, float, float, float]]
+) -> list[tuple[float, float, float, float]]:
+    """把页面上的矢量线条聚成一块块，挑出真正像插图的那些。
+
+    中文注释：页面上的矢量线条大部分不是插图——表格框线、页眉分隔线、下划线、
+    页脚横杠都算。所以不能"有一段线条就当成图"，得看聚出来的那一块够不够"图的样子"：
+    够大、够高、里面线条够多。
+    """
+
+    try:
+        drawings = page.get_drawings()
+    except Exception:
+        return []
+    rects: list[tuple[float, float, float, float]] = []
+    for drawing in drawings:
+        raw = drawing.get("rect")
+        if raw is None:
+            continue
+        rects.append(_rect_tuple(raw))
+    if not rects:
+        return []
+
+    page_area = float(page.rect.width) * float(page.rect.height)
+    # 中文注释：先把挨在一起的线条按位置并成块。这里用的是和公式区域一样的做法，
+    # 只是不用管横向间隙——插图里的线条本来就连成一片。
+    groups: list[list[tuple[float, float, float, float]]] = []
+    for rect in sorted(rects, key=lambda item: (item[1], item[0])):
+        for group in groups:
+            if _rects_are_close(_group_box(group), rect):
+                group.append(rect)
+                break
+        else:
+            groups.append([rect])
+
+    accepted: list[tuple[float, float, float, float]] = []
+    for group in groups:
+        box = _group_box(group)
+        width = box[2] - box[0]
+        height = box[3] - box[1]
+        if height < _MIN_VECTOR_FIGURE_HEIGHT or width < _MIN_VECTOR_FIGURE_WIDTH:
+            # 太矮或太窄，是分隔线、下划线这类东西。
+            continue
+        if len(group) < _MIN_VECTOR_FIGURE_STROKES:
+            # 线条太少，多半是个表格框或装饰矩形。
+            continue
+        area_ratio = (width * height) / page_area if page_area else 0.0
+        if area_ratio < _MIN_VECTOR_FIGURE_AREA_RATIO or area_ratio > _MAX_VECTOR_FIGURE_AREA_RATIO:
+            continue
+        if _overlaps_any(box, occupied, _VECTOR_FIGURE_OVERLAP_LIMIT):
+            # 这块地方已经有位图或表格了，别重复截一遍。
+            continue
+        accepted.append(box)
+    return accepted
+
+
+def _inside_any(
+    rect: tuple[float, float, float, float], containers: list[tuple[float, float, float, float]]
+) -> bool:
+    """这个矩形是不是落在其中某个框里面。
+
+    中文注释：用矩形中心点判断，不用"完全包含"。插图的文字有时会稍稍超出线条围出来的
+    范围（比如轴标签挂在框外一点点），按完全包含判会漏掉。中心点在框里就算在里面。
+    """
+
+    center_x = (rect[0] + rect[2]) / 2
+    center_y = (rect[1] + rect[3]) / 2
+    for box in containers:
+        if box[0] <= center_x <= box[2] and box[1] <= center_y <= box[3]:
+            return True
+    return False
+
+
+def _group_box(group: list[tuple[float, float, float, float]]) -> tuple[float, float, float, float]:
+    """一堆矩形的整体外框。"""
+
+    box = group[0]
+    for rect in group[1:]:
+        box = _union_rect(box, rect)
+    return box
+
+
+def _overlaps_any(
+    rect: tuple[float, float, float, float],
+    others: list[tuple[float, float, float, float]],
+    limit: float,
+) -> bool:
+    """这个矩形和已有的那些框，重合面积有没有超过限制。"""
+
+    area = (rect[2] - rect[0]) * (rect[3] - rect[1])
+    if area <= 0:
+        return False
+    for other in others:
+        width = min(rect[2], other[2]) - max(rect[0], other[0])
+        height = min(rect[3], other[3]) - max(rect[1], other[1])
+        if width <= 0 or height <= 0:
+            continue
+        if width * height / area >= limit:
+            return True
+    return False
+
+
+def _clip_rect(rect: tuple[float, float, float, float]) -> Any:
+    """把四元组包成 PyMuPDF 用的矩形。"""
+
+    import pymupdf
+
+    return pymupdf.Rect(*rect)
+
+
+def _capped_figure_dpi(rect: tuple[float, float, float, float]) -> int:
+    """矢量图截图用多少清晰度，太宽就降一点。"""
+
+    width_points = rect[2] - rect[0]
+    if width_points <= 0:
+        return _VECTOR_FIGURE_DPI
+    if width_points * _VECTOR_FIGURE_DPI / 72 <= _MAX_FIGURE_PX_WIDTH:
+        return _VECTOR_FIGURE_DPI
+    return max(72, int(_MAX_FIGURE_PX_WIDTH * 72 / width_points))
+
+
+def _image_alt_text(caption_text: str, figure_number: int) -> str:
+    """图片引用里的说明文字。
+
+    中文注释：优先用论文自己写的图注原文，和 HTML 分支的做法保持一致
+    （见 read_fulltext.py 的 _figure_markdown）。这样模型读到图片引用时，
+    紧接着就知道这张图画的是什么、是第几张图——而不是只看到一个"AFigure 3"。
+
+    图注原文里不能出现的字符要处理掉：换行会把引用折成两行、"]"会提前把引用闭合。
+    """
+
+    text = re.sub(r"\s+", " ", caption_text or "").strip().replace("]", "\\]")
+    return text or f"Figure {figure_number}"
 
 
 def _caption_candidates(text_blocks: list[tuple[Any, str]]) -> list[tuple[Any, str, tuple[float, float, float, float]]]:
@@ -570,25 +1226,6 @@ def _caption_candidates(text_blocks: list[tuple[Any, str]]) -> list[tuple[Any, s
         if _CAPTION_PATTERN.match(text):
             candidates.append((block, text, _rect_tuple(block["bbox"])))
     return candidates
-
-
-def _best_caption(
-    image_rect: tuple[float, float, float, float],
-    captions: list[tuple[Any, str, tuple[float, float, float, float]]],
-    used: set[int],
-) -> tuple[Any | None, str, int | None]:
-    """给一张图挑最近的、且还没被别的图用掉的图注。"""
-
-    best_distance: float | None = None
-    best: tuple[Any | None, str, int | None] = (None, "", None)
-    for index, (block, text, rect) in enumerate(captions):
-        if index in used:
-            continue
-        distance = _vertical_distance(image_rect, rect)
-        if best_distance is None or distance < best_distance:
-            best_distance = distance
-            best = (block, text, index)
-    return best
 
 
 def _vertical_distance(
@@ -645,23 +1282,390 @@ def _block_text(block: Any) -> str:
     return "\n".join("".join(span["text"] for span in line["spans"]) for line in block.get("lines", []))
 
 
+def _is_math_character(character: str) -> bool:
+    """判断一个字符是不是"一眼就能看出是数学"的字符。
+
+    中文注释：现代论文（TeX Gyre、Cambria 这类字体排的）里面，公式字母用的就是
+    专门的数学字符，比如 𝑆、𝛼、𝑊、𝑙。这类字符有固定的编码区间，直接按编码判断即可，
+    完全不用管它用的什么字体——这正是"字体白名单永远追不上新字体"的解药。
+    """
+
+    if character in _MATH_SYMBOL_CHARS:
+        return True
+    code = ord(character)
+    return any(start <= code <= end for start, end in _MATH_UNICODE_RANGES)
+
+
 def _is_math_line(line: Any) -> bool:
     """判断一整行是不是公式。
 
-    中文注释：做法是把这一行里每个字符按其字体归到"数学"或"正文"两类，数学字体
-    占比超过一半才算公式。这样正文里夹一个数学符号不会被误判成整行公式。
+    中文注释：两条判据任意一条成立就算公式。
+
+    第一条看字符本身——这一行里"长得像数学符号"的字符有没有超过一半。这是主力判据，
+    靠它能认出用了新字体的论文（那些论文的公式字符本身就是 𝑆、𝛼 这种数学字符）。
+
+    第二条看字体——这一行里"数学字体"的字符有没有超过一半。这是补漏用的：有些论文
+    的公式里全是普通英文字母（比如 MOM nM =），字符本身看不出数学味，但用的是 CMMI 字体。
+
+    两条都按"非空白字符的占比"算，不是"只要含有就算"——因为 = + - ( ) 这些符号在
+    正文里到处都是，按"含有"判断会把整段普通句子都认成公式。
+
+    最后还要求整行至少有两个非空白字符，否则页码、孤立的单个斜体字母都会被误抓。
     """
 
     total = 0
     math_characters = 0
     for span in line["spans"]:
-        text = span["text"]
-        total += len(text)
-        if _is_math_font(span["font"]):
-            math_characters += len(text)
-    if not total:
+        font_is_math = _is_math_font(span["font"])
+        for character in span["text"]:
+            if character.isspace():
+                continue
+            total += 1
+            if font_is_math or _is_math_character(character):
+                math_characters += 1
+    if total < _MIN_MATH_LINE_CHARS:
         return False
     return math_characters / total >= _MATH_CHARACTER_RATIO
+
+
+def _with_inline_math(line: Any) -> str:
+    """把一行文字里的数学字符片段用 $ 包起来，其余部分原样保留。
+
+    中文注释：夹在句子里的公式以前有两种坏结果——要么被整行抽走变成独立的 $$ 块
+    （句子被拦腰截断），要么原样散在文字里、下游看不出来。现在改成只把连续的数学
+    字符挑出来包一层 $，句子其余的字一个不动，两头都顾上了。
+    """
+
+    pieces: list[str] = []
+    math_run: list[str] = []
+    for span in line["spans"]:
+        font_is_math = _is_math_font(span["font"])
+        for character in span["text"]:
+            if font_is_math or _is_math_character(character):
+                math_run.append(character)
+                continue
+            if math_run:
+                pieces.append(_wrap_math_run(math_run))
+                math_run = []
+            pieces.append(character)
+    if math_run:
+        pieces.append(_wrap_math_run(math_run))
+    return "".join(pieces)
+
+
+def _wrap_math_run(characters: list[str]) -> str:
+    """给一段连续的数学字符套上 $。
+
+    中文注释：首尾的空格要留在 $ 外面，不然会写成 "$ X $" 这种夹着空格的形状，
+    排版时容易多出不该有的间距。整段都是空格就原样返回，不套 $。
+
+    中文注释：下面两种情况也不套 $，原样留着：
+
+    一是片段里连一个字母都没有。作者行那种 "Haowei Zhang1,∗Shudong Yang1,2,∗"
+    的角标用的是符号字体，会被判成"数学字符"，但它只有逗号和星号、没有变量名，
+    套上 $ 只会把作者行切得七零八落，对读懂论文毫无帮助。
+
+    二是片段只有一个字符。孤零零一个符号套不套 $ 都一样，不套更干净。
+
+    不套的损失很小——下游看到的还是同一个字符，只是少了一层定界符。
+    """
+
+    text = "".join(characters)
+    stripped = text.strip()
+    if len(stripped) < 2:
+        return text
+    if not any(unicodedata.category(character).startswith("L") for character in stripped):
+        return text
+    leading = text[: len(text) - len(text.lstrip())]
+    trailing = text[len(text.rstrip()):]
+    return f"{leading}${stripped}${trailing}"
+
+
+def _collect_formula_regions(
+    page: Any,
+    blocks: list[Any],
+    table_rects: list[tuple[float, float, float, float]],
+    page_number: int,
+) -> list[PdfFormulaRegion]:
+    """把页面上"看起来是公式"的行按位置粘成一块块区域。
+
+    中文注释：为什么需要"粘"——上下标在 PDF 里是单独排的，一条公式常被切好几块
+    （实测 S_i^l = alpha_i^l · W_i^l 被拆成 4 块）。只按单行截图会截到残缺的半条公式，
+    所以要先判断"哪些行是公式"，再把这些行按挨得近不近聚成块，最后整块截图。
+    """
+
+    # 第一步：把"是公式、又不在表格里"的行挑出来，连它属于第几个块、第几行一起记下。
+    # 同时把不是公式的行也收一份坐标，后面判断"公式是不是夹在句子中间"要用。
+    page_lines: list[_FormulaLine] = []
+    for block_index, block in enumerate(blocks):
+        if _covered_by_table(_rect_tuple(block["bbox"]), table_rects) is not None:
+            continue
+        for line_index, line in enumerate(block["lines"]):
+            text = "".join(span["text"] for span in line["spans"])
+            if not text.strip():
+                continue
+            page_lines.append(
+                _FormulaLine(
+                    block_index=block_index,
+                    line_index=line_index,
+                    rect=_rect_tuple(line["bbox"]),
+                    text=text.strip(),
+                    is_math=_is_math_line(line),
+                )
+            )
+    math_lines = [entry for entry in page_lines if entry.is_math]
+    if not math_lines:
+        return []
+    all_rects = [entry.rect for entry in page_lines]
+    other_lines = [
+        entry.rect
+        for entry in page_lines
+        if not entry.is_math and len(re.sub(r"\s+", "", entry.text)) >= _MIN_INLINE_NEIGHBOR_CHARS
+    ]
+
+    # 第二步：从上到下、从左到右排一遍，再把挨在一起的行并成一块。
+    ordered = sorted(math_lines, key=lambda entry: (entry.rect[1], entry.rect[0]))
+    groups: list[list[_FormulaLine]] = [[ordered[0]]]
+    current_rect = ordered[0].rect
+    for entry in ordered[1:]:
+        if _rects_are_close(current_rect, entry.rect):
+            groups[-1].append(entry)
+            current_rect = _union_rect(current_rect, entry.rect)
+            continue
+        groups.append([entry])
+        current_rect = entry.rect
+    groups = _merge_bridged_groups(groups, all_rects)
+
+    page_area = float(page.rect.width) * float(page.rect.height)
+    regions: list[PdfFormulaRegion] = []
+    for group in groups:
+        rect = group[0].rect
+        for entry in group[1:]:
+            rect = _union_rect(rect, entry.rect)
+        text = "\n".join(entry.text for entry in group)
+        # 中文注释：三道闸门，任何一条不过就当"认错了"直接丢掉，宁缺勿滥。
+        # 一是区域占了大半页——那是把整段正文认成公式了。
+        if page_area > 0 and (rect[2] - rect[0]) * (rect[3] - rect[1]) / page_area > _MAX_REGION_AREA_RATIO:
+            continue
+        # 二是行数太多，也不像单条公式。
+        if len(group) > _MAX_REGION_ROWS:
+            continue
+        # 三是去掉空白后没剩几个字，是噪声。
+        if len(re.sub(r"\s+", "", text)) < _MIN_MATH_LINE_CHARS:
+            continue
+
+        # 中文注释：先判断这是不是"自己占一行"的公式，再去扩编号。
+        # 顺序不能反——扩编号会把编号那一行圈进矩形里，而编号本身是一段不带数学符号的
+        # 短文字，先扩再判的话它就会把公式"认成"夹在句子里的行内公式，白白漏掉转写。
+        is_display = _region_is_display(rect, other_lines)
+
+        # 中文注释：公式编号（形如 (2)）一般单独排在页边，离公式主体有一段距离，
+        # 上面的聚合够不着它。这里单独找一次，找到就把截图范围往右扩到编号，
+        # 这样模型截图里能看见编号，转写时会把编号一起写出来——下游引用"式(2)"才对得上。
+        rect, number = _extend_to_equation_number(rect, page_lines)
+        regions.append(
+            PdfFormulaRegion(
+                page_number=page_number,
+                index=len(regions) + 1,
+                # 中文注释：截图范围要在区域外面留一圈白边。公式的分数线、根号横杠
+                # 常常比文字本身宽一点点，不留白会被切掉；留多了也没关系，
+                # 反正模型看得懂，多几个空白像素不影响它认公式。
+                rect=(
+                    rect[0] - _REGION_PADDING_X,
+                    rect[1] - _REGION_PADDING_Y,
+                    rect[2] + _REGION_PADDING_X,
+                    rect[3] + _REGION_PADDING_Y,
+                ),
+                is_display=is_display,
+                text=text,
+                number=number,
+                members=[(entry.block_index, entry.line_index) for entry in group],
+            )
+        )
+    return regions
+
+
+def _rects_are_close(
+    first: tuple[float, float, float, float], second: tuple[float, float, float, float]
+) -> bool:
+    """判断两块文字是不是挨在一起（上下近、左右也近）。"""
+
+    # 中文注释：这个方法顺带把双栏排版的问题也解决了——同一水平线上左右两栏是两个
+    # 完全不同的公式，中间隔着栏间空白（实测约 14 点），超过阈值就不会被粘成一块。
+    # 所以不需要专门去识别"这是不是双栏"，一个横向间距就够了。
+    vertical_gap = max(0.0, max(first[1], second[1]) - min(first[3], second[3]))
+    if vertical_gap > _REGION_VERTICAL_GAP:
+        return False
+    horizontal_gap = max(0.0, max(first[0], second[0]) - min(first[2], second[2]))
+    return horizontal_gap <= _REGION_HORIZONTAL_GAP
+
+
+def _merge_bridged_groups(
+    groups: list[list["_FormulaLine"]], all_rects: list[tuple[float, float, float, float]]
+) -> list[list["_FormulaLine"]]:
+    """把"本来是同一条公式、却被中间的字隔开"的几块合并回一起。
+
+    中文注释：为什么需要单独一趟——有些公式中间夹着只有一两个字符的大运算符字形
+    （求和号、连乘号那种），那些字形够不上"整行是公式"的门槛、没被选进来，
+    于是同一条公式被拆成互不相连的几块（实测 MOM 那条公式被拆成 3 块）。
+
+    为什么不在第一步直接合并——第一步是拿"已经并起来的大块"去比下一行，块越大越容易
+    把不相干的行也吸进来，最后整页塌成一块、反而被"太大了"的闸门丢掉。所以先老老实实
+    按位置聚一次，再只对"确实在同一行上"的块做合并。
+    """
+
+    changed = True
+    while changed:
+        changed = False
+        for left_index in range(len(groups)):
+            for right_index in range(left_index + 1, len(groups)):
+                left_rect = _group_rect(groups[left_index])
+                right_rect = _group_rect(groups[right_index])
+                if not _same_line_bridged(left_rect, right_rect, all_rects):
+                    continue
+                groups[left_index] = groups[left_index] + groups[right_index]
+                del groups[right_index]
+                changed = True
+                break
+            if changed:
+                break
+    return groups
+
+
+def _group_rect(group: list["_FormulaLine"]) -> tuple[float, float, float, float]:
+    """一组行的整体外框。"""
+
+    rect = group[0].rect
+    for entry in group[1:]:
+        rect = _union_rect(rect, entry.rect)
+    return rect
+
+
+def _same_line_bridged(
+    first: tuple[float, float, float, float],
+    second: tuple[float, float, float, float],
+    all_rects: list[tuple[float, float, float, float]],
+) -> bool:
+    """两块是不是"在同一条线上、中间只隔着一小段还夹着字"。
+
+    中文注释：要求两块上下重合得足够多（至少是矮的那块的一半），确认它们确实在同一行；
+    然后看中间那段空当里有没有别的字。双栏之间的空当是干干净净的，不会被误合并。
+    """
+
+    overlap = min(first[3], second[3]) - max(first[1], second[1])
+    shorter = min(first[3] - first[1], second[3] - second[1])
+    if shorter <= 0 or overlap < shorter * 0.5:
+        return False
+    return _gap_contains_text(first, second, all_rects)
+
+
+def _gap_contains_text(
+    first: tuple[float, float, float, float],
+    second: tuple[float, float, float, float],
+    all_rects: list[tuple[float, float, float, float]],
+) -> bool:
+    """两个片段中间那段空当里，是不是还夹着别的文字。"""
+
+    left, right = (first, second) if first[0] <= second[0] else (second, first)
+    gap_start, gap_end = left[2], right[0]
+    if gap_end <= gap_start:
+        return False
+    top = max(left[1], right[1])
+    bottom = min(left[3], right[3])
+    for candidate in all_rects:
+        # 横向要落在空当里，纵向要和这一行齐平。
+        if candidate[2] <= gap_start or candidate[0] >= gap_end:
+            continue
+        if candidate[3] <= top or candidate[1] >= bottom:
+            continue
+        return True
+    return False
+
+
+def _union_rect(
+    first: tuple[float, float, float, float], second: tuple[float, float, float, float]
+) -> tuple[float, float, float, float]:
+    """求两块矩形的外框。"""
+
+    return (
+        min(first[0], second[0]),
+        min(first[1], second[1]),
+        max(first[2], second[2]),
+        max(first[3], second[3]),
+    )
+
+
+def _region_is_display(
+    rect: tuple[float, float, float, float], other_lines: list[tuple[float, float, float, float]]
+) -> bool:
+    """判断这块公式是"自己占一行"还是"夹在句子中间"。
+
+    中文注释：办法很简单——看它同一水平位置的左边或右边有没有别的文字。如果有、
+    而且挨得近，说明它和那些文字同处一行，那就是句子里的公式；四周空荡荡的，
+    才是单独占一行的公式。只有后者值得截图交给模型转写。
+    """
+
+    for other in other_lines:
+        # 上下不重叠，就不是同一行的文字，跳过。
+        if other[3] <= rect[1] or other[1] >= rect[3]:
+            continue
+        gap = max(0.0, max(rect[0], other[0]) - min(rect[2], other[2]))
+        if gap <= _INLINE_NEIGHBOR_GAP:
+            return False
+    return True
+
+
+def _extend_to_equation_number(
+    rect: tuple[float, float, float, float], page_lines: list["_FormulaLine"]
+) -> tuple[tuple[float, float, float, float], str]:
+    """从区域文字里找出公式编号，比如单独一行写着的 (2)。
+
+    中文注释：只认"整行就是一个括号包着的数字"这种形状，不在整段文字里乱找数字——
+    否则公式里面的系数会被当成编号。
+    """
+
+    best: _FormulaLine | None = None
+    best_match: re.Match[str] | None = None
+    for entry in page_lines:
+        if entry.rect[0] < rect[2]:
+            continue
+        if min(entry.rect[3], rect[3]) - max(entry.rect[1], rect[1]) <= 0:
+            continue
+        # 中文注释：只认"整行就是一个括号包着的数字"的那种行。公式右边常散着逗号、
+        # 单个字母这类碎片，它们离得更近，但它们不是编号，直接跳过。
+        match = _EQUATION_NUMBER_PATTERN.match(entry.text)
+        if match is None:
+            continue
+        if best is None or entry.rect[0] < best.rect[0]:
+            best = entry
+            best_match = match
+    if best is None or best_match is None:
+        return rect, ""
+    return (rect[0], rect[1], max(rect[2], best.rect[2]), rect[3]), best_match.group(1)
+
+
+class _FormulaLine:
+    """记一行文字：它在哪、写了什么、是不是公式。
+
+    中文注释：故意不写成 dataclass，因为这个类只在上面那个函数内部用，
+    写成普通类少一层导入，也少一份"要不要暴露出去"的纠结。
+    """
+
+    __slots__ = ("block_index", "line_index", "rect", "text", "is_math")
+
+    def __init__(
+        self,
+        block_index: int,
+        line_index: int,
+        rect: tuple[float, float, float, float],
+        text: str,
+        is_math: bool,
+    ) -> None:
+        self.block_index = block_index
+        self.line_index = line_index
+        self.rect = rect
+        self.text = text
+        self.is_math = is_math
 
 
 def _is_math_font(font_name: str) -> bool:
@@ -771,16 +1775,23 @@ def _remove_references_at_end(pages: list[str]) -> list[str]:
 
 
 def _protected_lines(lines: list[str]) -> set[int]:
-    """标出哪些行属于表格或 $$ 公式块，这些行不能被当成页眉页脚删掉。
+    """标出哪些行属于表格、公式块或公式占位符，这些行不能被当成页眉页脚删掉。
 
     中文注释：$$ 是成对出现的，所以用一个开关：碰到单独一行的 $$ 就翻转状态，
     翻转期间的所有行都算公式内容。
+
+    公式占位符（<!-- formula: 5_1 -->）必须单独保护：删重复页眉页脚那一步做比较时
+    会把数字统一换成 #，于是第 5 页的占位符和第 6 页的占位符看起来一模一样，
+    要是好几页的开头都是公式，它们就会被当成"重复页眉"整批删掉，公式就悄悄丢了。
     """
 
     protected: set[int] = set()
     in_math = False
     for index, line in enumerate(lines):
         stripped = line.strip()
+        if _MARKER_PATTERN.match(line):
+            protected.add(index)
+            continue
         if stripped.startswith("$$"):
             if stripped.count("$$") < 2:
                 in_math = not in_math

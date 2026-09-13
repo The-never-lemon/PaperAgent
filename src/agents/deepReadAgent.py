@@ -32,6 +32,7 @@ from src.paper_retrieval.models import PaperDocument
 from src.utils import get_logger
 from src.utils.llm_json import parse_llm_json
 from src.utils.read_utils.chunkers import async_build_chunks_file
+from src.utils.read_utils.figure_reader import collect_paper_figures, read_figure_notes
 from src.utils.read_utils.read_fulltext import async_convert_fulltext_to_markdown
 
 from .contracts import JsonObject
@@ -84,6 +85,9 @@ ARTIFACT_TYPE_FIGURE = "paper_figure"
 
 # reduce 输入里论文摘要的截断长度。
 REDUCE_ABSTRACT_CHARS = 400
+# 中文注释：插图笔记整段最多这么多字符。正常情况下十几张图的解读加起来远不到，
+# 设这条是为了防止某一篇图特别多时把提示词撑爆。
+REDUCE_FIGURE_NOTES_MAX_CHARS = 6000
 
 # 推卡片时论文标题的截断长度。
 CARD_TITLE_CHARS = 60
@@ -223,13 +227,47 @@ async def _run_deep_read_impl(*, paper_id: str, focus: str, deps: DeepReadDeps) 
             doc,
             source_path=downloaded.file_path,
             source_url=downloaded.source_url,
+            # 中文注释：把精读用的模型交给转换那一层，让它把公式截图转成 LaTeX。
+            # 不传也能跑，只是公式会退回原来的展平写法。
+            llm=deps.llm,
+            on_progress=lambda message: deps.reporter.progress(
+                message, stage=DEEP_READ_STAGE, event_key=deps.event_key
+            ),
+            raise_if_cancelled=deps.cancellation.raise_if_requested if deps.cancellation else None,
         )
+        # 中文注释：公式转写也是真金白银的模型调用，用掉的 token 要并进整篇精读的
+        # 用量里一起上报，否则后台看到的用量会比实际花的少一截。
+        total_input += conversion.input_tokens
+        total_output += conversion.output_tokens
         if conversion.markdown_path is not None:
             _check_cancellation(deps)
             deps.reporter.progress("正在切分全文", stage=DEEP_READ_STAGE, event_key=deps.event_key)
             chunk_result = await async_build_chunks_file(doc, markdown_path=conversion.markdown_path)
             if chunk_result.chunks:
-                # 第七步：map 逐块精读。
+                # 中文注释：全文 Markdown 后面要用来写产物，插图清单也要从里面挑，
+                # 所以在这一步就读出来。读文件是重活，放线程里跑。
+                markdown_text = await asyncio.to_thread(
+                    conversion.markdown_path.read_text, encoding="utf-8"
+                )
+
+                # 第七步：让模型把论文插图读一遍。
+                # 中文注释：这一步和分段阅读是两条独立的线——插图不走切分片段，而是自己
+                # 成批发给模型，读出来的笔记最后并在汇总阶段。这样图片内容既不受片段大小
+                # 限制，也不会被"每段笔记最多 500 字"那条上限压掉。
+                _check_cancellation(deps)
+                figure_notes, figure_input, figure_output = await read_figure_notes(
+                    figures=collect_paper_figures(markdown_text, conversion.assets_dir),
+                    focus=focus,
+                    llm=deps.llm,
+                    on_progress=lambda message: deps.reporter.progress(
+                        message, stage=DEEP_READ_STAGE, event_key=deps.event_key
+                    ),
+                    raise_if_cancelled=deps.cancellation.raise_if_requested if deps.cancellation else None,
+                )
+                total_input += figure_input
+                total_output += figure_output
+
+                # 第八步：map 逐块精读。
                 _check_cancellation(deps)
                 notes, map_input, map_output = await _map_chunks(
                     deps, doc, chunk_result.chunks, focus
@@ -240,14 +278,14 @@ async def _run_deep_read_impl(*, paper_id: str, focus: str, deps: DeepReadDeps) 
                 if not any(notes):
                     return _fail(deps, "全部正文片段精读失败，无法汇总报告")
 
-                # 第八步：reduce 汇总。
+                # 第九步：reduce 汇总。
                 _check_cancellation(deps)
                 deps.reporter.progress(
                     "正在汇总精读报告",
                     stage=DEEP_READ_STAGE,
                     event_key=deps.event_key,
                 )
-                reduce_content = _build_reduce_user_content(doc, notes, chunk_result.chunks)
+                reduce_content = _build_reduce_user_content(doc, notes, chunk_result.chunks, figure_notes)
                 payload, reduce_input, reduce_output = await _run_reduce(deps, reduce_content)
                 total_input += reduce_input
                 total_output += reduce_output
@@ -256,10 +294,6 @@ async def _run_deep_read_impl(*, paper_id: str, focus: str, deps: DeepReadDeps) 
                     return _fail(deps, "精读报告解析失败，无法生成报告")
 
                 source = DEEP_READ_SOURCE_FULLTEXT
-                # 读取全文 Markdown 文本（用于写产物），放在线程里避免阻塞事件循环。
-                markdown_text = await asyncio.to_thread(
-                    conversion.markdown_path.read_text, encoding="utf-8"
-                )
             else:
                 # 分块为空，降级摘要。
                 fulltext_failure_reason = "全文分块为空"
@@ -598,11 +632,13 @@ def _build_reduce_user_content(
     doc: PaperDocument,
     notes: list[str],
     chunks: "list[TextChunk]",
+    figure_notes: str = "",
 ) -> str:
-    """组装 reduce 阶段的用户消息：论文元数据 + 分段笔记。
+    """组装 reduce 阶段的用户消息：论文元数据 + 分段笔记 + 插图笔记。
 
     论文元数据包含标题、摘要（截 400 字）、作者。
     分段笔记拼成"笔记 i (chunk_id): 笔记内容"列表。
+    插图笔记是模型读图得到的一段文字，没有图时为空、那一项就不出现。
     总长超 REDUCE_INPUT_MAX_CHARS 时按块序保留前面块并追加"[部分内容已省略]"。
     """
 
@@ -616,14 +652,15 @@ def _build_reduce_user_content(
         f"笔记 {i} ({chunk.chunk_id}): {note}"
         for i, (note, chunk) in enumerate(zip(notes, chunks), 1)
     ]
+    figures = (figure_notes or "")[:REDUCE_FIGURE_NOTES_MAX_CHARS]
 
-    def _serialize(lines: list[str]) -> str:
-        """把元数据和笔记行列表序列化成 JSON 字符串。"""
+    def _serialize(lines: list[str], with_figures: bool = True) -> str:
+        """把元数据、笔记行和插图笔记序列化成 JSON 字符串。"""
 
-        return json.dumps(
-            {"论文元数据": metadata, "分段笔记": lines},
-            ensure_ascii=False,
-        )
+        payload: JsonObject = {"论文元数据": metadata, "分段笔记": lines}
+        if with_figures and figures:
+            payload["插图笔记"] = figures
+        return json.dumps(payload, ensure_ascii=False)
 
     text = _serialize(note_lines)
     # 总长没超限制，直接返回。
@@ -633,6 +670,10 @@ def _build_reduce_user_content(
     # 总长超限：按块序从后往前删除，直到总长不超过限制。
     while note_lines and len(_serialize(note_lines)) > REDUCE_INPUT_MAX_CHARS:
         note_lines.pop()
+    # 中文注释：正文笔记砍光了还是超，说明插图笔记本身就太长，那就把它也去掉——
+    # 宁可让模型少看到图，也不能让整段提示词超出模型的上下文。
+    if len(_serialize(note_lines)) > REDUCE_INPUT_MAX_CHARS:
+        return _serialize(note_lines, with_figures=False)
     # 追加省略提示，让模型知道有内容被截断了。
     note_lines.append("[部分内容已省略]")
     return _serialize(note_lines)

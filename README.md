@@ -16,7 +16,7 @@
 
 ## 🆕 3.0 版本更新
 
-Paper-Agent 3.0 是相对旧版<a href="https://github.com/GreatZack">@GreatZack</a>项目的的一次**全新重写**。它保留了旧版「检索 → 阅读 → 分析 → 写作」的相关思路，但在Agent化实现上做了全面升级：
+Paper-Agent 3.0 是相对旧版<a href="https://github.com/GreatZack">@GreatZack</a>项目的一次**全新重写**。它保留了旧版「检索 → 阅读 → 分析 → 写作」的相关思路，但在Agent化实现上做了全面升级：
 
 - **前端**改为 Vue 3 + TypeScript + Vite，交互更现代、响应更快；
 - **包管理**统一使用 `uv`，一条命令即可完成 Python 依赖安装；
@@ -65,7 +65,7 @@ Paper-Agent 3.0 是相对旧版<a href="https://github.com/GreatZack">@GreatZack
 | | 特性 | 一句话说明 |
 |--|------|-----------|
 | 🔍 | **多来源论文检索** | 内置 arXiv、OpenAlex、Semantic Scholar 连接器，统一为 `PaperDocument`，按年份、来源、数量和排除词筛选并去重；多源结果用 RRF（排名融合）排序——每篇论文按它在各源里给出的名次累计得分，被多个源同时命中、且名次靠前的排在前面 |
-| 📖 | **从摘要到全文的渐进式阅读** | 先读摘要判断相关性，满足条件的论文走下载 → PDF 转 Markdown → 分块 → 逐块精读并汇总；全文下载或转换失败时自动降级为「基于摘要的精读」，并把失败原因告知用户 |
+| 📖 | **从摘要到全文的渐进式阅读** | 先读摘要判断相关性，满足条件的论文走下载 → PDF 转 Markdown（公式截图转成 LaTeX、表格截图重排成表头正确的 Markdown 表）→ 分块 → 逐块精读；同时把论文插图连着图注和正文里讲到它的段落一起交给模型读一遍，让它写清每张图画了什么；最后汇总成报告。全文下载或转换失败时自动降级为「基于摘要的精读」，并把失败原因告知用户 |
 | 🔬 | **分层研究分析** | `AnalyseAgent` 先把工作区全部论文的结构化摘要做一次整体分析，再做一次全局综合，形成研究现状、共识、争议、空白、时间演化与展望等结构化内容 |
 | ✍️ | **证据约束下的综述写作** | `WritingOutlineAgent` 生成大纲与证据映射，`WritingAgent` 逐节写作、证据不足时检索补充、完成后审查并限次修改 |
 | 📡 | **实时会话工作台** | SSE 实时推送检索、阅读、分析、大纲与逐节写作进度，SQLite + 文件系统持久化，刷新后历史可恢复 |
@@ -129,7 +129,7 @@ flowchart TB
 | Agent | 主对话 Agent（researchAgent）+ 精读 / 追问 / 综述三个子 Agent |
 | LLM 适配 | OpenAI 兼容协议、Anthropic Messages 协议 |
 | 论文来源 | arXiv、OpenAlex、Semantic Scholar |
-| 全文处理 | `PyMuPDF`（抽取表格 / 公式 / 图片）、Markdown 转换、文本分块 |
+| 全文处理 | `PyMuPDF`（抽取表格、公式、插图——位图和矢量画出来的图都收，装不上时自动退回 `pypdf`）、公式截图转写成 LaTeX、表格截图重排表头、插图自动配图注、Markdown 转换、文本分块 |
 | 会话存储 | SQLite + 本地 JSON/Markdown 文件 |
 | 前端 | Vue 3、TypeScript、Vite、Vue Router、Lucide |
 
@@ -267,7 +267,7 @@ uv run python scripts/package.py    # 生成 Paper-Agent-<日期>.zip
 
 ### Provider 后端
 
-支持 `backend` 类型：`openai`、`openai_compat`、`anthropic`、`anthropic_compat`。示例：
+支持 `backend` 类型：`openai`、`openai_compat`、`anthropic`、`anthropic_compat`、`opencode_go`。示例：
 
 ```json
 {
@@ -283,11 +283,17 @@ uv run python scripts/package.py    # 生成 Paper-Agent-<日期>.zip
 }
 ```
 
+`opencode_go` 对应 OpenCode 的 Go 订阅端点（`https://opencode.ai/zen/go/v1`，OpenAI 兼容），
+它强制要求每个请求都带上 `x-opencode-session` 请求头，这个头由代码自动补齐、不需要手工配置；
+可用的模型名以 `GET https://opencode.ai/zen/go/v1/models` 返回的清单为准。
+
 `api_key` 与 `api_key_env` 二选一即可。使用兼容网关时通常需要同时填写 `backend`、`api_base` 和模型名称。
 
 ### 系统参数
 
-`config/system.yaml` 存放系统级默认值和阅读参数：`defaults.llm` 是所有 Agent 档位未声明字段时的兜底生成参数，`paper_retrieval` 是检索数据源密钥，`read` 是阅读与下载参数（缓存目录、连接/下载超时、最大文件大小）。
+`config/system.yaml` 存放系统级默认值和阅读参数：`defaults.llm` 是所有 Agent 档位未声明字段时的兜底生成参数，`paper_retrieval` 是检索数据源密钥，`read` 是阅读与下载参数（缓存目录、连接/下载超时、最大文件大小、PDF 解析器、公式识别开关）。
+
+其中 `read.formula_ocr` 默认开启：打开后会把论文里独立成段的公式截成小图交给对话模型转写成 LaTeX 再写进 `paper.md`，这样精读、问答、写作拿到的才是模型读得懂的公式写法。代价是每篇论文多出几十次模型调用（同一页的公式会合并成一次请求，一篇 35 页论文实测约 5 次）。关掉则退回「把公式字形原样放进 `$$` 块」的做法。
 
 > 全文分块按 PDF 页切分、片段之间不重叠：单个片段上限 1200 字符，但遇到完整表格或公式块时会整块保留（上限 4000 字符），避免把表格和公式从中间切断。这些数字写在 `PageChunker` 类里，不通过配置文件调整。
 

@@ -33,6 +33,7 @@
 
 - 默认 `api_base`
 - 默认环境变量名
+- 必须固定带上的请求头（例如 OpenCode 的 `x-opencode-session`，缺了上游直接拒绝）
 - 关键字匹配规则
 - 是否裁掉 `provider/model` 前缀
 - 是否支持 `max_completion_tokens`
