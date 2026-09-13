@@ -54,7 +54,7 @@ Paper-Agent 3.0 是相对旧版<a href="https://github.com/GreatZack">@GreatZack
 | 管理长流程任务 | 每跑一步都担心进度、状态和重启后丢失，**不敢中途停下** | 会话、运行状态、阶段产物和实时进度都在工作台可见；刷新后历史与实时流可接回，进程中断的任务会被标记为「已中断」，可基于工作区已保存的产物继续下一轮调研 |
 | 控制模型成本 | 全程用一个模型档位，**不清楚每个环节花了多少 token** | 精读、追问、综述等子 Agent 的 token 用量会累加到对应工具卡片；主对话按轮次上报，多轮对话下看到的是最近一轮的用量 |
 
-> **Paper-Agent 不只是论文摘要工具，而是一个完整的 AI 研究助理——它找得到论文、读得懂全文、理得清脉络、写得出综述。**
+> **Paper-Agent 是一个完整的 AI 研究助理——它找得到论文、读得懂全文、理得清脉络、写得出综述。**
 
 ---
 
@@ -306,19 +306,6 @@ uv run python scripts/package.py    # 生成 Paper-Agent-<日期>.zip
 
 ---
 
-## ❤️ 特别致谢
-
-感谢 **@GreatZack** 对 Paper-Agent 的持续投入与核心贡献：
-
-<p align="center">
-  <a href="https://github.com/GreatZack">
-    <img src="https://github.com/GreatZack.png" width="80" height="80" style="border-radius:50%" alt="GreatZack" />
-  </a>
-  <br>
-  <strong><a href="https://github.com/GreatZack">@GreatZack</a></strong>
-</p>
-
----
 
 ## 🤝 参与贡献
 
