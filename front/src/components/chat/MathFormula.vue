@@ -6,6 +6,10 @@
  * 这个组件只干一件事——把一段 LaTeX 公式排版出来。它被两个地方复用：
  * 精读报告的字段（MathText.vue）和聊天消息（MarkdownText.vue）。
  *
+ * 排版之前会把源码过一遍 normalizeMathSource（见 lib/math-text.ts）：模型写的公式
+ * 很多是拿 Unicode 符号拼的「伪公式」，里面靠空格分词，而数学模式会把空格全吃掉。
+ * 那个函数负责把这类空格换成 KaTeX 看得见的显式空格；真 LaTeX 则一个字都不动。
+ *
  * 实现上有一处是刻意这么写的：**不使用 v-html**。
  * 模板里只有一个空的 <span>，KaTeX 把排版结果直接写进这个真实 DOM 节点。
  * 这么做有两个好处：
@@ -22,6 +26,8 @@
  */
 import { onMounted, ref, watch } from "vue";
 import katex from "katex";
+
+import { normalizeMathSource } from "../../lib/math-text";
 
 import "katex/dist/katex.min.css";
 
@@ -43,11 +49,14 @@ function paint() {
   if (!element) {
     return;
   }
-  katex.render(props.tex, element, {
+  katex.render(normalizeMathSource(props.tex), element, {
     displayMode: Boolean(props.display),
     // 公式写坏了（模型偶尔会漏半个括号）就把它显示成红色源码，
     // 不能让一条坏公式把整条消息变成打不开的空白。
     throwOnError: false,
+    // 伪公式里带中文、还有一些 KaTeX 没收录的符号（比如 √），默认的 strict 模式会
+    // 往控制台刷一串告警——排版结果不受影响，但控制台会很吵，所以关掉它。
+    strict: false,
     // 不给 \href 这类能往页面里插链接的命令开口子。
     trust: false,
   });

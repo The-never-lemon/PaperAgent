@@ -12,6 +12,10 @@
  * 简单表格(|…|)、段落，以及行内的 **加粗**、*斜体*、`代码`、[链接](http…)、
  * 数学公式（$...$、$$...$$、\(...\)、\[...\]）。
  *
+ * 有一处偏离标准 Markdown 的约定：**行内代码里若含 Unicode 数学符号，按公式渲染**
+ * （例如 `B_i,t+1 = B_i,t − ‖x‖₂`）。模型习惯把公式写成行内代码，而代码块的样子并不
+ * 适合读公式。判据与理由见 lib/math-text.ts 的 looksLikeFormula，真代码不受影响。
+ *
  * 流式容错：模型逐字输出时语法常常"写到一半"（``` 还没闭合、** 只有一边），
  * 解析器对未闭合结构一律按"直到结尾"处理，成对语法匹配不上就原样显示，
  * 因此流式过程中画面不会闪烁错乱。公式的定界符没写全时也按同样的思路处理：
@@ -19,7 +23,7 @@
  */
 import { computed } from "vue";
 
-import { splitMathText, stripBareLatex } from "../../lib/math-text";
+import { looksLikeFormula, splitMathText, stripBareLatex } from "../../lib/math-text";
 import MathFormula from "./MathFormula.vue";
 
 defineOptions({ name: "MarkdownText" });
@@ -99,7 +103,17 @@ function parseMarkdownInline(text: string): InlinePart[] {
     }
     const raw = match[0];
     if (raw.startsWith("`")) {
-      parts.push({ text: raw.slice(1, -1), code: true });
+      const inner = raw.slice(1, -1);
+      // 中文注释：模型很爱把公式写成行内代码，例如 `B_i,t+1 = B_i,t − ‖x_i,t+1 − x_i,t‖₂`。
+      // 照 Markdown 的规矩这该渲染成灰色代码块，可它根本不是代码而是公式，代码块的样子
+      // 用户读着别扭。所以内容里出现 Unicode 数学符号时，改走公式渲染那条路。
+      // 判据只看 Unicode 数学符号（见 math-text.ts 的 looksLikeFormula），真代码
+      // ——命令、路径、正则、标识符——一个都命中不了，不会被误伤。
+      if (looksLikeFormula(inner)) {
+        parts.push({ text: inner, math: true, display: false });
+      } else {
+        parts.push({ text: inner, code: true });
+      }
     } else if (raw.startsWith("***")) {
       parts.push({ text: raw.slice(3, -3), bold: true, italic: true });
     } else if (raw.startsWith("**")) {
