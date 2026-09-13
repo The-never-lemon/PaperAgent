@@ -241,7 +241,7 @@ uv run python scripts/launch.py
 uv run python scripts/package.py    # 生成 Paper-Agent-<日期>.zip
 ```
 
-包内自带 `start.bat` 和 `uv.exe`，同事解压后双击即可，不用装 Python 或 Node。
+包内自带 `start.bat` 和 `uv.exe`，解压后双击即可，不用装 Python 或 Node。
 面向使用者的说明见 [使用说明.md](使用说明.md)。
 
 ---
