@@ -112,3 +112,10 @@ logs/*
 # 写成裸的 tools/node/ 会连别处的同名目录一起忽略掉。
 /tools/node/
 
+
+# AI coding 范式与本地 AI 配置：只属于本机的工作方式约定，不随项目分发
+AI-CODING-PARADIGM.md
+CLAUDE.md
+AGENTS.md
+.zcode/
+.claude/
