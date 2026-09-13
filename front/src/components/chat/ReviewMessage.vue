@@ -10,6 +10,7 @@ import { computed } from "vue";
 import { FileDown, ScrollText } from "lucide-vue-next";
 
 import type { ReviewCardPayload } from "../../types/chat";
+import MathText from "./MathText.vue";
 
 defineOptions({ name: "ReviewMessage" });
 
@@ -30,12 +31,12 @@ const downloadUrl = computed(() => {
     <section class="review-card">
       <header class="review-card-head">
         <ScrollText :size="16" />
-        <h4 class="review-card-title">综述已生成：{{ payload.topic }}</h4>
+        <h4 class="review-card-title">综述已生成：<MathText :text="payload.topic" /></h4>
         <span class="review-card-meta">{{ payload.word_count }} 字 · {{ payload.sections.length }} 节</span>
       </header>
       <ol v-if="payload.sections.length" class="review-card-sections">
         <li v-for="section in payload.sections" :key="section.section_id">
-          <code>{{ section.section_id }}</code> {{ section.title }}
+          <code>{{ section.section_id }}</code> <MathText :text="section.title" />
         </li>
       </ol>
       <footer class="review-card-actions">

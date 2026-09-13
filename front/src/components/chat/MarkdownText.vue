@@ -9,13 +9,18 @@
  * 普通文字显示，没有任何注入风险；也不引入第三方渲染库。
  *
  * 支持的语法：标题(#)、无序/有序列表、引用(>)、围栏代码块(```)、分隔线(---)、
- * 简单表格(|…|)、段落，以及行内的 **加粗**、*斜体*、`代码`、[链接](http…)。
+ * 简单表格(|…|)、段落，以及行内的 **加粗**、*斜体*、`代码`、[链接](http…)、
+ * 数学公式（$...$、$$...$$、\(...\)、\[...\]）。
  *
  * 流式容错：模型逐字输出时语法常常"写到一半"（``` 还没闭合、** 只有一边），
  * 解析器对未闭合结构一律按"直到结尾"处理，成对语法匹配不上就原样显示，
- * 因此流式过程中画面不会闪烁错乱。
+ * 因此流式过程中画面不会闪烁错乱。公式的定界符没写全时也按同样的思路处理：
+ * 切不出公式就整段当普通文字。
  */
 import { computed } from "vue";
+
+import { splitMathText, stripBareLatex } from "../../lib/math-text";
+import MathFormula from "./MathFormula.vue";
 
 defineOptions({ name: "MarkdownText" });
 
@@ -32,7 +37,7 @@ const emit = defineEmits<{
   paperClick: [paperId: string];
 }>();
 
-/** 行内片段：普通文字 / 加粗 / 斜体 / 行内代码 / 链接 / paper_id 引用。 */
+/** 行内片段：普通文字 / 加粗 / 斜体 / 行内代码 / 链接 / paper_id 引用 / 公式。 */
 interface InlinePart {
   text: string;
   bold?: boolean;
@@ -41,6 +46,10 @@ interface InlinePart {
   href?: string;
   /** 如果是 paper_id 引用，这里存编号。 */
   paperId?: string;
+  /** 如果是公式，这段 text 存的是公式源码（不含 $ 定界符）。 */
+  math?: boolean;
+  /** 公式是否独占一行（$$...$$ 这种写法）。 */
+  display?: boolean;
 }
 
 /** 块级结构：段落、标题、列表、引用、代码块、分隔线、表格。 */
@@ -56,14 +65,37 @@ type Block =
 /** 行内语法匹配：`代码`、***粗斜***、**加粗**、*斜体*、[文字](链接)、[paper_id]。 */
 const INLINE_PATTERN = /(`[^`\n]+`)|(\*\*\*[^*\n]+\*\*\*)|(\*\*[^*\n]+\*\*)|(\*[^*\n]+\*)|(\[[^\]\n]+\]\((?:https?:\/\/|\/)[^)\s]*\))|(\[[a-zA-Z0-9_\-./:]+\])/g;
 
-/** 把一行文字解析成行内片段列表；匹配不上的部分原样保留。 */
+/**
+ * 把一行文字解析成行内片段列表；匹配不上的部分原样保留。
+ *
+ * 中文说明：公式要最先切出来。原因是 Markdown 的行内规则里 `*` 表示斜体、
+ * `[x]` 可能被当成论文编号去渲染成按钮，而公式里这些符号到处都是——比如
+ * $a*b*c$ 里的 *b* 会被当成斜体切走，公式就被拆坏了。所以先把公式整段摘出来，
+ * 剩下的纯文字再交给 Markdown 的行内规则处理。
+ */
 function parseInline(text: string): InlinePart[] {
+  const parts: InlinePart[] = [];
+  for (const segment of splitMathText(text)) {
+    if (segment.kind === "math") {
+      parts.push({ text: segment.tex, math: true, display: segment.display });
+    } else {
+      parts.push(...parseMarkdownInline(segment.value));
+    }
+  }
+  return parts;
+}
+
+/** 解析不含公式的那部分文字（加粗 / 斜体 / 行内代码 / 链接 / paper_id 引用）。 */
+function parseMarkdownInline(text: string): InlinePart[] {
   const parts: InlinePart[] = [];
   let cursor = 0;
   for (const match of text.matchAll(INLINE_PATTERN)) {
     const index = match.index ?? 0;
     if (index > cursor) {
-      parts.push({ text: text.slice(cursor, index) });
+      // 中文说明：只对「没被行内语法匹配走」的纯文字剥裸 LaTeX 标记。
+      // 放在这里而不是函数开头，是因为行内代码要先被摘成独立片段——
+      // 代码里的 \textit 必须逐字保留，不能当标记剥掉。
+      parts.push({ text: stripBareLatex(text.slice(cursor, index)) });
     }
     const raw = match[0];
     if (raw.startsWith("`")) {
@@ -93,9 +125,9 @@ function parseInline(text: string): InlinePart[] {
     cursor = index + raw.length;
   }
   if (cursor < text.length) {
-    parts.push({ text: text.slice(cursor) });
+    parts.push({ text: stripBareLatex(text.slice(cursor)) });
   }
-  return parts.length > 0 ? parts : [{ text }];
+  return parts.length > 0 ? parts : [{ text: stripBareLatex(text) }];
 }
 
 /** 判断一行是不是列表项，并返回是否有序。 */
@@ -254,7 +286,8 @@ const lastBlockIndex = computed(() => blocks.value.length - 1);
         class="chat-md-heading"
       >
         <template v-for="(part, partIndex) in block.parts" :key="partIndex">
-          <code v-if="part.code" class="chat-md-inline-code">{{ part.text }}</code>
+          <MathFormula v-if="part.math" :tex="part.text" :display="part.display" />
+          <code v-else-if="part.code" class="chat-md-inline-code">{{ part.text }}</code>
           <a v-else-if="part.href" :href="part.href" target="_blank" rel="noopener noreferrer">{{ part.text }}</a>
           <strong v-else-if="part.bold && part.italic"><em>{{ part.text }}</em></strong>
           <strong v-else-if="part.bold">{{ part.text }}</strong>
@@ -273,7 +306,8 @@ const lastBlockIndex = computed(() => blocks.value.length - 1);
       <component :is="block.ordered ? 'ol' : 'ul'" v-else-if="block.type === 'list'" class="chat-md-list">
         <li v-for="(item, itemIndex) in block.items" :key="itemIndex">
           <template v-for="(part, partIndex) in item" :key="partIndex">
-            <code v-if="part.code" class="chat-md-inline-code">{{ part.text }}</code>
+            <MathFormula v-if="part.math" :tex="part.text" :display="part.display" />
+            <code v-else-if="part.code" class="chat-md-inline-code">{{ part.text }}</code>
             <a v-else-if="part.href" :href="part.href" target="_blank" rel="noopener noreferrer">{{ part.text }}</a>
             <strong v-else-if="part.bold && part.italic"><em>{{ part.text }}</em></strong>
             <strong v-else-if="part.bold">{{ part.text }}</strong>
@@ -298,7 +332,8 @@ const lastBlockIndex = computed(() => blocks.value.length - 1);
       <blockquote v-else-if="block.type === 'quote'" class="chat-md-quote">
         <p v-for="(quoteLine, lineIndex) in block.lines" :key="lineIndex">
           <template v-for="(part, partIndex) in quoteLine" :key="partIndex">
-            <code v-if="part.code" class="chat-md-inline-code">{{ part.text }}</code>
+            <MathFormula v-if="part.math" :tex="part.text" :display="part.display" />
+            <code v-else-if="part.code" class="chat-md-inline-code">{{ part.text }}</code>
             <a v-else-if="part.href" :href="part.href" target="_blank" rel="noopener noreferrer">{{ part.text }}</a>
             <strong v-else-if="part.bold && part.italic"><em>{{ part.text }}</em></strong>
             <strong v-else-if="part.bold">{{ part.text }}</strong>
@@ -315,7 +350,8 @@ const lastBlockIndex = computed(() => blocks.value.length - 1);
             <tr>
               <th v-for="(cell, cellIndex) in block.head" :key="cellIndex">
                 <template v-for="(part, partIndex) in cell" :key="partIndex">
-                  <code v-if="part.code" class="chat-md-inline-code">{{ part.text }}</code>
+                  <MathFormula v-if="part.math" :tex="part.text" :display="part.display" />
+                  <code v-else-if="part.code" class="chat-md-inline-code">{{ part.text }}</code>
                   <a v-else-if="part.href" :href="part.href" target="_blank" rel="noopener noreferrer">{{ part.text }}</a>
                   <strong v-else-if="part.bold && part.italic"><em>{{ part.text }}</em></strong>
                   <strong v-else-if="part.bold">{{ part.text }}</strong>
@@ -335,7 +371,8 @@ const lastBlockIndex = computed(() => blocks.value.length - 1);
             <tr v-for="(row, rowIndex) in block.rows" :key="rowIndex">
               <td v-for="(cell, cellIndex) in row" :key="cellIndex">
                 <template v-for="(part, partIndex) in cell" :key="partIndex">
-                  <code v-if="part.code" class="chat-md-inline-code">{{ part.text }}</code>
+                  <MathFormula v-if="part.math" :tex="part.text" :display="part.display" />
+                  <code v-else-if="part.code" class="chat-md-inline-code">{{ part.text }}</code>
                   <a v-else-if="part.href" :href="part.href" target="_blank" rel="noopener noreferrer">{{ part.text }}</a>
                   <strong v-else-if="part.bold && part.italic"><em>{{ part.text }}</em></strong>
                   <strong v-else-if="part.bold">{{ part.text }}</strong>
@@ -365,7 +402,8 @@ const lastBlockIndex = computed(() => blocks.value.length - 1);
         <template v-for="(paragraphLine, lineIndex) in block.lines" :key="lineIndex">
           <br v-if="lineIndex > 0" />
           <template v-for="(part, partIndex) in paragraphLine" :key="partIndex">
-            <code v-if="part.code" class="chat-md-inline-code">{{ part.text }}</code>
+            <MathFormula v-if="part.math" :tex="part.text" :display="part.display" />
+            <code v-else-if="part.code" class="chat-md-inline-code">{{ part.text }}</code>
             <a v-else-if="part.href" :href="part.href" target="_blank" rel="noopener noreferrer">{{ part.text }}</a>
             <strong v-else-if="part.bold && part.italic"><em>{{ part.text }}</em></strong>
             <strong v-else-if="part.bold">{{ part.text }}</strong>

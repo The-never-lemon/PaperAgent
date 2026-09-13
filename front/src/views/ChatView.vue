@@ -26,6 +26,7 @@ import {
 } from "../api/sessions";
 import { fetchPaperReport, fetchWorkspace } from "../api/workspace";
 import AssistantBubble from "../components/chat/AssistantBubble.vue";
+import MathText from "../components/chat/MathText.vue";
 import ChatComposer from "../components/chat/ChatComposer.vue";
 import DeepReadReportCard from "../components/chat/DeepReadReportCard.vue";
 import DeepReadDrawer from "../components/chat/DeepReadDrawer.vue";
@@ -741,7 +742,7 @@ function handleError(error: unknown, title: string) {
                 :session-key="selectedSessionKey"
               />
               <div v-else-if="message.kind === 'error'" class="chat-system-line" data-tone="danger">
-                {{ message.content }}
+                <MathText :text="message.content" />
                 <button
                   type="button"
                   class="chat-retry-button"
@@ -751,7 +752,7 @@ function handleError(error: unknown, title: string) {
                 </button>
               </div>
               <div v-else-if="message.role === 'system' && message.content" class="chat-system-line">
-                {{ message.content }}
+                <MathText :text="message.content" />
               </div>
             </template>
 

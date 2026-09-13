@@ -12,6 +12,7 @@ import { ref, watch } from "vue";
 import { FileDown, LoaderCircle, SendHorizonal, X } from "lucide-vue-next";
 
 import type { DeepReadReportPayload } from "../../types/chat";
+import MathText from "./MathText.vue";
 
 defineOptions({ name: "DeepReadDrawer" });
 
@@ -80,7 +81,7 @@ function reportUrl(sessionKey: string, artifactId: string) {
             <span class="deep-read-source-badge" :data-source="report?.source">
               {{ report?.source === "fulltext" ? "全文精读" : "摘要降级" }}
             </span>
-            <h3>{{ report?.title || "精读报告" }}</h3>
+            <h3><MathText :text="report?.title || '精读报告'" /></h3>
           </div>
           <button type="button" class="deep-read-drawer-close" aria-label="关闭" @click="emit('close')">
             <X :size="18" />
@@ -97,47 +98,47 @@ function reportUrl(sessionKey: string, artifactId: string) {
               <li v-for="dim in dimensions(report)" :key="dim.label">
                 <span>{{ dim.label }}</span>
                 <strong>{{ dim.value?.score ?? 0 }}</strong>
-                <small v-if="dim.value?.rationale">{{ dim.value.rationale }}</small>
+                <small v-if="dim.value?.rationale"><MathText :text="dim.value.rationale" /></small>
               </li>
             </ul>
-            <p v-if="report.overall_comment" class="drawer-comment">{{ report.overall_comment }}</p>
+            <p v-if="report.overall_comment" class="drawer-comment"><MathText :text="report.overall_comment" /></p>
           </section>
 
           <section v-if="report.short_summary" class="drawer-section">
             <h4>一段话总结</h4>
-            <p>{{ report.short_summary }}</p>
+            <p><MathText :text="report.short_summary" /></p>
           </section>
           <section v-if="report.main_question" class="drawer-section">
             <h4>核心问题</h4>
-            <p>{{ report.main_question }}</p>
+            <p><MathText :text="report.main_question" /></p>
           </section>
           <section v-if="report.methods.length" class="drawer-section">
             <h4>方法</h4>
-            <ul><li v-for="(item, index) in report.methods" :key="index">{{ item }}</li></ul>
+            <ul><li v-for="(item, index) in report.methods" :key="index"><MathText :text="item" /></li></ul>
           </section>
           <section v-if="report.datasets.length" class="drawer-section">
             <h4>数据集</h4>
-            <ul><li v-for="(item, index) in report.datasets" :key="index">{{ item }}</li></ul>
+            <ul><li v-for="(item, index) in report.datasets" :key="index"><MathText :text="item" /></li></ul>
           </section>
           <section v-if="report.contributions.length" class="drawer-section">
             <h4>贡献</h4>
-            <ul><li v-for="(item, index) in report.contributions" :key="index">{{ item }}</li></ul>
+            <ul><li v-for="(item, index) in report.contributions" :key="index"><MathText :text="item" /></li></ul>
           </section>
           <section v-if="report.main_results.length" class="drawer-section">
             <h4>主要结果</h4>
-            <ul><li v-for="(item, index) in report.main_results" :key="index">{{ item }}</li></ul>
+            <ul><li v-for="(item, index) in report.main_results" :key="index"><MathText :text="item" /></li></ul>
           </section>
           <section v-if="report.experimental_setup" class="drawer-section">
             <h4>实验设置</h4>
-            <p>{{ report.experimental_setup }}</p>
+            <p><MathText :text="report.experimental_setup" /></p>
           </section>
           <section v-if="report.conclusions" class="drawer-section">
             <h4>结论</h4>
-            <p>{{ report.conclusions }}</p>
+            <p><MathText :text="report.conclusions" /></p>
           </section>
           <section v-if="report.limitations.length" class="drawer-section">
             <h4>局限</h4>
-            <ul><li v-for="(item, index) in report.limitations" :key="index">{{ item }}</li></ul>
+            <ul><li v-for="(item, index) in report.limitations" :key="index"><MathText :text="item" /></li></ul>
           </section>
 
           <footer class="drawer-footer">

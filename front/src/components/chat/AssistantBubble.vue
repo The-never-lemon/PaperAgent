@@ -12,6 +12,7 @@ import { ref } from "vue";
 import { Brain, ChevronDown } from "lucide-vue-next";
 
 import MarkdownText from "./MarkdownText.vue";
+import MathText from "./MathText.vue";
 
 defineOptions({ name: "AssistantBubble" });
 
@@ -46,7 +47,7 @@ const reasoningExpanded = ref(false);
         <span>{{ reasoningStreaming ? "思考中…" : "思考过程" }}</span>
         <ChevronDown :size="14" :class="{ expanded: reasoningExpanded }" />
       </button>
-      <pre v-if="reasoning && reasoningExpanded" class="chat-reasoning-body">{{ reasoning }}</pre>
+      <pre v-if="reasoning && reasoningExpanded" class="chat-reasoning-body"><MathText :text="reasoning" /></pre>
 
       <MarkdownText
         v-if="content"

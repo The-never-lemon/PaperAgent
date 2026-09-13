@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.utils.latex_text import clean_latex_text
+
 
 JsonObject = dict[str, Any]
 
@@ -33,12 +35,31 @@ class PaperDocument:
     metadata: JsonObject = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """补齐统一字段的默认值。
+        """补齐统一字段的默认值，并清洗元数据里的 LaTeX 标记。
 
         中文注释：旧代码通常只传 `id` 和 `venue`；新检索链路会使用 `paperId` 和
         `journal_conference`。这里把两个体系轻轻对齐，避免一次改动牵连太多下游代码。
         如果 connector 明确传入 `paperId=""`，表示这个来源没有可靠唯一编号，不会被这里覆盖。
+
+        中文注释（清洗）：检索源返回的标题、摘要、作者、期刊名经常自带 LaTeX 标记，
+        而且不带 $ 定界符（例如摘要里写「The \\textit{PIMAEX} reward」）。这些字符会一路
+        污染四个地方：前端展示、喂给模型的提示词、综述的参考文献、导出的 bibtex/csv。
+        放在这里洗一次，下面全部六个构造论文对象的地方就都干净了——包括三个检索源、
+        手动上传、以及从工作区还原论文对象的两处。
+
+        注意顺序：清洗放在前面，因为下面 journal_conference 是从 venue 派生的，
+        先洗再派生，派生出来的值也就是干净的。
         """
+
+        self.title = clean_latex_text(self.title)
+        # 摘要允许是 None（有些来源不提供），只在真有时才洗。
+        if self.abstract:
+            self.abstract = clean_latex_text(self.abstract)
+        if self.venue:
+            self.venue = clean_latex_text(self.venue)
+        if self.journal_conference:
+            self.journal_conference = clean_latex_text(self.journal_conference)
+        self.authors = [clean_latex_text(author) for author in self.authors]
 
         if self.paperId is None:
             self.paperId = self.doi or self.id

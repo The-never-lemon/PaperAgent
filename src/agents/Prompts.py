@@ -551,16 +551,20 @@ WRITING_REVIEW_SYSTEM_PROMPT += "\n\n" + skill_section(
     "literature-review", "正文审查清单"
 )
 
-# 精读链路：读一段时怎么取舍、写评价时守什么纪律。
-# 「评价纪律」同时给汇总和摘要降级两条路径用——它们的输入材料不同（一个是分段
-# 笔记，一个只有标题和摘要），所以那一节的措辞刻意写成对两者都成立的「输入材料」。
+# 精读链路：读一段时怎么取舍、写评价时守什么纪律、公式怎么写。
+#
+# 「评价纪律」和「公式写法」两节都要给汇总与摘要降级两条路径用。它们的输入材料
+# 不同（一个是分段笔记，一个只有标题和摘要），所以「评价纪律」那一节的措辞刻意
+# 写成对两者都成立的「输入材料」。这两节合并成一个字符串复用，避免两处各取一遍。
+_DEEP_READ_REPORT_SECTIONS = (
+    skill_section("paper-deep-reading", "评价纪律")
+    + "\n\n"
+    + skill_section("paper-deep-reading", "公式写法")
+)
+
 DEEP_READ_MAP_SYSTEM_PROMPT += "\n\n" + _DEEP_READ_FIDELITY
-DEEP_READ_REDUCE_SYSTEM_PROMPT += "\n\n" + skill_section(
-    "paper-deep-reading", "评价纪律"
-)
-DEEP_READ_ABSTRACT_SYSTEM_PROMPT += "\n\n" + skill_section(
-    "paper-deep-reading", "评价纪律"
-)
+DEEP_READ_REDUCE_SYSTEM_PROMPT += "\n\n" + _DEEP_READ_REPORT_SECTIONS
+DEEP_READ_ABSTRACT_SYSTEM_PROMPT += "\n\n" + _DEEP_READ_REPORT_SECTIONS
 
 
 __all__ = [

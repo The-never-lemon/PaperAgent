@@ -9,6 +9,7 @@
 import { FileText } from "lucide-vue-next";
 
 import type { DeepReadCardPayload } from "../../types/chat";
+import MathText from "./MathText.vue";
 
 defineOptions({ name: "DeepReadReportCard" });
 
@@ -26,7 +27,7 @@ const emit = defineEmits<{
     <section class="deep-read-card">
       <header class="deep-read-card-head">
         <FileText :size="16" />
-        <h4 class="deep-read-card-title" :title="payload.report.title">{{ payload.report.title }}</h4>
+        <h4 class="deep-read-card-title" :title="payload.report.title"><MathText :text="payload.report.title" /></h4>
         <span
           class="deep-read-source-badge"
           :data-source="payload.source"
@@ -41,7 +42,7 @@ const emit = defineEmits<{
         本篇论文无法下载全文{{ payload.fulltext_failure_reason ? `（${payload.fulltext_failure_reason}）` : "" }}，
         以下报告基于标题和摘要生成，未通读全文。
       </p>
-      <p v-if="payload.report.short_summary" class="deep-read-summary">{{ payload.report.short_summary }}</p>
+      <p v-if="payload.report.short_summary" class="deep-read-summary"><MathText :text="payload.report.short_summary" /></p>
       <div class="deep-read-dims">
         <span class="deep-read-dim">相关 {{ payload.report.relevance?.score ?? 0 }}</span>
         <span class="deep-read-dim">创新 {{ payload.report.novelty?.score ?? 0 }}</span>

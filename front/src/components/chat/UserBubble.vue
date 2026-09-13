@@ -6,6 +6,8 @@
  */
 defineOptions({ name: "UserBubble" });
 
+import MathText from "./MathText.vue";
+
 defineProps<{
   content: string;
   createdAt?: string | null;
@@ -27,7 +29,7 @@ function formatTime(value?: string | null) {
 <template>
   <div class="chat-row chat-row-user">
     <div class="chat-bubble chat-bubble-user">
-      <p class="chat-bubble-text">{{ content }}</p>
+      <p class="chat-bubble-text"><MathText :text="content" /></p>
       <span v-if="formatTime(createdAt)" class="chat-bubble-time">{{ formatTime(createdAt) }}</span>
       <button
         type="button"

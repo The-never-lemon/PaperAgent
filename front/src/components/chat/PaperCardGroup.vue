@@ -14,6 +14,7 @@ import { BookOpenCheck, ExternalLink, FileText } from "lucide-vue-next";
 
 import { pickPaperLink } from "../../lib/paper-link";
 import type { ChatPaperCard, PaperListPayload } from "../../types/chat";
+import MathText from "./MathText.vue";
 
 defineOptions({ name: "PaperCardGroup" });
 
@@ -61,24 +62,24 @@ function statusLabel(status?: string) {
     <section class="paper-card-group">
       <header class="paper-card-group-head">
         <span class="paper-card-group-title">{{ headerText }}</span>
-        <code v-if="payload.query" class="paper-card-group-query">{{ payload.query }}</code>
+        <code v-if="payload.query" class="paper-card-group-query"><MathText :text="payload.query" /></code>
       </header>
       <div class="paper-card-grid">
         <article v-for="paper in payload.papers" :key="paper.paper_id" class="paper-card">
           <header class="paper-card-title-row">
-            <h4 class="paper-card-title" :title="paper.title">{{ paper.title }}</h4>
+            <h4 class="paper-card-title" :title="paper.title"><MathText :text="paper.title" /></h4>
             <span v-if="paper.score !== null && paper.score !== undefined" class="paper-score" :data-tone="scoreTone(paper.score)">
               {{ paper.score }} 分
             </span>
           </header>
           <p class="paper-card-meta">
-            <span v-if="paper.authors.length">{{ paper.authors.slice(0, 3).join(", ") }}{{ paper.authors.length > 3 ? " 等" : "" }}</span>
+            <span v-if="paper.authors.length"><MathText :text="paper.authors.slice(0, 3).join(', ')" />{{ paper.authors.length > 3 ? " 等" : "" }}</span>
             <span v-if="paper.year">{{ paper.year }}</span>
-            <span v-if="paper.venue">{{ paper.venue }}</span>
+            <span v-if="paper.venue"><MathText :text="paper.venue" /></span>
             <span class="paper-source-badge">{{ paper.source || "未知来源" }}</span>
             <span class="paper-status-badge">{{ statusLabel(paper.status) }}</span>
           </p>
-          <p v-if="paper.abstract" class="paper-card-abstract">{{ paper.abstract }}</p>
+          <p v-if="paper.abstract" class="paper-card-abstract"><MathText :text="paper.abstract" /></p>
           <footer class="paper-card-actions">
             <button
               type="button"

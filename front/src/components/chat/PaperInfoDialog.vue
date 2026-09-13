@@ -19,6 +19,7 @@ import { BookOpenCheck, ExternalLink, X } from "lucide-vue-next";
 
 import { pickPaperLink } from "../../lib/paper-link";
 import type { WorkspacePaperItem } from "../../types/chat";
+import MathText from "./MathText.vue";
 
 defineOptions({ name: "PaperInfoDialog" });
 
@@ -71,15 +72,15 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKeydown));
           </button>
         </header>
 
-        <h3 class="paper-dialog-title">{{ paper.title }}</h3>
+        <h3 class="paper-dialog-title"><MathText :text="paper.title" /></h3>
 
         <p class="paper-card-meta paper-dialog-meta">
-          <span v-if="paper.authors.length">{{ paper.authors.slice(0, 3).join(", ") }}{{ paper.authors.length > 3 ? " 等" : "" }}</span>
+          <span v-if="paper.authors.length"><MathText :text="paper.authors.slice(0, 3).join(', ')" />{{ paper.authors.length > 3 ? " 等" : "" }}</span>
           <span v-if="paper.year">{{ paper.year }}</span>
-          <span v-if="paper.venue">{{ paper.venue }}</span>
+          <span v-if="paper.venue"><MathText :text="paper.venue" /></span>
         </p>
 
-        <p v-if="paper.abstract" class="paper-dialog-abstract">{{ paper.abstract }}</p>
+        <p v-if="paper.abstract" class="paper-dialog-abstract"><MathText :text="paper.abstract" /></p>
         <p v-else class="paper-dialog-abstract paper-dialog-empty">
           检索源没有提供这篇论文的摘要。
         </p>

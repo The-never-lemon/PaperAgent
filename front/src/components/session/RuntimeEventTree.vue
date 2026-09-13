@@ -9,6 +9,7 @@ import {
 
 import StatusPill from "../StatusPill.vue";
 import type { UIRuntimeTimelineEvent } from "../../types/sessions";
+import MathText from "../chat/MathText.vue";
 
 defineOptions({
   name: "RuntimeEventTree",
@@ -138,10 +139,10 @@ function hasDetail(event: UIRuntimeTimelineEvent) {
           </span>
           <span class="runtime-event-copy">
             <span class="runtime-event-title-line">
-              <strong>{{ event.title }}</strong>
+              <strong><MathText :text="event.title" /></strong>
               <StatusPill :tone="statusTone(event.status)" :label="statusLabel(event.status)" />
             </span>
-            <span class="runtime-event-show">{{ event.showContent }}</span>
+            <span class="runtime-event-show"><MathText :text="event.showContent" /></span>
           </span>
           <span class="runtime-event-meta">
             <time class="runtime-event-time">{{ formatTime(eventTime(event)) }}</time>
@@ -172,10 +173,10 @@ function hasDetail(event: UIRuntimeTimelineEvent) {
         </span>
         <span class="runtime-event-copy">
           <span class="runtime-event-title-line">
-            <strong>{{ event.title }}</strong>
+            <strong><MathText :text="event.title" /></strong>
             <StatusPill :tone="statusTone(event.status)" :label="statusLabel(event.status)" />
           </span>
-          <span class="runtime-event-show">{{ event.showContent }}</span>
+          <span class="runtime-event-show"><MathText :text="event.showContent" /></span>
           <details v-if="hasDetail(event)" class="runtime-event-detail">
             <summary>查看详情</summary>
             <pre>{{ formatDetailContent(event.detailContent) }}</pre>
