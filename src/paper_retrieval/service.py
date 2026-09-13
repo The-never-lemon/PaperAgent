@@ -13,10 +13,12 @@ from src.llm.config import SystemConfig
 from src.utils import get_logger, logging_context
 
 from .connectors import ArxivPaperConnector, OpenAlexPaperConnector, PaperSearchConnector, SemanticScholarPaperConnector
+from .download import _ARXIV_DOI_PREFIX
 from .models import PaperDocument, SearchRequest, SearchResponse
 
 if TYPE_CHECKING:
     from src.graph.runtime_resources import WorkflowRuntimeResources
+    from src.llm.config import ModelConfig
 
 
 logger = get_logger(__name__)
@@ -25,6 +27,20 @@ logger = get_logger(__name__)
 # 中文说明：允许重试的 HTTP 状态码。429 是「请求太频繁，等会儿再来」，
 # 5xx 是「服务端自己出问题了」，这两种都值得再试一次。
 _RETRYABLE_STATUS_CODES = (429, 500, 502, 503, 504)
+
+
+# 中文说明：RRF（Reciprocal Rank Fusion，排名融合）里的平滑常数。
+# 多源检索时用它在各源的排名上算融合分：某篇论文在某个源里排第 rank 名，
+# 就贡献 1/(K + rank)，把它在各个源里的贡献加起来就是总分。
+# K 取 60 是这类融合的常用默认值。它的效果是"名次之间的差距被压得比较平缓"，
+# 于是"被多个源同时命中"依然比"只在单个源里排得靠前"更有分量，
+# 与改造前"先看命中几个源"的排序意图一致，但不再是一刀切的阶跃比较。
+RRF_K = 60
+
+# 中文说明：单次 embedding 请求最多发几条文本。各平台的上限差别很大
+# （实测 DashScope 是 20 条，OpenAI 是 2048 条），所以正确做法是在档位里配；
+# 这个常量只在配置缺失或配得不合法时兜底，取一个各家都安全的保守值。
+EMBEDDING_BATCH_SIZE_FALLBACK = 16
 
 
 def _is_retryable_search_error(exc: Exception) -> bool:
@@ -60,10 +76,9 @@ def _backfill_fulltext_fields(representative: PaperDocument, group: list[PaperDo
     arXiv 记录里那个稳定好用的 PDF 直链就跟着被丢掉了。
     结果就是：明明有能下载的链接，下载却失败，精读被迫降级成摘要。
 
-    这里在保留代表（引用数信息最全的那条）的前提下，把三样东西补回来：
+    这里在保留代表（引用数信息最全的那条）的前提下，把两样东西补回来：
     1. arxiv_id —— 下载层靠它拼 arXiv 的 PDF 直链；
-    2. pdf_url —— 代表自己没有可下载链接时，用组里别的记录的；
-    3. open_access_pdf —— 同上，OpenAlex 那条经常缺这个字段。
+    2. pdf_url —— 代表自己没有可下载链接时，用组里别的记录的。
 
     代表自己已经有值的字段一律不动，避免把更好的信息覆盖掉。
     """
@@ -90,14 +105,6 @@ def _backfill_fulltext_fields(representative: PaperDocument, group: list[PaperDo
                 representative.pdf_url = candidate.pdf_url
                 break
 
-    # 中文注释：开放获取 PDF 同理，代表那条经常缺这个字段。
-    if not metadata.get("open_access_pdf"):
-        for candidate in group:
-            value = (candidate.metadata or {}).get("open_access_pdf")
-            if value:
-                metadata["open_access_pdf"] = value
-                break
-
 
 class PaperSearchService:
     """论文检索编排层。
@@ -121,23 +128,44 @@ class PaperSearchService:
     # 超量拉取后再用 RRF 重排截断到用户期望的数量，能显著提升排序质量。
     OVER_FETCH_FACTOR = 3
 
+    @staticmethod
+    def _resolve_embedding_batch_size(config: "ModelConfig") -> int:
+        """取当前嵌入档位配置的单次请求条数；没配或配得不合法时退回保守值。
+
+        中文说明：这个值应该按平台能力配（实测 DashScope 20 条、OpenAI 2048 条），
+        所以优先读档位里的 batch_size；读不到、或读到的不是个合法条数，
+        就用 EMBEDDING_BATCH_SIZE_FALLBACK 兜底，保证一定有个能用的值。
+        """
+
+        try:
+            profile = config.resolve_embedding_profile(config.default_embedding_profile)
+        except Exception:
+            return EMBEDDING_BATCH_SIZE_FALLBACK
+        size = profile.batch_size
+        if isinstance(size, int) and size > 0:
+            return size
+        return EMBEDDING_BATCH_SIZE_FALLBACK
+
     async def _embedding_rerank(
         self,
         candidates: list[PaperDocument],
         topic: str,
     ) -> dict[str, float]:
-        """对候选论文做 embedding 语义重排（Phase 3 引入）。
+        """对候选论文做 embedding 语义重排。
 
         中文说明：
-        把 topic（用户研究主题）和每篇候选论文的 title + abstract 一起批量 embed，
-        算 topic 向量与每个候选向量的余弦相似度。
+        把 topic（用户研究主题）和每篇候选论文的 title + abstract 一起 embed，
+        算 topic 向量与每个候选向量的余弦相似度。调用方传进来的 candidates
+        应当是"合并去重后的代表论文"，这样每个候选对应唯一一个分数，
+        不会出现同一篇论文的兄弟记录互相覆盖分数的情况。
 
         关键设计：
-        - 失败降级：embedding 配置不可用、provider 报错、返回数量不匹配、numpy 没装，
-          都返回空 dict，让 _rank_merged_papers 这一维给 0 分，不影响主流程。
-        - 不建全库向量索引，只对当次检索的候选（几十篇）做一次 embed，延迟 ~1-2 秒。
-        - 用项目已配置的 embedding profile（config/model.json 里的 default_embedding_profile），
-          无需新增配置项。
+        - 前置检查：没配嵌入档位、或档位引用的 provider 没配 API Key，直接跳过并
+          返回空 dict，不发那次注定失败的请求。
+        - 失败降级：provider 报错、返回数量不匹配、numpy 没装，都返回空 dict，
+          让 _rank_merged_papers 这一维给 0 分，不影响主流程。
+        - 分批请求：按档位配置的 batch_size 切开并发发送，避开各平台的单次条数上限。
+        - 不建全库向量索引，只对当次检索的候选（几十篇）做一次 embed。
 
         返回：{paper_id 或 id: 余弦相似度} 的 dict。失败时返回空 dict。
         """
@@ -170,6 +198,16 @@ class PaperSearchService:
                 logger.info("embedding 重排跳过：未配置任何嵌入模型档位")
                 return {}
 
+            # 中文说明：再看这个档位引用的 provider 到底有没有可用的 API Key。
+            # 密钥不在档位里，而在档位指向的 provider 上（明文 api_key，或
+            # api_key_env 指向的环境变量），所以要问 resolve_embedding_provider_config
+            # 才拿得到"最终真正生效的那把钥匙"。没有钥匙就直接跳过，
+            # 免得白发一次注定被拒的请求——省的不只是时间，还有日志噪音。
+            _, provider_config = config.resolve_embedding_provider_config(config.default_embedding_profile)
+            if not provider_config.api_key:
+                logger.info("embedding 重排跳过：嵌入档位引用的 provider 未配置 API Key")
+                return {}
+
             snapshot = make_provider(config, embedding_profile_name=config.default_embedding_profile)
             provider = snapshot.provider
 
@@ -180,32 +218,46 @@ class PaperSearchService:
                 text = f"{p.title or ''} {p.abstract or ''}".strip()
                 texts.append(text or p.title or 'unknown')
 
-            # 中文说明：批量 embed（异步）。provider 内建限流 + 重试 + 批处理。
-            response = await provider.embed(texts)
-            if not response.ok or len(response.embeddings) != len(texts):
-                logger.warning(
-                    "embedding 重排跳过：响应异常",
-                    extra={"ok": response.ok, "expected": len(texts), "got": len(response.embeddings)},
-                )
-                return {}
+            # 中文说明：分批 embed。各平台对"单次请求最多几条"有硬上限
+            # （实测 DashScope 超过 20 条就直接返回 400），把几十篇候选一次性
+            # 发过去会被整批打回。这里按档位配置的 batch_size 切开、并发请求，
+            # 再把各批的向量按原顺序拼回来。
+            batch_size = self._resolve_embedding_batch_size(config)
+            batches = [texts[start : start + batch_size] for start in range(0, len(texts), batch_size)]
+            batch_responses = await asyncio.gather(*(provider.embed(batch) for batch in batches))
+            embeddings: list[list[float]] = []
+            for batch, batch_response in zip(batches, batch_responses):
+                if not batch_response.ok or len(batch_response.embeddings) != len(batch):
+                    logger.warning(
+                        "embedding 重排跳过：响应异常",
+                        extra={
+                            "ok": batch_response.ok,
+                            "expected": len(batch),
+                            "got": len(batch_response.embeddings),
+                        },
+                    )
+                    return {}
+                embeddings.extend(batch_response.embeddings)
 
             # 中文说明：用 numpy 算余弦相似度，numpy 是项目直接依赖（见 pyproject.toml）。
             import numpy as np
 
-            topic_vec = np.asarray(response.embeddings[0], dtype=np.float32)
+            topic_vec = np.asarray(embeddings[0], dtype=np.float32)
             topic_norm = float(np.linalg.norm(topic_vec))
             if topic_norm == 0:
                 return {}
 
             scores: dict[str, float] = {}
             for i, p in enumerate(candidates):
-                cand_vec = np.asarray(response.embeddings[i + 1], dtype=np.float32)
+                cand_vec = np.asarray(embeddings[i + 1], dtype=np.float32)
                 cand_norm = float(np.linalg.norm(cand_vec))
                 if cand_norm == 0:
                     sim = 0.0
                 else:
                     sim = float(np.dot(topic_vec, cand_vec) / (topic_norm * cand_norm))
-                # 中文说明：用 paperId 作 key（与 _deduplicate_papers 的去重键对齐）。
+                # 中文说明：用 paperId 作 key。调用方保证传进来的候选已经是
+                # 合并去重后的代表，所以键和值一一对应（不需要用去重键 _paper_key：
+                # 代表之间本来就不会重复，而 _paper_key 是另一套带归一化的规则）。
                 key = p.paperId or p.id
                 scores[key] = sim
 
@@ -328,6 +380,7 @@ class PaperSearchService:
             gathered = self._search_many(selected, request)
             response.sources_used = list(selected.keys())
             merged: list[PaperDocument] = []
+            rrf_scores: dict[str, float] = {}
             for source_name, outcome in gathered.items():
                 if isinstance(outcome, Exception):
                     response.errors[source_name] = str(outcome)
@@ -335,8 +388,14 @@ class PaperSearchService:
                     continue
                 response.source_results[source_name] = len(outcome)
                 merged.extend(outcome)
+                # 中文说明：与异步路径同一套排名融合规则，详细说明见 async_search。
+                for rank, paper in enumerate(outcome):
+                    key = self._paper_key(paper)
+                    rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (RRF_K + rank + 1)
             response.papers = self._deduplicate_papers(
-                merged, limit if truncate else None, concept_groups=request.concept_groups
+                merged, limit if truncate else None,
+                concept_groups=request.concept_groups,
+                rrf_scores=rrf_scores,
             )
             logger.info(
                 "多源论文检索完成",
@@ -410,12 +469,18 @@ class PaperSearchService:
                 )
                 response.sources_used = [source_name]
                 response.source_results[source_name] = len(papers)
-                # 中文说明：做 embedding 语义重排（Phase 3）。失败时降级为纯词面排序。
-                embedding_scores = await self._embedding_rerank(papers, request.topic)
-                response.papers = self._deduplicate_papers(
-                    papers, limit if truncate else None,
+                # 中文说明：先把重复记录合并成"每篇只留一条代表"，再只对代表做
+                # embedding 重排。这样每个代表对应唯一一个分数，不会和自己的兄弟
+                # 记录互相覆盖，也省掉了对重复内容的重复向量化。
+                # 单源没有可融合的排名，所以不传 rrf_scores。
+                representatives = self._merge_duplicates(papers)
+                # 中文说明：没配嵌入密钥时这一步内部直接返回空 dict，排序退化成纯词面。
+                embedding_scores = await self._embedding_rerank(representatives, request.topic)
+                response.papers = self._rank_and_truncate(
+                    representatives,
                     concept_groups=request.concept_groups,
                     embedding_scores=embedding_scores,
+                    limit=limit if truncate else None,
                 )
                 logger.info(
                     "异步单源论文检索完成",
@@ -425,6 +490,7 @@ class PaperSearchService:
             gathered = await self._async_search_many(selected, request, runtime_resources=runtime_resources)
             response.sources_used = list(selected.keys())
             merged: list[PaperDocument] = []
+            rrf_scores: dict[str, float] = {}
             for source_name, outcome in gathered.items():
                 if isinstance(outcome, Exception):
                     response.errors[source_name] = str(outcome)
@@ -432,13 +498,22 @@ class PaperSearchService:
                     continue
                 response.source_results[source_name] = len(outcome)
                 merged.extend(outcome)
-            # 中文说明：做 embedding 语义重排（Phase 3）。失败时降级为纯词面排序。
-            embedding_scores = await self._embedding_rerank(merged, request.topic)
+                # 中文说明：累加每个源的排名融合分。outcome 里论文的先后顺序就是
+                # 这个源自己给出的名次（arXiv 按相关度、OpenAlex 按相关度、S2 按引用数），
+                # 排第 rank 名就贡献 1/(RRF_K + rank + 1)。同一篇论文被多个源命中时，
+                # 这几个分数会加在一起，所以"多个源都收录、而且名次靠前"的论文分最高。
+                for rank, paper in enumerate(outcome):
+                    key = self._paper_key(paper)
+                    rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (RRF_K + rank + 1)
+            # 中文说明：先合并重复记录拿到代表列表，再只对代表做 embedding 重排（理由同单源路径）。
+            representatives = self._merge_duplicates(merged, rrf_scores)
+            embedding_scores = await self._embedding_rerank(representatives, request.topic)
             # 中文说明：截断到用户期望的 limit（不是 effective_limit）。
-            response.papers = self._deduplicate_papers(
-                merged, limit if truncate else None,
+            response.papers = self._rank_and_truncate(
+                representatives,
                 concept_groups=request.concept_groups,
                 embedding_scores=embedding_scores,
+                limit=limit if truncate else None,
             )
             logger.info(
                 "异步多源论文检索完成",
@@ -673,22 +748,24 @@ class PaperSearchService:
         pairs = await asyncio.gather(*[_run_one(source_name, connector) for source_name, connector in connectors.items()])
         return dict(pairs)
 
-    def _deduplicate_papers(
-        self, papers: list[PaperDocument], limit: int | None,
-        concept_groups: list[list[str]] | None = None,
-        embedding_scores: dict[str, float] | None = None,
+    def _merge_duplicates(
+        self, papers: list[PaperDocument],
+        rrf_scores: dict[str, float] | None = None,
     ) -> list[PaperDocument]:
-        """先聚合 sources 标记，再排序去重，保证多源合并后的论文按质量排序。
+        """把多源结果合并成"每篇论文只留一条代表"（这一层不做排序）。
 
         中文说明：
         同一篇论文可能被多个源同时返回（比如 OpenAlex 和 S2 都收录了某篇 arXiv preprint）。
-        这里按 _paper_key 聚合，给每篇论文打上"被哪些源命中"的标记，供 _rank_merged_papers 排序使用。
+        这里按 _paper_key 聚合，给每篇论文打上"被哪些源命中"的标记，
+        并写入多源排名融合分（rrf_score），供后面的排序使用。
         同一 key 的多篇论文里，选 metadata["cited_by_count"] 最大的作为代表，
         这样 OpenAlex 的高引信息能被保留下来（OpenAlex 的 cited_by_count 数据最全）。
         """
 
         if not papers:
             return []
+
+        rrf_scores = rrf_scores or {}
 
         # 第一步：按 paper_key 分组，记录每个 key 的所有论文和来源。
         groups: dict[str, list[tuple[str, PaperDocument]]] = {}
@@ -711,6 +788,9 @@ class PaperSearchService:
             if best.metadata is None:
                 best.metadata = {}
             best.metadata["sources"] = sources
+            # 中文说明：融合分是按去重键累加出来的，所以这里也用同一个 key 去取，
+            # 代表拿到的就是"这篇论文在各源里的名次合起来"的分数。
+            best.metadata["rrf_score"] = rrf_scores.get(key, 0.0)
 
             # 中文注释：代表是按引用数选出来的，而 arXiv 记录拿不到引用数（它的数据源不提供），
             # 所以同一篇论文同时被 arXiv 和 OpenAlex 收录时，代表一定是 OpenAlex 那条，
@@ -719,15 +799,44 @@ class PaperSearchService:
             _backfill_fulltext_fields(best, [paper for _, paper in entries])
             representatives.append(best)
 
-        # 第三步：按多维度排序 + 截断。
+        return representatives
+
+    def _rank_and_truncate(
+        self, papers: list[PaperDocument],
+        concept_groups: list[list[str]] | None = None,
+        embedding_scores: dict[str, float] | None = None,
+        limit: int | None = None,
+    ) -> list[PaperDocument]:
+        """对已经合并好的论文列表排序，再按 limit 截断。"""
+
         ranked = self._rank_merged_papers(
-            representatives,
+            papers,
             concept_groups=concept_groups or [],
             embedding_scores=embedding_scores or {},
         )
         if limit is None:
             return ranked
         return ranked[:limit]
+
+    def _deduplicate_papers(
+        self, papers: list[PaperDocument], limit: int | None,
+        concept_groups: list[list[str]] | None = None,
+        embedding_scores: dict[str, float] | None = None,
+        rrf_scores: dict[str, float] | None = None,
+    ) -> list[PaperDocument]:
+        """合并去重后直接排序截断。
+
+        中文说明：这是"不需要在中间插一步"的调用方用的组合入口。
+        需要在去重与排序之间插入 embedding 重排的调用方（async_search 的两条路径），
+        自己依次调 _merge_duplicates → 算 embedding → _rank_and_truncate。
+        """
+
+        return self._rank_and_truncate(
+            self._merge_duplicates(papers, rrf_scores),
+            concept_groups=concept_groups,
+            embedding_scores=embedding_scores,
+            limit=limit,
+        )
 
     def _rank_merged_papers(
         self, papers: list[PaperDocument],
@@ -737,14 +846,20 @@ class PaperSearchService:
         """对多源合并后的论文做多维度排序。
 
         中文说明：
-        按五个维度打分（纯函数，无模型调用）：
-        1. 命中源数量：被多个源同时命中的论文排在前面（权威性信号）。
-        2. 概念组匹配度：每篇论文在每个概念组里命中几个同义词（出现在 title+abstract 里）。
+        按六个维度排序（纯函数，不调用模型）。返回的是一个元组，Python 会从左到右
+        逐个比较，所以越靠前的维度优先级越高：
+        1. RRF 融合分：把这篇论文在各个源里的名次换算成分数再加起来
+           （在某个源里排第 rank 名，就贡献 1/(RRF_K + rank)）。它同时反映了
+           "被几个源命中"和"在每个源里排得多靠前"，比单纯数命中源数更细腻。
+           单源检索、以及拿不到排名的引文扩展，这一维恒为 0。
+        2. 命中源数量：多源检索时它通常已经被维度 1 决定了；它真正起作用的场合是
+           RRF 没有值的时候（引文扩展），让排序退回改造前的口径。
+        3. 概念组匹配度：每篇论文在每个概念组里命中几个同义词（出现在 title+abstract 里）。
            每组最多算 1 分，总匹配组数越多越靠前。
-        3. 引用数：metadata["cited_by_count"]（OpenAlex + S2 都有值了）。
-        4. 年份新近度：越新越靠前。
-        5. embedding 余弦相似度：Phase 3 引入，语义相关度信号。
-           失败降级时这一维给 0 分，不影响主流程。
+        4. 引用数：metadata["cited_by_count"]（OpenAlex + S2 都有值了）。
+        5. 年份新近度：越新越靠前。
+        6. embedding 余弦相似度：语义相关度信号，只在前面几维全部相同时才起作用。
+           没配嵌入模型或调用失败时这一维给 0 分，不影响主流程。
         """
 
         if not papers:
@@ -753,14 +868,21 @@ class PaperSearchService:
         concept_groups = concept_groups or []
         embedding_scores = embedding_scores or {}
 
-        def _score(paper: PaperDocument) -> tuple[int, int, int, int, float]:
-            """返回一个五维元组用于排序（大的在前）。"""
+        def _score(paper: PaperDocument) -> tuple[float, int, int, int, int, float]:
+            """返回一个六维元组用于排序（大的在前）。"""
 
-            # 维度 1：命中源数量（metadata 里的 sources 字段）。
+            # 维度 1：多源排名融合分（合并阶段写在 metadata 里的 rrf_score）。
+            rrf_score = 0.0
+            if paper.metadata:
+                rrf_score = float(paper.metadata.get("rrf_score") or 0.0)
+
+            # 维度 2：命中源数量。RRF 只在"多源搜索"时才有值；引文扩展
+            # （async_related）拿不到各源的排名，那一维就恒为 0，于是这里退回按
+            # 命中源数排序，保持引文扩展改造前的行为不变。
             sources = paper.metadata.get("sources") if paper.metadata else []
             source_count = len(sources) if isinstance(sources, list) else 1
 
-            # 维度 2：概念组匹配度（每组最多算 1 分）。
+            # 维度 3：概念组匹配度（每组最多算 1 分）。
             title = (paper.title or "").lower()
             abstract = (paper.abstract or "").lower()
             text = title + " " + abstract
@@ -769,19 +891,19 @@ class PaperSearchService:
                 if any(term.lower() in text for term in group if str(term).strip()):
                     group_hits += 1
 
-            # 维度 3：引用数。
+            # 维度 4：引用数。
             cited_by = 0
             if paper.metadata:
                 cited_by = int(paper.metadata.get("cited_by_count") or 0)
 
-            # 维度 4：年份。
+            # 维度 5：年份。
             year = int(paper.year) if paper.year else 0
 
-            # 维度 5：embedding 余弦相似度（失败降级时为 0）。
+            # 维度 6：embedding 余弦相似度（没配模型或调用失败时为 0）。
             paper_key = paper.paperId or paper.id
             embedding_sim = float(embedding_scores.get(paper_key, 0.0))
 
-            return (source_count, group_hits, cited_by, year, embedding_sim)
+            return (rrf_score, source_count, group_hits, cited_by, year, embedding_sim)
 
         return sorted(papers, key=_score, reverse=True)
 
@@ -797,12 +919,21 @@ class PaperSearchService:
 
         中文说明：
         按优先级：DOI 归一 > arXiv id 去版本号 > 标题归一。
+        arXiv 自己注册的 DOI（10.48550/arxiv.*）不当普通 DOI 看，而是按 arXiv 编号处理——
+        这样"带 arXiv-DOI 的记录"和"带裸编号的记录"才会合并成同一条。
         """
 
         # 优先用 DOI（归一化：去前缀、小写）。
         doi = (paper.doi or "").strip()
         if doi:
             doi = doi.removeprefix("https://doi.org/").removeprefix("http://doi.org/").lower()
+            # 中文说明：arXiv 给论文注册的 DOI 形如 10.48550/arxiv.2401.12345，而 arXiv 源
+            # 自己返回的是裸编号（2401.12345）——这两条记录其实是同一篇论文。若按 DOI 和按
+            # 编号各算各的键，它们永远合不到一起，同一篇论文就会在结果里出现两次
+            # （实测那篇 RAG 综述正是这样重复的）。所以这种 DOI 一律归到 arxiv 键，
+            # 并且和下面的裸编号分支一样去掉版本号。
+            if doi.startswith(_ARXIV_DOI_PREFIX):
+                return f"arxiv:{re.sub(r'v\d+$', '', doi[len(_ARXIV_DOI_PREFIX):])}"
             return f"doi:{doi}"
         # 中文说明：用正则判据识别 arXiv id，并去掉版本号（2401.12345v3 → 2401.12345）。
         # 这样 preprint 和正式发表版会被视为同一篇论文，避免跨源合并时漏掉。

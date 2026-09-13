@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from src.llm.config import SystemConfig
 from src.models.workspace import PaperEvaluation, SearchHistoryEntry, SessionWorkspace
-from src.paper_retrieval.download import async_download_paper_fulltext
+from src.paper_retrieval.download import _find_fulltext_url, async_download_paper_fulltext
 from src.paper_retrieval.models import PaperDocument
 from src.paper_retrieval.service import PaperSearchService
 from src.utils import get_logger
@@ -57,6 +57,10 @@ TOOL_RESULT_MAX_CHARS = 6000
 SEARCH_LIMIT_MIN = 5
 SEARCH_LIMIT_MAX = 15
 SEARCH_LIMIT_DEFAULT = 10
+
+# search_papers 结果太少时最多放宽几次。每放宽一次丢掉一个概念组，
+# 所以最多会检索 MAX_RELAXATIONS + 1 次。
+MAX_RELAXATIONS = 2
 
 # expand_by_citations 每次返回论文数量的合法区间与默认值。
 EXPAND_LIMIT_MIN = 5
@@ -508,8 +512,9 @@ async def _handle_search_papers(
     拒绝空概念组、截断单组同义词 ≤12 个、截断总组数 ≤4。
 
     自动放宽策略（D4）：
-    第一次检索后结果少于 3 篇时，把概念组从多个收窄到只保留第一个（最核心的），
-    重新检索。最多放宽 2 次。放宽信息回灌给主 Agent，让它能跟用户解释。
+    第一次检索后结果少于 3 篇时，逐次丢掉列表末尾（最不重要）的概念组再重试，
+    直到只剩一个组或放宽次数用完。最多放宽 2 次，也就是最多检索 3 次。
+    放宽信息回灌给主 Agent，让它能跟用户解释。
     """
 
     # 中文说明：清洗 topic。
@@ -536,16 +541,17 @@ async def _handle_search_papers(
     )
 
     # 中文说明：核心检索 + 自动放宽循环。
-    # 第一次用原始概念组，结果少于 3 篇且概念组 > 1 个时，
-    # 收窄到只保留第一个概念组（最核心的），重新检索。
-    # 最多放宽 2 次，避免无限循环。
+    # 每轮用当前的概念组检索一次；结果少于 3 篇且还有多个组时，
+    # 丢掉列表末尾（最不重要）的那个组再来一轮，直到只剩一个组或放宽次数用完。
+    # 最多放宽 2 次，也就是最多检索 3 次。
     service = PaperSearchService()
     current_groups = cleaned_groups
     relaxation_applied = False
     relaxation_description = ""
+    relaxations = 0
     response = None
 
-    for attempt in range(3):
+    for attempt in range(MAX_RELAXATIONS + 1):
         response = await service.async_search(
             topic=cleaned_topic,
             concept_groups=current_groups,
@@ -560,15 +566,21 @@ async def _handle_search_papers(
         # 中文说明：结果够多（≥3 篇）或已不能再放宽（只剩 1 个组），退出循环。
         if len(response.papers) >= 3 or len(current_groups) <= 1:
             break
+        # 中文说明：放宽次数用完了就停。这一步不能省：概念组最多有 4 个，
+        # 若只按上面的条件退，会出现"这轮已经丢掉一个组、描述也写好了，
+        # 但循环正好用完、那一轮根本没检索"的假描述。
+        if relaxations >= MAX_RELAXATIONS:
+            break
 
-        # 中文说明：放宽——只保留第一个概念组（最核心的）。
+        # 中文说明：放宽——丢掉最后一个（也是最不重要的）概念组。
+        relaxations += 1
         relaxation_applied = True
-        dropped = [g[0] for g in current_groups[1:]]
-        current_groups = [current_groups[0]]
+        dropped = [current_groups[-1][0]]
+        current_groups = current_groups[:-1]
         relaxation_description = (
             f"第 {attempt + 1} 次检索只得到 {len(response.papers)} 篇，"
-            f"已放宽为只保留最核心的概念组 {current_groups[0][0]!r}，"
-            f"放弃了 {dropped}"
+            f"已放弃概念组 {dropped}，"
+            f"当前使用 {[g[0] for g in current_groups]}"
         )
         logger.info(
             "search_papers 自动放宽",
@@ -729,19 +741,16 @@ def _paper_llm_view(paper: JsonObject, paper_id: str) -> JsonObject:
 
 
 def _has_pdf(paper: JsonObject) -> bool:
-    """判断论文有没有可下载的全文地址（pdf_url 或元数据里的开放获取地址）。"""
+    """判断论文有没有可下载的全文直链。
 
-    if str(paper.get("pdf_url") or "").strip():
-        return True
-    metadata = paper.get("metadata")
-    if isinstance(metadata, dict):
-        for key in ("open_access_pdf", "openAccessPdf", "pdf_url"):
-            value = metadata.get(key)
-            if isinstance(value, dict):
-                value = value.get("url")
-            if str(value or "").strip():
-                return True
-    return False
+    中文说明：口径直接复用下载层的 _find_fulltext_url，不再自己拼一套判断。
+    这样"卡片上显示有 PDF"和"用户点下载能不能成"说的是同一件事：
+    它除了看顶层 pdf_url，还会从 arXiv 编号（含 metadata 里的 arxiv_id、
+    paperId 本身、以及 10.48550/arxiv.* 形式的 DOI）拼出直链，
+    同时会跳过 doi.org 落地页——这些与真正下载时的行为完全一致。
+    """
+
+    return _find_fulltext_url(_paper_document_from_dict(paper)) is not None
 
 
 # ---------------------------------------------------------------------------

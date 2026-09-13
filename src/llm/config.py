@@ -46,7 +46,10 @@ class EmbeddingDefaults:
     """系统级 embedding 默认参数。"""
 
     dimensions: int | None = None
-    batch_size: int | None = 32
+    # 中文注释：单次 embedding 请求最多发几条文本。这里给的是"各家平台都不会超限"
+    # 的保守默认值——实测 DashScope 的上限只有 20 条，OpenAI 则有 2048 条，
+    # 所以宁可一次少发点（多发几次请求），也不要超限被整批打回。可按平台能力改。
+    batch_size: int | None = 16
 
 
 @dataclass(slots=True)
@@ -108,7 +111,7 @@ class SystemConfig:
             ),
             embedding=EmbeddingDefaults(
                 dimensions=embedding.get("dimensions"),
-                batch_size=embedding.get("batch_size", 32),
+                batch_size=embedding.get("batch_size", 16),
             ),
             paper_retrieval=PaperRetrievalConfig(
                 # 中文说明：配置里的 null 或空白内容都按“没有配置密钥”处理，

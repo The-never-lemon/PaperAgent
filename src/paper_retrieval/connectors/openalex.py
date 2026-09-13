@@ -36,7 +36,11 @@ class OpenAlexPaperConnector(PaperSearchConnector):
     def search(self, request: SearchRequest) -> list[PaperDocument]:
         """执行 OpenAlex 检索，并在 connector 内完成查询拼装。"""
 
-        response = self.client.get(self._endpoint, params=self._params(request))
+        # 中文说明：没有检索意图（概念组为空）时 _params 返回 None，直接给空结果。
+        params = self._params(request)
+        if params is None:
+            return []
+        response = self.client.get(self._endpoint, params=params)
         response.raise_for_status()
         return self._parse_payload(response.json(), request)
 
@@ -48,12 +52,16 @@ class OpenAlexPaperConnector(PaperSearchConnector):
     ) -> list[PaperDocument]:
         """异步执行 OpenAlex 检索，避免在异步编排里阻塞事件循环。"""
 
+        # 中文说明：没有检索意图（概念组为空）时 _params 返回 None，直接给空结果。
+        params = self._params(request)
+        if params is None:
+            return []
         resolved_client = client or httpx.AsyncClient(timeout=20.0)
         owns_client = client is None
         try:
             response = await resolved_client.get(
                 self._endpoint,
-                params=self._params(request),
+                params=params,
                 headers=self.headers,
                 timeout=20.0,
             )
@@ -63,8 +71,8 @@ class OpenAlexPaperConnector(PaperSearchConnector):
         response.raise_for_status()
         return self._parse_payload(response.json(), request)
 
-    def _params(self, request: SearchRequest) -> dict[str, str | int]:
-        """构造 OpenAlex 请求参数，同步和异步入口共用。
+    def _params(self, request: SearchRequest) -> dict[str, str | int] | None:
+        """构造 OpenAlex 请求参数，同步和异步入口共用；没有检索意图时返回 None。
 
         中文说明：
         OpenAlex 的查询可以走两个路径：
@@ -78,14 +86,18 @@ class OpenAlexPaperConnector(PaperSearchConnector):
         实测这种写法和标准布尔式产生完全一致的 x_query.oql，但更安全。
 
         同时必加 type:article|review|preprint + has_abstract:true 提精度。
+
+        返回 None 表示"这次没有可执行的检索意图"（概念组为空）。这一步必须提前退出：
+        下面那几条 type / has_abstract 过滤是无条件加上的，光靠它们去搜，会拿回一堆
+        跟研究主题无关的高分热门论文。
         """
 
-        filters: list[str] = []
-
-        # 中文说明：渲染概念组（核心改动）。
+        # 中文说明：先渲染概念组。渲染不出东西就直接返回 None，让调用方跳过本次请求。
         concept_filter = self._render_concept_groups(request)
-        if concept_filter:
-            filters.append(concept_filter)
+        if not concept_filter:
+            return None
+
+        filters: list[str] = [concept_filter]
 
         # 中文说明：排除词（OpenAlex 没有专门的排除 filter，只能客户端过滤，
         # 这里用 ! 前缀加到 title_and_abstract.search 里）。
@@ -135,12 +147,6 @@ class OpenAlexPaperConnector(PaperSearchConnector):
         """
 
         groups = request.concept_groups
-        if not groups:
-            # 中文说明：没有概念组时用 topic 兜底。
-            if request.topic.strip():
-                # 中文说明：topic 是自然语言，整串当短语匹配。
-                return f'title_and_abstract.search:"{request.topic.strip()}"'
-            return ""
 
         clauses: list[str] = []
         for group in groups:

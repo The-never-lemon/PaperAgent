@@ -72,9 +72,13 @@ class ArxivPaperConnector(PaperSearchConnector):
     def search(self, request: SearchRequest) -> list[PaperDocument]:
         """执行 arXiv 检索，并在 connector 内完成查询拼装。"""
 
+        # 中文说明：先渲染查询串。没有可执行的检索意图（概念组为空）就直接返回空列表，
+        # 连下面那道 3 秒限速门都不用等。
+        query = self._render_concept_groups(request)
+        if not query:
+            return []
         # 中文说明：强制 3 秒串行门（arXiv ToU）。
         self._enforce_sync_spacing()
-        query = self._render_concept_groups(request)
         response = self.client.get(
             self._endpoint,
             params={
@@ -98,9 +102,13 @@ class ArxivPaperConnector(PaperSearchConnector):
     ) -> list[PaperDocument]:
         """异步执行 arXiv 检索，避免在异步编排里阻塞事件循环。"""
 
+        # 中文说明：先渲染查询串。没有可执行的检索意图（概念组为空）就直接返回空列表，
+        # 连下面那道 3 秒限速门都不用等。
+        query = self._render_concept_groups(request)
+        if not query:
+            return []
         # 中文说明：强制 3 秒串行门（arXiv ToU）。
         await self._enforce_async_spacing()
-        query = self._render_concept_groups(request)
         resolved_client = client or httpx.AsyncClient(timeout=20.0)
         owns_client = client is None
         try:
@@ -157,13 +165,6 @@ class ArxivPaperConnector(PaperSearchConnector):
         """
 
         groups = request.concept_groups
-        if not groups:
-            # 中文说明：没有任何概念组时，用 topic 兜底（虽然不精确，总比返回 0 篇好）。
-            if request.topic.strip():
-                words = [w.strip() for w in request.topic.split() if w.strip()]
-                if words:
-                    return " AND ".join(f'all:"{w}"' for w in words)
-            return "all:*"
 
         # 中文说明：每个概念组渲染成 (all:"term1" OR all:"term2" OR ...)。
         # 所有项都加引号（单字词加不加引号行为一样，统一加可避免一类 bug）。
@@ -176,7 +177,9 @@ class ArxivPaperConnector(PaperSearchConnector):
                 rendered_groups.append(f"({terms})")
 
         if not rendered_groups:
-            return "all:*"
+            # 中文说明：一个可执行的概念组都没有 → 返回空串。调用方看到空串会
+            # 直接返回空列表、不发请求，而不是拿一个空查询去搜全库。
+            return ""
 
         # 中文说明：组间用 AND 连接（必须同时命中）。
         query = " AND ".join(rendered_groups)

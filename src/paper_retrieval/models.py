@@ -105,7 +105,7 @@ class SearchRequest:
       例如 [["large language model", "LLM"], ["kv cache", "key-value cache"]] 表示
       必须同时命中 LLM 相关 AND kv cache 相关。每个 connector 把它渲染成自己源的原生语法。
     - topic：用一句自然语言描述当前研究主题，不参与检索语法（布尔 API 不需要），
-      但会作为 embedding 重排的查询向量来源（Phase 3 启用）。
+      只作为 embedding 重排的查询向量来源。
 
     这样就把"模型怎么表达意图"与"每个源怎么执行检索"彻底隔离了。
     """

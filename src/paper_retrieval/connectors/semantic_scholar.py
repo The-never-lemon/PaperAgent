@@ -108,9 +108,14 @@ class SemanticScholarPaperConnector(PaperSearchConnector):
     def search(self, request: SearchRequest) -> list[PaperDocument]:
         """执行 Semantic Scholar 检索，并在 connector 内完成查询拼装。"""
 
+        # 中文说明：先拼参数。没有检索意图（概念组为空）就直接返回，
+        # 连下面那道 1 秒限速门都不用等。
+        params = self._params(request)
+        if params is None:
+            return []
         # 中文说明：强制 1 秒串行门（S2 官方建议 1 RPS）。
         self._enforce_sync_spacing()
-        response = self.client.get(self._endpoint, params=self._params(request))
+        response = self.client.get(self._endpoint, params=params)
         response.raise_for_status()
         return self._parse_payload(response.json(), request)
 
@@ -127,6 +132,11 @@ class SemanticScholarPaperConnector(PaperSearchConnector):
         本阶段只取第一页（bulk 默认返回 1000 条，对于 limit ≤ 15 的场景已经完全够用）。
         """
 
+        # 中文说明：先拼参数。没有检索意图（概念组为空）就直接返回，
+        # 连下面那道 1 秒限速门都不用等。
+        params = self._params(request)
+        if params is None:
+            return []
         # 中文说明：强制 1 秒串行门（S2 官方建议 1 RPS）。
         await self._enforce_async_spacing()
         resolved_client = client or httpx.AsyncClient(timeout=self._timeout_seconds)
@@ -134,7 +144,7 @@ class SemanticScholarPaperConnector(PaperSearchConnector):
         try:
             response = await resolved_client.get(
                 self._endpoint,
-                params=self._params(request),
+                params=params,
                 headers=self.headers,
                 timeout=self._timeout_seconds,
             )
@@ -144,8 +154,8 @@ class SemanticScholarPaperConnector(PaperSearchConnector):
         response.raise_for_status()
         return self._parse_payload(response.json(), request)
 
-    def _params(self, request: SearchRequest) -> dict[str, str | int]:
-        """构造 Semantic Scholar bulk 端点的请求参数，同步和异步入口共用。
+    def _params(self, request: SearchRequest) -> dict[str, str | int] | None:
+        """构造 Semantic Scholar bulk 端点的请求参数；没有检索意图时返回 None。
 
         中文说明：
         bulk 端点的关键参数：
@@ -156,10 +166,18 @@ class SemanticScholarPaperConnector(PaperSearchConnector):
           真正的相关度排序在 Phase 3 用客户端 embedding 重排补。
         - year：服务端下推年份过滤（连字符区间，如 2020-2024）。
         - limit：bulk 端点会完全忽略这个参数（实测传 limit=5 仍返回 1000 条），所以不发送。
+
+        返回 None 表示"这次没有可执行的检索意图"（概念组为空）。bulk 端点收到空 query
+        不会报错，但返回的是一批与主题无关的论文，所以必须提前拦住。
         """
 
+        # 中文说明：先渲染查询串。渲染不出东西就直接返回 None，让调用方跳过本次请求。
+        query = self._render_concept_groups(request)
+        if not query:
+            return None
+
         params: dict[str, str | int] = {
-            "query": self._render_concept_groups(request),
+            "query": query,
             "fields": self._fields,
             "sort": "citationCount:desc",
         }
@@ -326,15 +344,6 @@ class SemanticScholarPaperConnector(PaperSearchConnector):
         """
 
         groups = request.concept_groups
-        if not groups:
-            # 中文说明：没有概念组时用 topic 兜底（当作单概念组的单同义词）。
-            topic = request.topic.strip()
-            if topic:
-                # 中文说明：topic 是自然语言，整串当短语处理。
-                if " " in topic:
-                    return f'"{topic}"'
-                return topic
-            return ""
 
         rendered_groups: list[str] = []
         for group in groups:

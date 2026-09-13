@@ -33,7 +33,7 @@
       "provider": "dashscope",
       "model_name": "qwen3.7-text-embedding",
       "dimensions": null,
-      "batch_size": 32
+      "batch_size": 16
     }
   }
 }

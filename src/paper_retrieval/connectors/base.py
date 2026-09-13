@@ -43,7 +43,13 @@ class PaperSearchConnector(PaperMetadataNormalizer, ABC):
 
     @abstractmethod
     def search(self, request: SearchRequest) -> list[PaperDocument]:
-        """执行单源检索并返回统一论文模型列表。"""
+        """执行单源检索并返回统一论文模型列表。
+
+        中文注释（契约）：如果这次请求渲染不出任何可执行的查询（最典型的是
+        `concept_groups` 为空），实现方必须**直接返回空列表、不发网络请求**，
+        而不是拿 topic 之类的内容拼一个兜底查询去搜。
+        检索意图由上层用明确的概念组表达，没有概念组就等于没有检索意图。
+        """
 
         raise NotImplementedError
 

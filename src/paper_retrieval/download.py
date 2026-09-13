@@ -209,33 +209,25 @@ def _find_fulltext_url(paper: PaperDocument) -> str | None:
     这里特意不再把 paper.url 当兜底。paper.url 只是论文的"介绍网页"
     （比如 OpenAlex / Semantic Scholar 的详情页），网页内容不是论文正文；
     以前把它当全文地址，导致精读流程把落地页 HTML 当成论文去读。
-    pdf_url 和 metadata 里的开放获取 PDF 链接是数据源自己标记的、可以免费下载
-    的正文直链，只有这些才值得尝试。一个都找不到时返回 None，
-    由调用方给出"无全文链接"的状态，上层会自动降级为摘要精读。
+    pdf_url 是数据源自己标记的、可以免费下载的正文直链，只有它才值得尝试。
+    没有它时返回 None，由调用方给出"无全文链接"的状态，上层会自动降级为摘要精读。
     """
 
     arxiv_url = _arxiv_pdf_url(paper)
     if arxiv_url:
         return arxiv_url
 
-    candidates: list[Any] = [paper.pdf_url]
-    metadata = paper.metadata or {}
-    candidates.extend([metadata.get("open_access_pdf"), metadata.get("openAccessPdf"), metadata.get("pdf_url")])
-    for value in candidates:
-        if isinstance(value, dict):
-            value = value.get("url")
-        text = str(value).strip() if value is not None else ""
-        if not text:
-            continue
-        if _is_doi_link(text):
-            # 中文注释：把跳过的地址记进日志，排查"为什么这篇没下载全文"时能一眼看到原因。
-            logger.debug(
-                "跳过 DOI 落地页，不作为全文下载地址",
-                extra={"paper_id": _paper_cache_name(paper), "url": text},
-            )
-            continue
-        return text
-    return None
+    pdf_url = str(paper.pdf_url or "").strip()
+    if not pdf_url:
+        return None
+    if _is_doi_link(pdf_url):
+        # 中文注释：把跳过的地址记进日志，排查"为什么这篇没下载全文"时能一眼看到原因。
+        logger.debug(
+            "跳过 DOI 落地页，不作为全文下载地址",
+            extra={"paper_id": _paper_cache_name(paper), "url": pdf_url},
+        )
+        return None
+    return pdf_url
 
 
 def _download_failed(reason: str, source_url: str | None = None) -> DownloadedPaper:
