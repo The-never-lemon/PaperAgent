@@ -18,6 +18,11 @@ function isCardKind(value: string): value is ChatCardKind {
   return (CARD_KINDS as readonly string[]).includes(value);
 }
 
+/** 用户气泡的稳定 id：乐观插入、SSE 回放、hydrate 必须用同一个，Vue 才不会拆掉重挂。 */
+export function stableUserMessageId(turnId: string | null | undefined): string {
+  return `user:${turnId || "none"}`;
+}
+
 function createMessage(partial: Partial<UISessionMessage>): UISessionMessage {
   return {
     id: partial.id ?? createRandomId("message"),
@@ -72,6 +77,9 @@ export class SessionStreamAggregator {
   private status = "created";
   private activeAssistantId: string | null = null;
   private activeNodeKey: string | null = null;
+  // 中文注释：已经应用过的最大 stream_seq。SSE 重连会把内存里的历史再推一遍，
+  // 靠它跳过旧事件，避免正文被拼两遍、整页跟着刷一次。
+  private lastStreamSeq = 0;
   // 中文注释：重放历史事件时先不要每条都把整棵执行树加一遍 token，
   // 等全部事件走完再加一次。打开很长的旧会话时能少做很多重复计算。
   private skipTokenTotals = false;
@@ -89,6 +97,7 @@ export class SessionStreamAggregator {
     this.status = thread.status;
     this.activeAssistantId = null;
     this.activeNodeKey = null;
+    this.lastStreamSeq = 0;
 
     if (thread.events.length > 0) {
       this.skipTokenTotals = true;
@@ -136,6 +145,7 @@ export class SessionStreamAggregator {
   addOptimisticUserMessage(content: string, turnId: string) {
     this.messages.push(
       createMessage({
+        id: stableUserMessageId(turnId),
         role: "user",
         content,
         turnId,
@@ -146,30 +156,35 @@ export class SessionStreamAggregator {
     this.status = "running";
   }
 
-  /** 应用一条运行事件，并把它折叠成前端可直接渲染的快照。 */
-  apply(event: SessionRuntimeEvent) {
+  /**
+   * 应用一条运行事件。
+   * 返回 false 表示这条事件没有造成可见变化（已应用过的重放、重复的用户回声），
+   * 调用方就不该整页刷快照。
+   */
+  apply(event: SessionRuntimeEvent): boolean {
+    if (this.shouldSkipDuplicateSeq(event)) {
+      return false;
+    }
     switch (event.event) {
       case "runtime_event":
-        this.applyRuntimeEvent(event);
-        return;
+        return this.applyRuntimeEvent(event);
       case "message":
-        this.applyMessageEvent(event);
-        return;
+        return this.applyMessageEvent(event);
       case "delta":
         this.ensureActiveAssistant(event).content += event.content ?? event.delta ?? "";
         this.ensureAssistantStreaming(event);
-        return;
+        return true;
       case "reasoning_delta":
         this.ensureActiveAssistant(event).reasoning += event.content ?? event.delta ?? "";
         this.ensureActiveAssistant(event).reasoningStreaming = true;
         this.ensureAssistantStreaming(event);
-        return;
+        return true;
       case "reasoning_end":
         this.ensureActiveAssistant(event).reasoningStreaming = false;
-        return;
+        return true;
       case "artifact":
         this.applyArtifactEvent(event);
-        return;
+        return true;
       case "status":
         this.status = event.status ?? this.status;
         if ("run_started_at" in event) {
@@ -182,11 +197,12 @@ export class SessionStreamAggregator {
           this.stopActiveAssistantStreaming();
           this.activeNodeKey = null;
         }
-        return;
+        return true;
       case "error":
         this.streamError = event;
         this.messages.push(
           createMessage({
+            id: this.messageIdFromEvent(event, "error"),
             role: "system",
             kind: "error",
             content: event.message ?? event.content ?? "运行失败",
@@ -198,7 +214,7 @@ export class SessionStreamAggregator {
         this.isStreaming = false;
         this.activeNodeKey = null;
         this.stopActiveAssistantStreaming();
-        return;
+        return true;
       case "turn_end":
         this.status = event.status ?? this.status;
         if (event.status === "cancelled") {
@@ -209,10 +225,23 @@ export class SessionStreamAggregator {
         this.isStreaming = false;
         this.activeNodeKey = null;
         this.stopActiveAssistantStreaming();
-        return;
+        return true;
       default:
-        return;
+        return false;
     }
+  }
+
+  /** 已经应用过的 stream_seq 再来一次就丢掉，避免 SSE 重连把历史再吃一遍。 */
+  private shouldSkipDuplicateSeq(event: SessionRuntimeEvent): boolean {
+    const seq = event.stream_seq;
+    if (typeof seq !== "number" || !Number.isFinite(seq) || seq <= 0) {
+      return false;
+    }
+    if (seq <= this.lastStreamSeq) {
+      return true;
+    }
+    this.lastStreamSeq = seq;
+    return false;
   }
 
   /** 返回当前时间线快照。只浅拷贝顶层数组，不再把执行树整棵复制一遍。 */
@@ -257,7 +286,7 @@ export class SessionStreamAggregator {
   }
 
   /** 处理普通 message 事件，包括用户消息、助手消息、对话卡片和旧版 progress 卡片。 */
-  private applyMessageEvent(event: SessionRuntimeEvent) {
+  private applyMessageEvent(event: SessionRuntimeEvent): boolean {
     const kind = event.kind ?? "message";
     const role = event.role ?? "assistant";
     const metadata = (event.metadata ?? {}) as Record<string, unknown>;
@@ -270,6 +299,7 @@ export class SessionStreamAggregator {
     if (isCardKind(contentKind)) {
       this.messages.push(
         createMessage({
+          id: this.messageIdFromEvent(event, contentKind),
           role: "system",
           kind: contentKind,
           content: event.content ?? "",
@@ -280,12 +310,13 @@ export class SessionStreamAggregator {
       );
       this.isStreaming = true;
       this.status = "running";
-      return;
+      return true;
     }
 
     if (kind === "progress" || kind === "tool" || kind === "tool_hint") {
       this.messages.push(
         createMessage({
+          id: this.messageIdFromEvent(event, kind),
           role: "system",
           kind,
           content: event.content ?? "",
@@ -295,28 +326,37 @@ export class SessionStreamAggregator {
       );
       this.isStreaming = true;
       this.status = "running";
-      return;
+      return true;
     }
 
     if (role === "user") {
+      const turnId = event.turn_id ?? null;
       const existing = this.messages.find(
         (message) =>
           message.role === "user"
-          && message.turnId === (event.turn_id ?? null)
-          && message.content === (event.content ?? ""),
+          && (message.id === stableUserMessageId(turnId)
+            || (message.turnId === turnId && message.content === (event.content ?? ""))),
       );
-      if (!existing) {
-        this.messages.push(
-          createMessage({
-            role: "user",
-            content: event.content ?? "",
-            media: event.media ?? [],
-            turnId: event.turn_id ?? null,
-            createdAt: event.timestamp ?? new Date().toISOString(),
-          }),
-        );
+      if (existing) {
+        // 中文注释：提交时已经乐观插入过这条用户消息。后端回放只是确认，
+        // 不要换 id、也不要通知界面整段重绘。
+        existing.createdAt = event.timestamp ?? existing.createdAt;
+        if (event.media?.length) {
+          existing.media = event.media;
+        }
+        return false;
       }
-      return;
+      this.messages.push(
+        createMessage({
+          id: stableUserMessageId(turnId),
+          role: "user",
+          content: event.content ?? "",
+          media: event.media ?? [],
+          turnId,
+          createdAt: event.timestamp ?? new Date().toISOString(),
+        }),
+      );
+      return true;
     }
 
     const assistant = this.ensureActiveAssistant(event);
@@ -335,13 +375,14 @@ export class SessionStreamAggregator {
       assistant.isStreaming = false;
       this.activeAssistantId = null;
     }
+    return true;
   }
 
   /** 按 runtime_event.id 更新执行过程；同一个 id 永远只显示一个事件。 */
-  private applyRuntimeEvent(event: SessionRuntimeEvent) {
+  private applyRuntimeEvent(event: SessionRuntimeEvent): boolean {
     const eventId = String(event.id ?? "").trim();
     if (!eventId) {
-      return;
+      return false;
     }
 
     const item = this.ensureRuntimeEvent(eventId);
@@ -364,20 +405,21 @@ export class SessionStreamAggregator {
       this.isStreaming = false;
       this.activeNodeKey = null;
       this.stopActiveAssistantStreaming();
-      return;
+      return true;
     }
 
     if (item.status === "running") {
       this.status = "running";
       this.isStreaming = true;
       this.activeNodeKey = this.nodeKeyFromRuntimeEvent(item);
-      return;
+      return true;
     }
 
     if (item.status === "completed") {
       // 中文注释：某个事件完成不代表整个工作流完成，所以这里只更新事件本身，最终状态仍等 turn_end。
       this.status = this.status === "created" ? "running" : this.status;
     }
+    return true;
   }
 
   /** 找到或创建一个执行事件，子事件先到时也能先占位。 */
@@ -409,7 +451,8 @@ export class SessionStreamAggregator {
     item.createdAt = event.created_at ?? event.timestamp ?? item.createdAt;
     item.updatedAt = event.updated_at ?? event.timestamp ?? item.updatedAt;
     item.completedAt = event.completed_at ?? (FINISHED_STATUSES.has(item.status) ? item.updatedAt : item.completedAt);
-    item.isCollapsed = item.status === "completed";
+    // 中文注释：折叠状态交给 RuntimeEventTree 自己记。这里如果按 completed 强行改，
+    // 每个工具一结束父节点就会合上再打开，整条执行链看起来像被强制刷新。
     item.completed = typeof metadata.completed === "number" ? metadata.completed : item.completed;
     item.total = typeof metadata.total === "number" ? metadata.total : item.total;
     if (typeof event.input_tokens === "number") {
@@ -531,6 +574,7 @@ export class SessionStreamAggregator {
       return existing;
     }
     const message = createMessage({
+      id: this.messageIdFromEvent(event, "assistant"),
       role: "assistant",
       isStreaming: true,
       turnId: event.turn_id ?? null,
@@ -539,6 +583,15 @@ export class SessionStreamAggregator {
     this.messages.push(message);
     this.activeAssistantId = message.id;
     return message;
+  }
+
+  /** 消息在实时流和 hydrate 回放里必须拿到同一个 id，否则 Vue 会按新 key 拆掉旧气泡。 */
+  private messageIdFromEvent(event: SessionRuntimeEvent, kind: string): string {
+    const turnId = event.turn_id || "none";
+    const seq = typeof event.stream_seq === "number" && event.stream_seq > 0
+      ? event.stream_seq
+      : event.event_id || "pending";
+    return `msg:${turnId}:${kind}:${seq}`;
   }
 
   /** 把当前 assistant 标记成正在流式输出。 */

@@ -29,6 +29,8 @@ const props = defineProps<{
 const expanded = ref(Boolean(props.active));
 
 // 运行状态变化时同步展开/收起：开始执行自动展开，结束后自动收起留一行摘要。
+// 中文注释：下面用 v-show 而不是 v-if，收起时不把事件树拆掉，下次展开或
+// 新工具卡片进来时动画和折叠状态都还在。
 watch(
   () => props.active,
   (value) => {
@@ -52,7 +54,7 @@ const summaryText = computed(() => {
         <span>{{ summaryText }}</span>
         <span class="tool-trace-chevron" :class="{ expanded: expanded }">▾</span>
       </button>
-      <div v-if="expanded" class="tool-trace-body">
+      <div v-show="expanded" class="tool-trace-body">
         <RuntimeEventTree :events="events" :on-resume="onResume" />
       </div>
     </section>

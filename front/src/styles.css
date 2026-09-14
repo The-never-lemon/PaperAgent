@@ -171,6 +171,16 @@ a {
   padding-inline: 12px;
 }
 
+/* 中文说明：收起后顶栏如果还是「logo 左、折叠按钮右」，整行会比下面的
+   会话图标更宽，logo 就会被挤出那一列。改成竖排居中，和会话气泡对齐。 */
+.sidebar[data-collapsed="true"] .sidebar-head {
+  flex-direction: column;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 4px;
+  padding-inline: 0;
+}
+
 .sidebar-head,
 .provider-header-row,
 .editor-head,
@@ -1487,6 +1497,10 @@ a {
   cursor: default;
 }
 
+.runtime-event-branch[data-leaf] > .runtime-event-row .runtime-event-toggle {
+  visibility: hidden;
+}
+
 .runtime-event-toggle,
 .runtime-event-dot {
   display: inline-flex;
@@ -2010,6 +2024,14 @@ a {
   padding: 0 4px 16px;
 }
 
+.sidebar[data-collapsed="true"] .sidebar-head {
+  flex-direction: column;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 4px;
+  padding: 0 0 12px;
+}
+
 .brand-lockup {
   gap: 9px;
 }
@@ -2019,6 +2041,12 @@ a {
 .brand-mark {
   width: 30px;
   height: 30px;
+}
+
+/* 中文说明：收起后 logo 改成和会话气泡一样的 38px，左右边缘才能落在同一列。 */
+.sidebar[data-collapsed="true"] .brand-mark {
+  width: 38px;
+  height: 38px;
 }
 
 .brand-copy {
@@ -4780,12 +4808,48 @@ a {
   white-space: pre-wrap;
 }
 
-.drawer-section ul {
+.drawer-section + .drawer-section {
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--line-2);
+}
+
+.drawer-section ul,
+.drawer-section ol {
   margin: 0;
-  padding-left: 18px;
+  padding-left: 22px;
   font-size: var(--fs-read);
   line-height: 1.78;
   color: var(--ink-1);
+}
+
+.drawer-section li + li {
+  margin-top: 0.4em;
+}
+
+.drawer-setup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.drawer-setup-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: var(--sp-3);
+  border-radius: var(--r-box);
+  background: var(--paper-2);
+  border: 1px solid var(--line-2);
+}
+
+.drawer-setup-item strong {
+  font-size: var(--fs-meta);
+  font-weight: 700;
+  color: var(--ink-2);
+}
+
+.drawer-setup-item p {
+  margin: 0;
 }
 
 /* 中文说明：评分区整块凹下去（比页底更深），和白色的报告正文分开，

@@ -70,6 +70,21 @@ function reportUrl(sessionKey: string, paperId: string) {
   if (!sessionKey || !paperId) return "";
   return `/api/sessions/${encodeURIComponent(sessionKey)}/workspace/papers/${encodeURIComponent(paperId)}/report.md`;
 }
+
+/** 实验设置按行拆成「标签 + 正文」，旧报告没有标签时仍按句成段。 */
+function setupItems(text: string): { label: string; body: string }[] {
+  return text
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const match = line.match(/^(.{2,8})[：:](.*)$/);
+      if (match && match[2].trim()) {
+        return { label: match[1].trim(), body: match[2].trim() };
+      }
+      return { label: "", body: line };
+    });
+}
 </script>
 
 <template>
@@ -114,7 +129,7 @@ function reportUrl(sessionKey: string, paperId: string) {
           </section>
           <section v-if="report.methods.length" class="drawer-section">
             <h4>方法</h4>
-            <ul><li v-for="(item, index) in report.methods" :key="index"><MathText :text="item" /></li></ul>
+            <ol><li v-for="(item, index) in report.methods" :key="index"><MathText :text="item" /></li></ol>
           </section>
           <section v-if="report.datasets.length" class="drawer-section">
             <h4>数据集</h4>
@@ -122,15 +137,24 @@ function reportUrl(sessionKey: string, paperId: string) {
           </section>
           <section v-if="report.contributions.length" class="drawer-section">
             <h4>贡献</h4>
-            <ul><li v-for="(item, index) in report.contributions" :key="index"><MathText :text="item" /></li></ul>
+            <ol><li v-for="(item, index) in report.contributions" :key="index"><MathText :text="item" /></li></ol>
           </section>
           <section v-if="report.main_results.length" class="drawer-section">
             <h4>主要结果</h4>
-            <ul><li v-for="(item, index) in report.main_results" :key="index"><MathText :text="item" /></li></ul>
+            <ol><li v-for="(item, index) in report.main_results" :key="index"><MathText :text="item" /></li></ol>
           </section>
           <section v-if="report.experimental_setup" class="drawer-section">
             <h4>实验设置</h4>
-            <p><MathText :text="report.experimental_setup" /></p>
+            <div class="drawer-setup">
+              <div
+                v-for="(item, index) in setupItems(report.experimental_setup)"
+                :key="index"
+                class="drawer-setup-item"
+              >
+                <strong v-if="item.label">{{ item.label }}</strong>
+                <p><MathText :text="item.body" /></p>
+              </div>
+            </div>
           </section>
           <section v-if="report.conclusions" class="drawer-section">
             <h4>结论</h4>

@@ -9,7 +9,7 @@
  * 3. 每个对话回合下面挂一个可折叠的"执行过程"（工具调用运行事件树）；
  * 4. 右侧抽屉展示完整精读报告，底部追问框把问题发回对话流。
  *
- * run 生命周期（提交 → runs → SSE → 聚合 → turn_end 收尾 → 刷新恢复）与
+ * run 生命周期（提交 → runs → SSE → 聚合 → turn_end 收尾）与
  * 取消/竞态保护完全复用原工作台的成熟模式，聚合逻辑在 SessionStreamAggregator。
  * props/emits 契约与原 SessionWorkspaceView 保持一致，App.vue 无需改动。
  */
@@ -184,6 +184,13 @@ const libraryPanelRef = ref<InstanceType<typeof PaperLibraryPanel> | null>(null)
 const aggregator = new SessionStreamAggregator();
 
 const selectedSummary = computed(() => props.sessions.find((session) => session.key === selectedSessionKey.value));
+
+watch(selectedSummary, (summary) => {
+  if (summary?.title) {
+    selectedTitle.value = summary.title;
+  }
+});
+
 const currentStatus = computed(() => timelineSnapshot.value?.status ?? selectedSummary.value?.status ?? "created");
 const isRunning = computed(() => timelineSnapshot.value?.isStreaming ?? false);
 const hasMessages = computed(() => (timelineSnapshot.value?.messages.length ?? 0) > 0);
@@ -429,10 +436,15 @@ async function refreshWorkspacePapers() {
   }
   try {
     const snapshot = await fetchWorkspace(selectedSessionKey.value);
-    readablePaperIds.value = new Set(
-      snapshot.papers.filter((paper) => paper.has_report).map((paper) => paper.paper_id),
-    );
-    workspacePaperIds.value = new Set(snapshot.papers.map((paper) => paper.paper_id));
+    const nextReadable = snapshot.papers.filter((paper) => paper.has_report).map((paper) => paper.paper_id);
+    const nextIds = snapshot.papers.map((paper) => paper.paper_id);
+    // 中文注释：Set 引用变了会让所有助手气泡重解析 Markdown。成员没变时复用旧集合。
+    if (!sameStringSet(readablePaperIds.value, nextReadable)) {
+      readablePaperIds.value = new Set(nextReadable);
+    }
+    if (!sameStringSet(workspacePaperIds.value, nextIds)) {
+      workspacePaperIds.value = new Set(nextIds);
+    }
     // 中文注释：同时按编号存一份论文明细，点引用但还没精读时用它弹出论文信息卡片。
     workspacePapers.value = new Map(snapshot.papers.map((paper) => [paper.paper_id, paper]));
   } catch {
@@ -589,10 +601,14 @@ function openStream(sessionKey: string, streamUrl: string) {
       sending.value = false;
     },
     onEvent: async (event) => {
-      aggregator.apply(event);
+      const changed = aggregator.apply(event);
       // 中文说明：不在这里直接渲染，而是排到本帧末尾统一渲染一次，
       // 把密集的流式事件合并掉（详见 scheduleSnapshot 的注释）。
-      scheduleSnapshot();
+      // 已经应用过的 SSE 重放、重复的用户回声返回 false，这时不要动快照，
+      // 否则气泡和工具卡片会跟着整段重绘，动画被掐断。
+      if (changed) {
+        scheduleSnapshot();
+      }
       // 中文注释：检索工具一执行完就会推一条 kind=paper_list 的消息，这时论文已经写进工作区。
       // 顺手让左侧论文面板重拉一次，用户不用刷新页面就能看到刚检索到的论文。
       const cardKind = typeof event.metadata?.kind === "string" ? event.metadata.kind : "";
@@ -604,13 +620,18 @@ function openStream(sessionKey: string, streamUrl: string) {
         await handleRunFinished(sessionKey, event);
       }
     },
-    onError: async () => {
+    onError: async (event) => {
       if (manualClose.value) {
         return;
       }
-      // 中文注释：断线后指数退避重连。每次 onError 都会触发，但浏览器 EventSource
-      // 自己也会尝试重连（默认 3s）。这里在浏览器重连失败后再做指数退避，
-      // 避免和浏览器自己的重连机制打架。
+      const source = event.target as EventSource | null;
+      // 中文注释：浏览器 EventSource 断线后会把 readyState 设成 CONNECTING 并自己重连。
+      // 这时千万不要关掉连接、也不要整段 hydrate：工具执行中的静默心跳或代理闪断
+      // 都会走到这里，整页重挂看起来就像「每次调用工具都强制刷新」。
+      if (source && source.readyState !== EventSource.CLOSED) {
+        return;
+      }
+      // 中文注释：连接已经被关掉（不是浏览器正在重连）才走下面的退避。
       if (reconnectAttempts.value >= MAX_RECONNECT_ATTEMPTS) {
         closeStream(true);
         sending.value = false;
@@ -678,13 +699,17 @@ async function cancelActiveRun() {
   }
 }
 
-/** run 结束：刷新线程与工作区，让落库后的消息、卡片和产物状态同步到界面。 */
+/** run 结束：工作区和侧栏会话列表可能已经变了，把它们同步过来。
+
+    中文注释：对话流本身已经由 SSE 事件聚合完毕，这里不再整段 hydrate。
+    以前每次 turn_end 都重新拉线程，消息会被换上新的随机 id，Vue 把气泡和
+    工具卡片全部拆掉重挂，结束瞬间会闪一下。 */
 async function handleRunFinished(sessionKey: string, event: SessionRuntimeEvent) {
   closeStream(true);
   sending.value = false;
   cancelling.value = false;
   activeRunId.value = null;
-  await reloadCurrentThread();
+  syncSnapshot();
   await refreshWorkspacePapers();
   // 中文注释：一轮跑完后工作区可能已经变了（新检索到论文、评价出分、精读完成），
   // 让左侧论文面板也跟着刷新一次，否则用户要手动刷新页面才能看到最新状态。
@@ -846,6 +871,13 @@ function requestDeepReadFromDialog(paperId: string) {
 function closePaperDialog() {
   paperDialogVisible.value = false;
   dialogPaper.value = null;
+}
+
+function sameStringSet(current: Set<string>, next: readonly string[]) {
+  if (current.size !== next.length) {
+    return false;
+  }
+  return next.every((value) => current.has(value));
 }
 
 function statusTone(status: string) {

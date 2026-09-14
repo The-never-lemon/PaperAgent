@@ -113,25 +113,56 @@ function formatTime(value: string | null) {
   }).format(new Date(value));
 }
 
-/** 中文注释：detailContent 可以是字符串，也可以是对象；对象格式化后更方便用户展开查看。 */
-function formatDetailContent(value: UIRuntimeTimelineEvent["detailContent"]) {
-  if (!value) {
-    return "";
-  }
-  if (typeof value === "string") {
+/**
+ * 中文注释：旧事件把参数收成 { arguments_summary: "{\"title\": ...}" }。
+ * 展开后按真实参数对象展示，避免用户看到套娃转义 JSON。
+ */
+function unwrapDetailContent(value: UIRuntimeTimelineEvent["detailContent"]) {
+  if (!value || typeof value === "string") {
     return value;
   }
-  return JSON.stringify(value, null, 2);
+  const keys = Object.keys(value);
+  if (keys.length !== 1 || keys[0] !== "arguments_summary") {
+    return value;
+  }
+  const raw = value.arguments_summary;
+  if (raw && typeof raw === "object") {
+    return raw as Record<string, unknown>;
+  }
+  if (typeof raw === "string") {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      return raw;
+    }
+  }
+  return value;
+}
+
+/** 中文注释：detailContent 可以是字符串，也可以是对象；对象格式化后更方便用户展开查看。 */
+function formatDetailContent(value: UIRuntimeTimelineEvent["detailContent"]) {
+  const unwrapped = unwrapDetailContent(value);
+  if (!unwrapped) {
+    return "";
+  }
+  if (typeof unwrapped === "string") {
+    return unwrapped;
+  }
+  return JSON.stringify(unwrapped, null, 2);
 }
 
 function hasDetail(event: UIRuntimeTimelineEvent) {
-  if (!event.detailContent) {
+  const unwrapped = unwrapDetailContent(event.detailContent);
+  if (!unwrapped) {
     return false;
   }
-  if (typeof event.detailContent === "string") {
-    return Boolean(event.detailContent.trim());
+  if (typeof unwrapped === "string") {
+    return Boolean(unwrapped.trim());
   }
-  return Object.keys(event.detailContent).length > 0;
+  return Object.keys(unwrapped).length > 0;
 }
 </script>
 

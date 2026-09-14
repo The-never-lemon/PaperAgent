@@ -64,6 +64,8 @@ FORMULA_OCR_SYSTEM_PROMPT = """
 5. 不要把公式外的英文单词、图注文字一起转写进来；只转写公式本身。
 6. 不要自己加 $ 或 $$ 定界符。
 7. 如果某张图片里认不出公式，把它的 latex 写成空字符串，不要猜。
+8. 多字母下标写成 _{\text{model}}，不要写成 _{model}；min / max / log 写成 \\min \\max \\log，不要写成斜体的 min。
+9. 印刷体里连在一起的英文单词（如 lrate）不要拆成 l_{rate}。
 """.strip()
 
 

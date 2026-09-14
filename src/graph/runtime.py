@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import asyncio
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Protocol
 
@@ -525,10 +526,11 @@ class WorkflowNodeReporter:
             "event_key": event_key or self.node_key,
         }
         for key, value in extra.items():
-            # 中文注释：stage 已经单独放过；其他字段原样放进 metadata，方便前端展示详情或恢复按钮使用。
+            # 中文注释：stage 已经单独放过；arguments 会展开成 detail_content 给界面看，
+            # 不必再原样塞进 metadata。其他字段仍留给评测和恢复按钮使用。
             if key == "stage":
                 continue
-            if key in {"event_key", "stage_title"}:
+            if key in {"event_key", "stage_title", "arguments"}:
                 continue
             metadata[key] = copy.deepcopy(value)
         return metadata
@@ -580,15 +582,54 @@ def _humanize_stage(stage: str) -> str:
     return stage.replace("_", " ").strip() or "执行步骤"
 
 
+# 中文注释：这些字段要么已经显示在卡片标题/用量栏，要么是给日志用的内部键，
+# 不应再作为「查看详情」里的 JSON 内容摊出来。
+_DETAIL_SKIP_KEYS = {
+    "stage",
+    "event_key",
+    "stage_title",
+    "show_content",
+    "arguments",
+    "arguments_summary",
+    "input_tokens",
+    "output_tokens",
+    "runtime_status",
+}
+
+
+def _arguments_object_from_extra(extra: JsonObject) -> JsonObject | None:
+    """把工具参数还原成对象，供运行卡片详情直接展示。
+
+    优先用 arguments 字典；没有的话再解析旧的 arguments_summary JSON 字符串，
+    这样历史事件和新上报都能得到 `{ "title": "...", "topic": "..." }` 这种形态。
+    """
+
+    raw_arguments = extra.get("arguments")
+    if isinstance(raw_arguments, dict):
+        return copy.deepcopy(raw_arguments)
+
+    summary = extra.get("arguments_summary")
+    if isinstance(summary, dict):
+        return copy.deepcopy(summary)
+    if not isinstance(summary, str) or not summary.strip():
+        return None
+    try:
+        parsed = json.loads(summary)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def _detail_content_from_extra(extra: JsonObject) -> JsonObject | None:
     """从节点上报的额外字段里提取详情内容。"""
 
+    arguments = _arguments_object_from_extra(extra)
+    if arguments:
+        return arguments
+
     detail: JsonObject = {}
     for key, value in extra.items():
-        # 中文注释：stage 只是分类字段，标题里已经能看出来；详情里重复展示会显得啰嗦。
-        if key == "stage":
-            continue
-        if key in {"event_key", "stage_title"}:
+        if key in _DETAIL_SKIP_KEYS:
             continue
         detail[key] = copy.deepcopy(value)
     return detail or None

@@ -80,7 +80,52 @@ export function splitMathText(source: string): MathPart[] {
 const LATEX_COMMAND_PATTERN = /\\[A-Za-z]|\\\\/;
 
 /**
- * 把「伪公式」里的空白换成 KaTeX 能看见的空格。
+ * 多字母函数名。写成 min( 而不是 \min( 时，KaTeX 会把 m、i、n 当成三个斜体变量
+ * 乘在一起，截图里那种「斜体 min」就是这么来的。按从长到短排，避免 cos 抢在 arccos 前面。
+ */
+const MATH_FUNCTION_NAMES = [
+  "arcsin",
+  "arccos",
+  "arctan",
+  "sinh",
+  "cosh",
+  "tanh",
+  "min",
+  "max",
+  "log",
+  "exp",
+  "sin",
+  "cos",
+  "tan",
+  "lim",
+  "inf",
+  "sup",
+  "arg",
+  "det",
+  "ker",
+  "dim",
+];
+
+const MATH_FUNCTION_PATTERN = new RegExp(
+  `(?<![A-Za-z\\\\])(${MATH_FUNCTION_NAMES.join("|")})\\s*\\(`,
+  "g",
+);
+
+/**
+ * 没有花括号的多字母下标：d_model、step_num。
+ * 单字母下标（R_d、x_i）故意不匹配——那是真的数学下标。
+ */
+const SNAKE_SUBSCRIPT_PATTERN = /(?<![\\A-Za-z0-9])([A-Za-z][A-Za-z0-9]*)_([A-Za-z][A-Za-z0-9]+)(?![A-Za-z0-9{])/g;
+
+/**
+ * 已经有花括号、但是里面是一整段英文单词的下标：_{model}、_{rate}。
+ * 不配 \text / \mathrm 这类命令，也不配 _{i} 这种单字母。
+ */
+const BRACED_WORD_SUBSCRIPT_PATTERN = /_\{([A-Za-z][A-Za-z0-9\-]{1,})\}/g;
+
+/**
+ * 把「伪公式」里的空白换成 KaTeX 能看见的空格，并把报告里常见的
+ * min( / d_model / _{model} 整理成 KaTeX 能排清楚的写法。
  *
  * 中文说明：
  * 数学模式不认空格，`$MOM nM = X Pastn*21 days R_d$` 会被排成
@@ -94,15 +139,39 @@ const LATEX_COMMAND_PATTERN = /\\[A-Za-z]|\\\\/;
  * 短符号（$R_d$、$x1$）本来就没有空白，换了等于没换，下标上标照常生效，所以这条补救
  * 伤不到它们。
  *
- * 反过来，**源码里只要有反斜杠命令就一个字都不动**：真 LaTeX 自己管间距，硬塞显式
+ * 反过来，**源码里只要有反斜杠命令就不要再改空格**：真 LaTeX 自己管间距，硬塞显式
  * 空格只会让它变松散（`\mathcal{L} = \lambda_1 \mathcal{L}_1` 会排成 `L  =  λ₁ L₁`）。
+ *
+ * 但「有反斜杠」不等于「下标已经写对了」。模型经常写出
+ * `$l_{rate}=d_{model}^{-0.5}\cdot min(step_{num}^{-0.5})$` 这种半成品：
+ * `\cdot` 是真命令，`min` 和 `_{model}` 却还是斜体变量。所以标识符整理必须在
+ * 「要不要改空格」之前做，真假公式都走一遍。
  */
 export function normalizeMathSource(source: string): string {
-  if (LATEX_COMMAND_PATTERN.test(source)) {
-    return source;
+  const tex = protectMathIdentifiers(source);
+  if (LATEX_COMMAND_PATTERN.test(tex)) {
+    return tex;
   }
   // 连续空白合成一个显式空格：多个空格和换行在数学模式里本来也只算一个分隔。
-  return source.replace(/[ \t\r\n]+/g, "\\ ");
+  return tex.replace(/[ \t\r\n]+/g, "\\ ");
+}
+
+/**
+ * 把报告里常见的半成品标识符收成 KaTeX 能读的形式。
+ *
+ * 中文说明：
+ * 1. min( → \min(，否则三个斜体字母乘在一起；
+ * 2. d_model → d_{\text{model}}，否则只有 m 是下标、odel 落在外面；
+ * 3. _{model} → _{\text{model}}，否则下标里的单词被当成一串斜体变量。
+ */
+function protectMathIdentifiers(source: string): string {
+  MATH_FUNCTION_PATTERN.lastIndex = 0;
+  SNAKE_SUBSCRIPT_PATTERN.lastIndex = 0;
+  BRACED_WORD_SUBSCRIPT_PATTERN.lastIndex = 0;
+  let tex = source.replace(MATH_FUNCTION_PATTERN, "\\$1(");
+  tex = tex.replace(SNAKE_SUBSCRIPT_PATTERN, "$1_{\\text{$2}}");
+  tex = tex.replace(BRACED_WORD_SUBSCRIPT_PATTERN, "_{\\text{$1}}");
+  return tex;
 }
 
 /**

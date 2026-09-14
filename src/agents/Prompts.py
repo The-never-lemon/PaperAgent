@@ -440,12 +440,16 @@ DEEP_READ_REDUCE_SYSTEM_PROMPT = """
 - 所有数组字段如果没有依据，必须返回空数组 []，不得填入推测内容。
 - short_summary 用一段话总结论文核心。
 - 笔记里没有的信息，对应字段留空字符串或空数组，不得编造。
+- 笔记里的出处编号（[paperId:p0001:s0003] 这种）是内部定位，任何字段都不要抄进去。
+- experimental_setup 必须依次写出「数据集：」「评价指标：」「骨干与超参：」「训练细节：」，缺的整段跳过；不要糊成一段不分的话。
 
 输出前自检：
 1. 是否只输出了一个 JSON 对象？
 2. 所有字段名是否完全匹配？
 3. 四个维度是否都是对象且包含 score 和 rationale？
 4. 是否出现了笔记中没有的内容？
+5. 字段里是否还留着 [chunk_id] 这种内部编号？
+6. experimental_setup 是否按四个标签来写，而不是一段墙？
 """.strip()
 
 
@@ -464,12 +468,14 @@ DEEP_READ_ABSTRACT_SYSTEM_PROMPT = """
 - overall_score 是综合总分，取0到100的整数。
 - 摘要中没有提到的信息，对应字段留空字符串或空数组，不得编造。
 - short_summary 必须在开头注明"基于摘要的精读"，让读者知道这份报告没有通读全文。
+- experimental_setup 必须依次写出「数据集：」「评价指标：」「骨干与超参：」「训练细节：」，缺的整段跳过；不要糊成一段不分的话。
 
 输出前自检：
 1. 是否只输出了一个 JSON 对象？
 2. 所有字段名是否完全匹配？
 3. short_summary 是否注明了"基于摘要的精读"？
 4. 是否出现了摘要中没有的内容？
+5. experimental_setup 是否按四个标签来写，而不是一段墙？
 """.strip()
 
 
@@ -559,18 +565,21 @@ WRITING_REVIEW_SYSTEM_PROMPT += "\n\n" + skill_section(
     "literature-review", "正文审查清单"
 )
 
-# 精读链路：读一段时怎么取舍、写评价时守什么纪律、公式怎么写、字段句式怎么排。
+# 精读链路：读一段时怎么取舍、写评价时守什么纪律、公式怎么写、字段句式怎么排、
+# 列表条目之间怎么接上。
 #
-# 「评价纪律」「公式写法」「字段句式模板」三节都要给汇总与摘要降级两条路径用。
+# 「评价纪律」「公式写法」「字段句式模板」「叙述逻辑」都要给汇总与摘要降级两条路径用。
 # 它们的输入材料不同（一个是分段笔记，一个只有标题和摘要），所以「评价纪律」那一节
 # 的措辞刻意写成对两者都成立的「输入材料」；「字段句式模板」里也专门点了一句降级路径
-# 开头要写「基于摘要的精读」。这三节合并成一个字符串复用，避免三处各取一遍。
+# 开头要写「基于摘要的精读」。这四节合并成一个字符串复用，避免四处各取一遍。
 _DEEP_READ_REPORT_SECTIONS = (
     skill_section("paper-deep-reading", "评价纪律")
     + "\n\n"
     + skill_section("paper-deep-reading", "公式写法")
     + "\n\n"
     + skill_section("paper-deep-reading", "字段句式模板")
+    + "\n\n"
+    + skill_section("paper-deep-reading", "叙述逻辑")
 )
 
 DEEP_READ_MAP_SYSTEM_PROMPT += "\n\n" + _DEEP_READ_FIDELITY

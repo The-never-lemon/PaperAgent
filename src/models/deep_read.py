@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from typing import Any
+import re
 
 from src.models.sessions import utc_now
 
@@ -37,6 +38,41 @@ _SOURCE_LABELS: dict[str, str] = {
     DEEP_READ_SOURCE_FULLTEXT: "全文精读",
     DEEP_READ_SOURCE_ABSTRACT: "摘要降级",
 }
+
+# 这些列表字段是按叙述顺序展开的，下载成 Markdown 时用有序列表，
+# 和「数据集」「局限」那种并列项区分开。
+_NUMBERED_HEADINGS: frozenset[str] = frozenset({"方法", "贡献", "主要结果"})
+
+# 实验设置在技能文档里约定写成「标签：完整句子」四行。模型却经常把四块
+# 糊进同一段 JSON 字符串，所以组装和展示时都要按标签切开，不能只认行首。
+_SETUP_HEADING = "实验设置"
+_SETUP_LABELS: tuple[str, ...] = ("数据集：", "评价指标：", "骨干与超参：", "训练细节：")
+_SETUP_ALIAS_TO_CANONICAL: dict[str, str] = {
+    "数据集": "数据集",
+    "训练数据": "数据集",
+    "评价指标": "评价指标",
+    "评测指标": "评价指标",
+    "评估指标": "评价指标",
+    "骨干与超参": "骨干与超参",
+    "骨干网络": "骨干与超参",
+    "模型与超参": "骨干与超参",
+    "超参数": "骨干与超参",
+    "骨干": "骨干与超参",
+    "训练细节": "训练细节",
+    "训练设置": "训练细节",
+    "训练过程": "训练细节",
+}
+_SETUP_SPLIT_PREFIX = frozenset(" \t\n。；;，,、")
+
+# 分段阅读笔记会在句末标 [paperId:p0001:s0003]。这是内部定位，不能进给人看的报告。
+_BRACKET_CHUNK_RE = re.compile(
+    r"\[\s*[^\[\]]*:(?:p|c)\d{4}(?::s\d{4})?\s*\]",
+    re.IGNORECASE,
+)
+_BARE_CHUNK_RE = re.compile(
+    r"(?<![\w.])[\w.\-]+:(?:p|c)\d{4}(?::s\d{4})?(?![\w])",
+    re.IGNORECASE,
+)
 
 
 @dataclass(slots=True)
@@ -132,6 +168,29 @@ class DeepReadReport:
     artifact_id: str = ""
     fulltext_artifact_id: str = ""
 
+    def __post_init__(self) -> None:
+        """落盘和展示前把内部定位号剥掉，并把实验设置切成可扫读的几行。
+
+        中文说明：
+        分段阅读必须在笔记里标 [chunk_id]，汇总模型又常把这些编号抄进报告。
+        实验设置又是一个字符串字段，模型几乎不会真的写出换行。这两件事都不能
+        指望提示词单独约束，所以在报告对象一创建就处理掉。旧文件走 from_dict
+        也会进这里，打开历史报告时同样干净。
+        """
+
+        self.main_question = strip_chunk_markers(self.main_question)
+        self.short_summary = strip_chunk_markers(self.short_summary)
+        self.conclusions = strip_chunk_markers(self.conclusions)
+        self.overall_comment = strip_chunk_markers(self.overall_comment)
+        self.methods = _cleaned_string_list(self.methods)
+        self.datasets = _cleaned_string_list(self.datasets)
+        self.contributions = _cleaned_string_list(self.contributions)
+        self.limitations = _cleaned_string_list(self.limitations)
+        self.main_results = _cleaned_string_list(self.main_results)
+        self.experimental_setup = normalize_experimental_setup(self.experimental_setup)
+        for dimension in (self.relevance, self.novelty, self.rigor, self.clarity):
+            dimension.rationale = strip_chunk_markers(dimension.rationale)
+
     def to_dict(self) -> JsonObject:
         """把整份报告转换成普通字典，方便写进 JSON 文件或推给前端。"""
 
@@ -166,6 +225,8 @@ class DeepReadReport:
         中文说明：
         章节顺序和前端精读抽屉里从上往下看到的一模一样——网页上看到什么，
         下载下来的文件里就是什么。某一节没有内容时会跳过它，不留下空标题。
+        方法、贡献、主要结果按叙述顺序编号；数据集和局限用短横线；实验设置
+        保留换行并把「数据集：」这类标签加粗，避免整份报告看起来像一段墙。
         """
 
         # 每一"块"内容最后用空行拼起来。开头是报告标题和一行来源说明。
@@ -327,31 +388,166 @@ def _render_section(heading: str, content: str | list[str]) -> str:
 
     中文说明：
     同一份报告里，有的字段是一段话（比如"结论"），有的是好几条要点
-    （比如"方法"）。这里按类型分开拼：一段话直接写在标题下面，
-    要点则每条前面加一个短横线。整节都没内容就返回空字符串，
-    调用方看到空字符串就跳过这一节，不会留下一个孤零零的标题。
+    （比如"方法"）。一段话保留换行，实验设置还要把「数据集：」这类标签
+    加粗并空开；有顺序的要点用 1. 2. 3.，并列项才用短横线。整节都没内容
+    就返回空字符串，调用方看到空字符串就跳过这一节，不会留下一个孤零零的标题。
     """
 
     if isinstance(content, str):
-        text = _one_line(content)
+        text = (
+            _format_experimental_setup(content)
+            if heading == _SETUP_HEADING
+            else _preserve_lines(content)
+        )
         return f"## {heading}\n\n{text}" if text else ""
 
+    numbered = heading in _NUMBERED_HEADINGS
     lines: list[str] = []
+    index = 1
     for item in content:
         text = _one_line(item)
-        if text:
+        if not text:
+            continue
+        if numbered:
+            lines.append(f"{index}. {text}")
+            index += 1
+        else:
             lines.append(f"- {text}")
     if not lines:
         return ""
     return f"## {heading}\n\n" + "\n".join(lines)
 
 
+def _preserve_lines(text: Any) -> str:
+    """保留段落换行，只把每一行内部的空白收干净。
+
+    中文说明：
+    总结、结论、实验设置是给人连着读的，模型如果已经按行切开，下载时
+    不能再压成一行墙。空行丢掉，避免 Markdown 里出现大段空白。
+    """
+
+    lines: list[str] = []
+    for raw in str(text or "").splitlines():
+        collapsed = " ".join(raw.split())
+        if collapsed:
+            lines.append(collapsed)
+    return "\n".join(lines)
+
+
+def _format_experimental_setup(text: Any) -> str:
+    """把实验设置切成带加粗标签的段落，行与行之间空开。
+
+    中文说明：
+    技能文档要求写成四行标签，但模型经常糊成一段。这里先按标签（或句子）
+    切开，再给「数据集：」这类行首标签加粗。旧报告没有标签时，至少按句分段。
+    """
+
+    body = normalize_experimental_setup(text)
+    if not body:
+        return ""
+    formatted: list[str] = []
+    for line in body.split("\n"):
+        for label in _SETUP_LABELS:
+            if line.startswith(label):
+                rest = line[len(label) :].lstrip()
+                line = f"**{label[:-1]}**：{rest}"
+                break
+        formatted.append(line)
+    return "\n\n".join(formatted)
+
+
+def strip_chunk_markers(text: Any) -> str:
+    """去掉分段笔记里的内部定位编号，例如 [1706.03762:p0001:s0003]。"""
+
+    cleaned = _BRACKET_CHUNK_RE.sub("", str(text or ""))
+    cleaned = _BARE_CHUNK_RE.sub("", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r" +([，。；、,.!！？])", r"\1", cleaned)
+    return cleaned.strip()
+
+
+def normalize_experimental_setup(text: Any) -> str:
+    """把实验设置整理成一行一块：有标签按标签切，没有标签按句子切。"""
+
+    cleaned = strip_chunk_markers(text)
+    if not cleaned:
+        return ""
+    labeled = _split_by_setup_labels(cleaned)
+    if labeled:
+        lines: list[str] = []
+        for label, body in labeled:
+            body = " ".join(body.split()).strip()
+            if not body:
+                continue
+            if label:
+                lines.append(f"{label}：{body}")
+            else:
+                lines.append(body)
+        if lines:
+            return "\n".join(lines)
+    return _break_setup_prose(cleaned)
+
+
+def _split_by_setup_labels(text: str) -> list[tuple[str, str]]:
+    """按「数据集：」「评价指标：」等标签切开；找不到标签就返回空列表。"""
+
+    aliases = sorted(_SETUP_ALIAS_TO_CANONICAL, key=len, reverse=True)
+    pattern = "|".join(re.escape(alias) for alias in aliases)
+    regex = re.compile(rf"({pattern})[:：]")
+    matches = [
+        match
+        for match in regex.finditer(text)
+        if match.start() == 0 or text[match.start() - 1] in _SETUP_SPLIT_PREFIX
+    ]
+    if not matches:
+        return []
+    parts: list[tuple[str, str]] = []
+    prefix = text[: matches[0].start()].strip()
+    if prefix:
+        parts.append(("", prefix))
+    for index, match in enumerate(matches):
+        canonical = _SETUP_ALIAS_TO_CANONICAL[match.group(1)]
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        parts.append((canonical, text[match.end() : end]))
+    return parts
+
+
+def _break_setup_prose(text: str) -> str:
+    """没有标签时，按句号或分号把一段墙拆成几行。"""
+
+    collapsed = " ".join(str(text or "").split())
+    if not collapsed:
+        return ""
+    sentences = [
+        part.strip()
+        for part in re.split(r"(?<=[。！？])", collapsed)
+        if part.strip()
+    ]
+    if len(sentences) > 1:
+        return "\n".join(sentences)
+    pieces = [part.strip() for part in re.split(r"[；;]", collapsed) if part.strip()]
+    if len(pieces) > 1:
+        return "\n".join(pieces)
+    return collapsed
+
+
+def _cleaned_string_list(values: list[str] | tuple[str, ...] | None) -> list[str]:
+    """列表字段逐项去掉内部定位号，剥空的项丢掉。"""
+
+    cleaned: list[str] = []
+    for item in values or ():
+        text = strip_chunk_markers(item)
+        if text:
+            cleaned.append(text)
+    return cleaned
+
+
 def _one_line(text: Any) -> str:
     """把一段文字压成一行：换行、制表符、连续空格全部变成一个空格。
 
     中文说明：
-    报告里的文字是模型写的，中间可能夹着换行。Markdown 里一条要点如果被
-    换行劈成两行，排版就散了；压成一行最省事也最稳。
+    列表里的每一条要点、标题、表格单元格都应该是单行。Markdown 里一条
+    要点如果被换行劈成两行，编号列表会断掉；压成一行最省事也最稳。
     """
 
     return " ".join(str(text or "").split())

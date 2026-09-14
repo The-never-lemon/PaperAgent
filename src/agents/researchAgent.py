@@ -423,6 +423,7 @@ async def run_conversation_agent(
                     f"正在执行 {call['name']}",
                     stage=call["name"],
                     event_key=event_key,
+                    arguments=call["arguments"],
                     arguments_summary=_arguments_summary(call["arguments"]),
                 )
                 logger.info(
@@ -1117,7 +1118,7 @@ def _report_round_usage(
             _LAST_OBSERVED_PROMPT_TOKENS = int(prompt_tokens)
 
 def _arguments_summary(arguments: JsonObject) -> str:
-    """把工具参数压缩成日志和运行卡片里展示的一句话摘要（不打印完整大对象）。"""
+    """把工具参数压成日志和评测用的短 JSON 字符串（不打印完整大对象）。"""
 
     try:
         text = json.dumps(arguments, ensure_ascii=False, default=str)

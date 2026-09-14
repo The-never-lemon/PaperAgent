@@ -41,7 +41,13 @@ onMounted(async () => {
  * 第一次进入页面时会自动选中最新会话；后续刷新时尽量保持用户当前正在看的会话不变。
  */
 async function refreshSessions(shouldPickFirst = false) {
-  sessionsLoading.value = true;
+  // 中文注释：只有第一次还没有任何会话时才显示「正在加载历史」。
+  // 发送消息、工具调用后也会刷新列表；如果这时把整栏换成转圈，
+  // 看起来就像聊天区被强制刷新了一遍。
+  const showLoading = sessions.value.length === 0;
+  if (showLoading) {
+    sessionsLoading.value = true;
+  }
   try {
     const payload = await listSessions();
     sessions.value = payload.sessions;
@@ -55,7 +61,9 @@ async function refreshSessions(shouldPickFirst = false) {
   } catch (error) {
     handleError(error, "加载历史会话失败");
   } finally {
-    sessionsLoading.value = false;
+    if (showLoading) {
+      sessionsLoading.value = false;
+    }
   }
 }
 
