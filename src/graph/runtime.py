@@ -286,6 +286,8 @@ _STAGE_DISPLAY: dict[tuple[str, str], RuntimeStageDisplay] = {
     ("tool", "deep_read_paper"): RuntimeStageDisplay("deep_read_paper", "精读论文"),
     ("tool", "ask_paper"): RuntimeStageDisplay("ask_paper", "追问论文"),
     ("tool", "generate_review"): RuntimeStageDisplay("generate_review", "生成综述"),
+    ("tool", "get_history"): RuntimeStageDisplay("get_history", "读取历史对话"),
+    ("tool", "expand_by_citations"): RuntimeStageDisplay("expand_by_citations", "引文扩展检索"),
 }
 
 _DONE_STATUSES = {"completed", "failed", "cancelled", "skipped"}

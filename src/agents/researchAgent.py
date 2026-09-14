@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from typing import TYPE_CHECKING, Any
@@ -30,8 +31,9 @@ from src.models.workspace import (
 from src.utils import get_logger
 
 from .Prompts import RESEARCH_AGENT_SYSTEM_PROMPT
+from .context_budget import budget_tokens, estimate_messages_tokens
 from .research_tools import ActiveToolCall, ResearchToolContext, render_tool_result
-from .tools import ToolRegistry
+from .tools import ToolRegistry, ToolSpec
 
 
 if TYPE_CHECKING:
@@ -52,12 +54,40 @@ MAX_TOOL_ROUNDS = 20
 # 同轮工具调用的最大并发数。多方向检索、多篇评价等场景会触发并行。
 TOOL_PARALLEL_LIMIT = 3
 
-# 历史滑窗：最多保留最近多少个"用户轮"。
-# 截断必须整轮进行（tool_calls 和 tool 结果配对完整），更早的轮次压缩成占位摘要（实施方案 1.3）。
-HISTORY_MAX_TURNS = 10
+# 历史预算管理（替代旧的"最近 10 轮"硬截断，实施方案"上下文分配与自动压缩"）：
+# 历史能占多少 token = 模型上下文窗口 × HISTORY_BUDGET_RATIO，超出时：
+#   阶段 A（零成本）：把最老轮次的工具结果替换成占位符、清空思考块；
+#   阶段 B（LLM 压缩）：把装不下的最老整轮交给模型压成一段要点摘要。
+# 截断/压缩永远按"用户轮"整轮进出，保证 assistant 的 tool_calls 和 tool
+# 结果配对完整，缺一半模型接口会直接报错。
+HISTORY_BUDGET_RATIO = 0.8
 
-# 更早轮次占位摘要的最大字符数（确定性投影：只罗列用户当时的诉求，不调模型）。
-EARLIER_SUMMARY_MAX_CHARS = 1200
+# 阶段 A 里"最近多少轮"保证只剥工具结果、绝不被 LLM 压缩掉。
+KEEP_RECENT_TURNS_LITE = 6
+
+# 阶段 B 一次压缩调用的输入上限（字符）与输出摘要上限（字符）。
+COMPRESS_INPUT_MAX_CHARS = 16000
+COMPRESSED_SUMMARY_MAX_CHARS = 400
+
+# 旧轮次工具结果的占位符模板，{tool_name} 会被替换成实际工具名。
+TOOL_RESULT_PLACEHOLDER = (
+    "[历史工具结果已归档：{tool_name}。可用 get_history 工具读取旧轮次原文，"
+    "或用对应工具重新获取。]"
+)
+
+# 中文注释：实测字符率的内存缓存（"最近一次实测：多少字符 ≈ 1 token"）。
+# 每轮模型调用返回真实 usage 后回填，越用越准；无锁、无落库，偶发并发
+# 写入也只是多算一次的事，不影响正确性。
+_RECENT_CHARS_PER_TOKEN = 4.5
+
+# 中文注释：上一轮请求供应商实际数出来的 prompt_tokens。它是唯一能反映
+# "真实上下文占用"的数字（估算器再好也只是近似）——用它做自适应校准：
+# 上一轮已经吃到窗口 75% 以上时，下一轮按比例压低预算强制收缩，避免
+# 估算误差或配置失真（比如窗口填了 1M 但供应商实际更小）导致请求被拒。
+_LAST_OBSERVED_PROMPT_TOKENS = 0
+
+# 上一轮实测 prompt_tokens 达到窗口的这个比例时，自适应校准开始干预。
+_ADAPTIVE_CALIBRATION_RATIO = 0.75
 
 # 更早轮次摘要里，单条用户诉求保留的最大字符数。
 EARLIER_SUMMARY_ITEM_CHARS = 100
@@ -154,9 +184,40 @@ async def run_conversation_agent(
     workspace = context.workspace
 
     # 第一步：从消息表重建对话历史（本轮 user 消息已由 run 服务先行落库），
-    # 拼出系统提示词 + 滑窗后的历史消息。文件/数据库读取放到线程里，避免卡住事件循环。
+    # 拼出系统提示词 + 按预算压缩后的历史消息。文件/数据库读取放到线程里，避免卡住事件循环。
     record = await asyncio.to_thread(repo.get, session_key)
-    messages = build_llm_messages(record.messages, workspace)
+    # 中文注释：历史预算 = 模型上下文窗口 × 0.8（窗口没配按 1M 计，system.yaml
+    # 的 context_window_tokens 可调）；字符率用"最近一次实测值"，首轮没有实测
+    # 数据时用保守默认 4.5。
+    history_budget = budget_tokens(
+        getattr(context.llm, "context_window_tokens", None)
+    )
+    # 中文注释：自适应校准——上一轮请求的实际 prompt_tokens 已经逼近窗口
+    # （比如供应商的实际窗口比配置小、或估算偏保守）时，按实际占用反推一个
+    # 更紧的预算，防止估算失真导致请求被供应商拒绝。
+    window_tokens = int(getattr(context.llm, "context_window_tokens", None) or 1048576)
+    if (
+        _LAST_OBSERVED_PROMPT_TOKENS > 0
+        and _LAST_OBSERVED_PROMPT_TOKENS / window_tokens >= _ADAPTIVE_CALIBRATION_RATIO
+    ):
+        adaptive_budget = int(_LAST_OBSERVED_PROMPT_TOKENS * 0.6)
+        history_budget = min(history_budget, adaptive_budget)
+        logger.info(
+            "上一轮 prompt_tokens 逼近窗口，启用自适应预算校准",
+            extra={
+                "session_key": session_key,
+                "observed_prompt_tokens": _LAST_OBSERVED_PROMPT_TOKENS,
+                "window_tokens": window_tokens,
+                "history_budget": history_budget,
+            },
+        )
+    messages = await build_llm_messages(
+        record.messages,
+        workspace,
+        history_budget=history_budget,
+        chars_per_token=_RECENT_CHARS_PER_TOKEN,
+        compress_llm=context.llm,
+    )
 
     # 工具执行的事件统一挂在 "tool" 节点下（对应 runtime.py 里 ("tool", 工具名) 的显示映射）。
     tool_reporter = chat_reporter.sync_port.for_node("tool", "工具执行")
@@ -188,7 +249,7 @@ async def run_conversation_agent(
             callbacks,
             tools=registry.as_llm_tools(),
         )
-        _report_round_usage(chat_reporter, round_no, response)
+        _report_round_usage(chat_reporter, round_no, response, messages)
         if response.reasoning_content:
             # 思考流结束要给前端一个明确信号，界面上的"思考中"区域才会收起。
             chat_reporter.reasoning_end()
@@ -438,7 +499,7 @@ async def run_conversation_agent(
         on_thinking_delta=chat_reporter.reasoning_delta,
     )
     response = await context.llm.provider.chat_stream(messages, callbacks)
-    _report_round_usage(chat_reporter, MAX_TOOL_ROUNDS + 1, response)
+    _report_round_usage(chat_reporter, MAX_TOOL_ROUNDS + 1, response, messages)
     final_content = (response.content or "").strip() if response.ok else LLM_FAILURE_MESSAGE.format(
         reason=response.error_kind or "未知错误"
     )
@@ -469,17 +530,39 @@ async def run_conversation_agent(
 # ---------------------------------------------------------------------------
 
 
-def build_llm_messages(history_messages: list[JsonObject], workspace: SessionWorkspace) -> list[JsonObject]:
-    """把落库的会话历史重建成发给模型的消息列表（纯函数，不做任何 IO）。
+# 阶段 B 的压缩摘要内存缓存：key = 被压缩切片的 sha1 指纹 → 要点摘要文本。
+# 压缩摘要从不落库（消息表 append-only 且前端渲染复用同一份数据），
+# 同一段历史每次重建都用同一把 key 命中缓存，避免重复调模型。
+_COMPRESSION_CACHE: dict[str, str] = {}
 
-    做三件事（实施方案 1.3）：
+
+async def build_llm_messages(
+    history_messages: list[JsonObject],
+    workspace: SessionWorkspace,
+    *,
+    history_budget: int | None = None,
+    chars_per_token: float = 4.5,
+    compress_llm: Any | None = None,
+) -> list[JsonObject]:
+    """把落库的会话历史重建成发给模型的消息列表。
+
+    做三件事（方案"上下文分配与自动压缩"）：
     1. 把消息表里的每一行转成模型协议格式：普通文本、带 tool_calls 的
        assistant 消息、tool 结果消息；
-    2. 历史滑窗：只保留最近 HISTORY_MAX_TURNS 个"用户轮"。截断必须整轮
-       进行（轮次边界 = user 消息），保证 assistant 的 tool_calls 和对应的
-       tool 结果永远成对出现，缺一半会让模型接口直接报错；
-    3. 更早的轮次压缩成确定性摘要（只罗列用户当时提过什么，不调用模型），
-       和系统提示词（含工作区动态状态）一起放在最前面。
+    2. 按上下文预算管理历史（替代旧的"最近 N 轮"硬截断）：
+       - 阶段 A（零成本剥离）：估算整份历史占用的 token，超过 history_budget 时，
+         从最老的轮次开始把 tool 结果替换成占位符、清空思考块、逐轮剥离；
+       - 阶段 B（LLM 压缩）：阶段 A 剥完仍超预算时，把装不下的最老整轮交给
+         模型压成一段要点摘要，被压缩的整轮从上下文移除，摘要并入系统提示词。
+         需要 compress_llm 提供 provider；不传则跳过阶段 B，只用阶段 A 结果
+         兜底——宁可历史超一点预算，也不让组装过程失败；
+       截断/压缩永远按"用户轮"整轮进出（轮次边界 = user 消息），保证 assistant
+       的 tool_calls 和对应的 tool 结果永远成对出现，缺一半模型接口会直接报错；
+    3. 被压缩/剥离轮次的用户诉求摘要和系统提示词（含工作区动态状态）一起
+       放在最前面。
+
+    摘要产物只在内存里（模块级缓存），绝不写回消息表——消息表是 append-only
+    的持久链路，前端历史渲染也读同一份数据，写了摘要会污染展示。
     """
 
     # 第一步：逐行转换消息表记录，并记下每个"用户轮"的起始位置。
@@ -534,17 +617,30 @@ def build_llm_messages(history_messages: list[JsonObject], workspace: SessionWor
             )
         # 其他角色的行（例如历史遗留数据）不参与模型上下文，直接跳过。
 
-    # 第二步：整轮截断。只保留最近 HISTORY_MAX_TURNS 个用户轮。
+    # 第 1.5 步：配对净化。
+    # 中文注释：run 被取消（用户点停止、服务重启）时，可能留下"带了 tool_calls
+    # 却没有工具结果"或"孤儿 tool 消息"的残缺轮次——上游网关按协议校验会直接
+    # 400 拒绝整次请求（"An assistant message with 'tool_calls' must be followed
+    # by tool messages"），而且这个会话从此每次都会撞同一堵墙。重建历史时
+    # 在这里把残缺修成合法序列：
+    #   - 带多笔 tool_calls 但只有部分回应 → 只保留有回应的调用项；
+    #   - 一笔回应都没有 → 降级成一条普通正文 assistant 消息（保留思考块），
+    #     tool_calls 框架直接去掉；
+    #   - 找不到父亲的孤儿 tool 消息 → 丢弃。
+    converted = _repair_tool_call_pairing(converted)
+
+    # 第二步：按预算逐层收缩历史。
+    # 旧轮次的用户诉求先收集起来，无论走阶段 A 还是 B 都会进系统提示词的摘要节。
+    # 阶段 B（LLM 压缩）需要调模型，由本函数完成，因此整个组装定义为 async。
     earlier_user_lines: list[str] = []
-    if len(turn_starts) > HISTORY_MAX_TURNS:
-        cut = turn_starts[-HISTORY_MAX_TURNS]
-        earlier = converted[:cut]
-        converted = converted[cut:]
-        earlier_user_lines = [
-            str(message.get("content") or "")[:EARLIER_SUMMARY_ITEM_CHARS]
-            for message in earlier
-            if message.get("role") == "user"
-        ]
+    if history_budget and turn_starts:
+        earlier_user_lines, converted = await _shrink_history_within_budget(
+            converted,
+            turn_starts,
+            history_budget=history_budget,
+            chars_per_token=chars_per_token,
+            compress_llm=compress_llm,
+        )
 
     # 第三步：拼装系统提示词 = 静态规则 + 工作区动态状态 + 更早轮次摘要。
     system_content = RESEARCH_AGENT_SYSTEM_PROMPT + "\n\n" + _workspace_state_section(workspace)
@@ -552,15 +648,260 @@ def build_llm_messages(history_messages: list[JsonObject], workspace: SessionWor
         summary_text = "\n".join(
             f"{index}. {line}" for index, line in enumerate(earlier_user_lines, start=1)
         )
-        if len(summary_text) > EARLIER_SUMMARY_MAX_CHARS:
-            summary_text = summary_text[:EARLIER_SUMMARY_MAX_CHARS] + "……[已截断]"
+        # 中文注释：单条诉求在收集时已各自截过 100 字符，且每条都很短，
+        # 轮次多时摘要节自然变长但总体可控，不再额外截总量。
         system_content += (
             "\n\n## 此前对话摘要\n"
-            "更早轮次的细节已不在上下文中，用户此前提过这些诉求（如需细节请重新查询工作区或询问用户）：\n"
-            + summary_text
+            "更早轮次的细节已不在上下文中（工具结果已归档），用户此前提过这些诉求"
+            "（如需旧轮次细节可用 get_history 工具读取）：\n" + summary_text
         )
 
     return [{"role": "system", "content": system_content}, *converted]
+
+
+def _repair_tool_call_pairing(converted: list[JsonObject]) -> list[JsonObject]:
+    """把残缺的 tool_calls/tool 配对修成合法序列（就地重建消息列表）。
+
+    中文注释：run 被取消或崩溃时，assistant(tool_calls) 落库了、工具结果却没
+    来得及落库，消息表里就留下残缺轮次。以后每次重建历史都会带上它，上游按
+    协议校验直接拒绝整次请求，会话从此卡死。这里在组装时一次性修复：
+      1) 先收集所有 tool 消息的 tool_call_id；
+      2) 带 tool_calls 的 assistant 消息：只保留有回应的调用项（消息里其余
+         调用项删掉）；一笔回应都没有 → 降级为普通正文消息，tool_calls 移除，
+         thinking 块保留（推理模型仍需回传）；
+      3) 孤儿 tool 消息（tool_call_id 找不到任何父亲）→ 丢弃。
+    """
+
+    responded_ids = {
+        str(message.get("tool_call_id") or "")
+        for message in converted
+        if message.get("role") == "tool"
+    }
+    repaired: list[JsonObject] = []
+    seen_call_ids: set[str] = set()
+    for message in converted:
+        role = str(message.get("role") or "")
+        if role == "tool":
+            # 孤儿 tool 消息：它的 tool_call_id 没有任何 assistant 声明过，丢弃。
+            if str(message.get("tool_call_id") or "") not in seen_call_ids:
+                continue
+            repaired.append(message)
+            continue
+        tool_calls = message.get("tool_calls")
+        if role == "assistant" and tool_calls:
+            # 过滤掉没有回应的调用项；有回应的留着，并把它们的 id 记入"已声明"。
+            calls_with_results = [
+                call for call in tool_calls if str(call.get("id") or "") in responded_ids
+            ]
+            if calls_with_results:
+                message["tool_calls"] = calls_with_results
+                seen_call_ids.update(str(call.get("id") or "") for call in calls_with_results)
+                repaired.append(message)
+            else:
+                # 一笔回应都没有：降级成普通正文消息。正文可能为空（模型把整轮
+                # 都写在工具调用里），此时用一句说明兜底，避免发空 content。
+                fallback_text = str(message.get("content") or "").strip()
+                if not fallback_text:
+                    fallback_text = "（这轮的工具调用被中断，未取得结果；如有需要请重新调用对应工具。）"
+                demoted = {"role": "assistant", "content": fallback_text}
+                thinking = message.get("thinking_blocks")
+                if isinstance(thinking, list) and thinking:
+                    demoted["thinking_blocks"] = thinking
+                repaired.append(demoted)
+                continue
+        else:
+            repaired.append(message)
+    return repaired
+
+
+async def _shrink_history_within_budget(
+    converted: list[JsonObject],
+    turn_starts: list[int],
+    *,
+    history_budget: int,
+    chars_per_token: float,
+    compress_llm: Any | None = None,
+) -> tuple[list[str], list[JsonObject]]:
+    """把历史收缩到预算内，返回 (更早轮次的用户诉求/摘要列表, 收缩后的消息列表)。
+
+    两层闸门，从最老的轮次开始逐层收紧：
+      阶段 A：tool 结果 → 占位符、思考块 → 空、终答正文 → 只留前 400 字符；
+      阶段 B：整轮移除（交由 LLM 压缩成一段要点摘要）。
+    全程按"用户轮"整轮操作，tool_calls/tool 配对天然完整。
+    """
+
+    working = converted
+    summary_lines: list[str] = []
+
+    # ---------- 阶段 A：剥工具结果（零成本，不调模型） ----------
+    # 从最老的轮次开始，把"最近 KEEP_RECENT_TURNS_LITE 轮"以外的旧轮次逐轮剥离，
+    # 每剥一轮重新估算一次，直到估算 token 不超过预算，或者可剥的旧轮剥完。
+    if len(turn_starts) > KEEP_RECENT_TURNS_LITE:
+        # 受保护的最近几轮从 message 列表的这个下标开始，阶段 A 绝不越过它。
+        protected_start = turn_starts[-KEEP_RECENT_TURNS_LITE]
+        peelable_starts = turn_starts[:-KEEP_RECENT_TURNS_LITE]
+    else:
+        protected_start = len(working)
+        peelable_starts = []
+    if peelable_starts and estimate_messages_tokens(working, chars_per_token) > history_budget:
+        peel_start = 0
+        for peeled_index in range(len(peelable_starts)):
+            # 这个区间的终点 = 下一个候选轮次的起点；最后一个候选轮的终点
+            # 是受保护区起点（绝不能把最近几轮也剥了）。
+            peel_end = (
+                peelable_starts[peeled_index + 1]
+                if peeled_index + 1 < len(peelable_starts)
+                else protected_start
+            )
+            segment = working[peel_start:peel_end]
+            for message in segment:
+                role = str(message.get("role") or "")
+                if role == "tool":
+                    # 工具结果 → 一句占位符（写明工具名和取回方式）。
+                    message["content"] = TOOL_RESULT_PLACEHOLDER.format(
+                        tool_name=str(message.get("name") or "未知工具")
+                    )
+                elif role == "assistant":
+                    if message.get("tool_calls"):
+                        # 带工具调用的中间消息：只清思考块（占空间最大、模型不看），
+                        # tool_calls 框架保留——协议要求它和随后的 tool 消息配对。
+                        message["thinking_blocks"] = []
+                    else:
+                        # 旧轮次的最终回复：思考块清空，正文保留前 400 字符——
+                        # 结论基本都在开头，太长的列表尾巴对后续对话价值不大。
+                        message["thinking_blocks"] = []
+                        content = str(message.get("content") or "")
+                        if len(content) > 400:
+                            message["content"] = content[:400] + "……[旧回复已截断]"
+            peel_start = peel_end
+            if estimate_messages_tokens(working, chars_per_token) <= history_budget:
+                break
+
+    # ---------- 阶段 B：LLM 压缩最老的整轮 ----------
+    # 阶段 A 剥完仍超预算：把从最老轮次起装不下的整轮交给 LLM 压缩。
+    # 每次取一整轮（user 轮起点之间的所有消息都属于这一轮，assistant(tool_calls)
+    # 和 tool 结果天然整体进出），直到估算不超预算、或只剩 KEEP_RECENT_TURNS_LITE 轮。
+    if estimate_messages_tokens(working, chars_per_token) > history_budget:
+        removed_turns: list[list[JsonObject]] = []
+        remaining_starts = list(turn_starts)
+        while (
+            len(remaining_starts) > KEEP_RECENT_TURNS_LITE
+            and estimate_messages_tokens(working, chars_per_token) > history_budget
+        ):
+            # 每次取最老的一整轮：它的终点 = 下一轮起点相对当前 working 开头的偏移。
+            # 中文注释：remaining_starts 里存的是原始列表下标，每切掉一轮 working
+            # 就变短一段，所以必须用"相邻两项相减"算相对偏移，直接用原始下标会多切。
+            next_cut = (
+                remaining_starts[1] - remaining_starts[0]
+                if len(remaining_starts) > 1
+                else len(working)
+            )
+            removed_turns.append(working[:next_cut])
+            working = working[next_cut:]
+            remaining_starts = remaining_starts[1:]
+        if removed_turns:
+            summary = await _compress_completed_turns(removed_turns, compress_llm)
+            if summary:
+                summary_lines.append(summary)
+            else:
+                # 压缩失败（没传模型/调用失败/输出为空）兜底：不重试也不崩，
+                # 只罗列这些轮次里用户的原始诉求，信息量少但比直接丢失好。
+                summary_lines.extend(_fallback_user_request_lines(removed_turns))
+
+    return summary_lines or [], working
+
+
+def _fallback_user_request_lines(removed_turns: list[list[JsonObject]]) -> list[str]:
+    """压缩失败时的兜底：罗列被移除轮次里用户的原始诉求（各截 100 字符）。"""
+
+    lines: list[str] = []
+    for turn_slice in removed_turns:
+        for message in turn_slice:
+            if str(message.get("role") or "") == "user":
+                text = str(message.get("content") or "").strip()
+                if text:
+                    lines.append(text[:EARLIER_SUMMARY_ITEM_CHARS])
+    return lines
+
+
+async def _compress_completed_turns(removed_turns: list[list[JsonObject]], compress_llm: Any | None) -> str:
+    """把被移除的整轮交给 LLM 压成一段要点摘要（带缓存）。
+
+    中文注释：被压缩的轮次在多次 run 重建历史时是同一份内容——按被压缩切片
+    的内容指纹做缓存 key，命中就不再调模型。摘要在内存里，不落库。
+    compress_llm 为空（模型没装配）时直接返回空字符串，由调用方走确定性兜底。
+    """
+
+    if compress_llm is None:
+        return ""
+
+    # 中文注释：把切片序列化成稳定文本做指纹。换 provider/模型后重新压一次摘要
+    # 结果也是对的，所以缓存 key 里不放模型名。
+    payload_lines: list[str] = []
+    for turn_slice in removed_turns:
+        for message in turn_slice:
+            role = str(message.get("role") or "")
+            payload_lines.append(f"### {role}")
+            payload_lines.append(str(message.get("content") or "")[:2000])
+            tool_calls = message.get("tool_calls")
+            if isinstance(tool_calls, list):
+                for call in tool_calls:
+                    call_name = str((call or {}).get("function", {}).get("name") or "")
+                    if call_name:
+                        payload_lines.append(f"[调用工具 {call_name}]")
+    raw = "\n".join(payload_lines)
+    if len(raw) > COMPRESS_INPUT_MAX_CHARS:
+        raw = raw[:COMPRESS_INPUT_MAX_CHARS] + "……[更早内容已截断]"
+
+    cache_key = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+    cached = _COMPRESSION_CACHE.get(cache_key)
+    if cached:
+        return cached
+
+    summary = await _run_compression_call(raw, compress_llm)
+    if summary:
+        _COMPRESSION_CACHE[cache_key] = summary
+    return summary
+
+
+async def _run_compression_call(raw_text: str, compress_llm: Any) -> str:
+    """执行一次真正的 LLM 压缩调用。
+
+    中文注释：compress_llm 是调用方传进来的模型快照（ProviderSnapshot），
+    复用主 Agent 的模型档位，走 provider 的非流式 chat 接口，温度 0 追求
+    稳定的要点压缩。任何失败直接返回空字符串，由调用方兜底——这一步不加重试。
+    """
+
+    prompt = (
+        "请把下面这段更早的对话轮次压缩成不超过 400 字的要点摘要，"
+        "必须保留：用户当时提出什么诉求、得到了什么结论、动过哪些论文（编号）、"
+        "尚未完成的事项。用中文小短句分条写，不要展开原文。\n\n---\n\n" + raw_text
+    )
+    try:
+        provider = getattr(compress_llm, "provider", None)
+        if provider is None:
+            return ""
+        response_model = await provider.chat(
+            [
+                {"role": "system", "content": "你是对话历史压缩器，只输出摘要正文，不要解释。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0,
+            max_tokens=800,
+        )
+    except Exception as exc:  # noqa: BLE001 - 压缩是锦上添花，任何失败都走兜底
+        logger.warning("历史压缩模型调用失败，走确定性兜底", extra={"error": str(exc)[:200]})
+        return ""
+    if not response_model.ok:
+        logger.warning(
+            "历史压缩模型调用失败，走确定性兜底",
+            extra={"error_kind": response_model.error_kind or "未知错误"},
+        )
+        return ""
+    summary = (response_model.content or "").strip()
+    if len(summary) > COMPRESSED_SUMMARY_MAX_CHARS:
+        summary = summary[:COMPRESSED_SUMMARY_MAX_CHARS] + "……"
+    return summary
 
 
 def _workspace_state_section(workspace: SessionWorkspace) -> str:
@@ -738,8 +1079,19 @@ async def _execute_tool(registry: ToolRegistry, call: JsonObject) -> Any:
         return {"error": f"工具执行失败：{exc}"}
 
 
-def _report_round_usage(chat_reporter: "WorkflowNodeReporter", round_no: int, response: Any) -> None:
-    """把一轮模型调用的 token 用量上报到"对话调研"主卡片（工程规范 8.3/8.7）。"""
+def _report_round_usage(
+    chat_reporter: "WorkflowNodeReporter",
+    round_no: int,
+    response: Any,
+    messages: list[JsonObject] | None = None,
+) -> None:
+    """把一轮模型调用的 token 用量上报到"对话调研"主卡片（工程规范 8.3/8.7）。
+
+    中文注释：顺带用供应商返回的真实 prompt_tokens 反推"本轮多少字符 ≈ 1 token"，
+    回填到模块级的实测字符率里。下一次组装历史时用这个更准的比例估算占用，
+    混合了中文的对话会自动趋向中文的字符率，英文对话趋向英文的，比任何
+    静态系数都可靠。
+    """
 
     usage = normalize_token_usage(getattr(response, "usage", None))
     chat_reporter.progress(
@@ -748,7 +1100,21 @@ def _report_round_usage(chat_reporter: "WorkflowNodeReporter", round_no: int, re
         input_tokens=usage["input_tokens"],
         output_tokens=usage["output_tokens"],
     )
-
+    # 中文注释：回填实测字符率。prompt_tokens 是供应商数出来的真实值，除以
+    # 本轮发送的所有消息总字符数就是最实在的比例；极端异常的测量值不采纳。
+    prompt_tokens = usage.get("input_tokens") or 0
+    if prompt_tokens > 0 and messages:
+        total_chars = sum(
+            len(str(m.get("content") or "")) + len(str(m.get("role") or "")) for m in messages
+        )
+        if total_chars > 0:
+            global _RECENT_CHARS_PER_TOKEN, _LAST_OBSERVED_PROMPT_TOKENS
+            measured = total_chars / prompt_tokens
+            if 1.0 <= measured <= 100.0:
+                _RECENT_CHARS_PER_TOKEN = round(measured, 3)
+            # 中文注释：实测 prompt_tokens 一并留档——下一轮 run 开始时用来做
+            # 自适应预算校准（见 run_conversation_agent 第一步）。
+            _LAST_OBSERVED_PROMPT_TOKENS = int(prompt_tokens)
 
 def _arguments_summary(arguments: JsonObject) -> str:
     """把工具参数压缩成日志和运行卡片里展示的一句话摘要（不打印完整大对象）。"""

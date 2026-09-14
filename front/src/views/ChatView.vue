@@ -14,7 +14,7 @@
  * props/emits 契约与原 SessionWorkspaceView 保持一致，App.vue 无需改动。
  */
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { LoaderCircle } from "lucide-vue-next";
+import { Library, LoaderCircle } from "lucide-vue-next";
 
 import {
   ApiRequestError,
@@ -92,6 +92,72 @@ const showScrollToBottom = ref(false);
 // 指数退避：1s / 2s / 4s / 8s / 16s，最多 5 次。
 const reconnectAttempts = ref(0);
 const MAX_RECONNECT_ATTEMPTS = 5;
+
+// ---------------------------------------------------------------------------
+// 右栏（论文工作区）宽度：用户可以拖拽调整，拖完的宽度会记在浏览器里
+// ---------------------------------------------------------------------------
+
+const PANEL_WIDTH_DEFAULT = 320;
+const PANEL_WIDTH_MIN = 260;
+const PANEL_WIDTH_MAX = 480;
+
+const panelWidth = ref(readStoredPanelWidth());
+const resizing = ref(false);
+// 中文说明：窄屏下右栏是盖在界面上的浮层，这个状态控制它是展开还是收起。
+// 宽屏时右栏一直在，这个状态不起作用（按钮也被 CSS 藏起来了）。
+const narrowPanelOpen = ref(false);
+
+// 中文说明：右栏只在「选了会话、且不在欢迎页」时才显示。
+const panelVisible = computed(() => Boolean(selectedSessionKey.value) && !showWelcome.value);
+
+// 中文说明：这里只把宽度交给 CSS 变量。分成几栏由 CSS 根据 data-panel 标记去决定，
+// 这样窄屏的断点规则才能覆盖它 —— 内联样式会压过媒体查询，写在 style 里就压不动了。
+const layoutStyle = computed(() =>
+  panelVisible.value ? { "--panel-w": `${panelWidth.value}px` } : {},
+);
+
+/** 中文说明：读取上次存的右栏宽度。读出来不对劲（比如被手动改坏了）就回到默认值。 */
+function readStoredPanelWidth() {
+  const raw = Number(localStorage.getItem("pa.panel.width"));
+  if (!Number.isFinite(raw) || raw < PANEL_WIDTH_MIN || raw > PANEL_WIDTH_MAX) {
+    return PANEL_WIDTH_DEFAULT;
+  }
+  return raw;
+}
+
+/** 中文说明：拖拽右栏宽度。
+ *  按下把手时先记住鼠标起点和当时的宽度；鼠标移动时按位移算出新宽度；
+ *  松开鼠标时把最终宽度存进浏览器，下次打开还是这个宽度。 */
+function startPanelResize(event: PointerEvent) {
+  const startX = event.clientX;
+  const startWidth = panelWidth.value;
+  resizing.value = true;
+  // 中文说明：拖拽期间给 body 打个标记，让页面上的文字不会被顺手刷成蓝色。
+  document.body.setAttribute("data-resizing", "true");
+
+  const handleMove = (moveEvent: PointerEvent) => {
+    // 中文说明：鼠标往左拖是「把右栏拉宽」，所以要反过来减。
+    const next = startWidth - (moveEvent.clientX - startX);
+    panelWidth.value = Math.min(PANEL_WIDTH_MAX, Math.max(PANEL_WIDTH_MIN, next));
+  };
+
+  const handleUp = () => {
+    window.removeEventListener("pointermove", handleMove);
+    window.removeEventListener("pointerup", handleUp);
+    resizing.value = false;
+    document.body.removeAttribute("data-resizing");
+    localStorage.setItem("pa.panel.width", String(panelWidth.value));
+  };
+
+  window.addEventListener("pointermove", handleMove);
+  window.addEventListener("pointerup", handleUp);
+}
+
+/** 中文说明：双击把手，把右栏宽度恢复成默认的 320px。 */
+function resetPanelWidth() {
+  panelWidth.value = PANEL_WIDTH_DEFAULT;
+  localStorage.setItem("pa.panel.width", String(PANEL_WIDTH_DEFAULT));
+}
 
 // 精读报告抽屉状态
 const drawerVisible = ref(false);
@@ -204,6 +270,8 @@ watch(
 
 onBeforeUnmount(() => {
   closeStream(true);
+  // 中文说明：组件卸载时把排队中的渲染取消掉，免得它下一帧去动已经销毁的组件状态。
+  cancelScheduledSnapshot();
 });
 
 /** 加载指定会话的线程快照并重建聊天流（刷新恢复走的就是这里）。 */
@@ -280,8 +348,45 @@ function hydrateThread(thread: SessionThread) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 快照渲染的合并
+// ---------------------------------------------------------------------------
+
+/* 中文说明：流式输出时事件非常密集（一次精读实测能推几十条进度事件）。
+   如果每条事件都立刻把整个快照渲染一遍，整页会跟着反复重画，
+   看起来就像「每次模型或工具一出东西，页面就整个刷新一次」。
+
+   这里把一个动画帧之内的多条事件合并成一次渲染 —— 中间态不显示，
+   最终状态和以前完全一样，但渲染次数大幅下降。
+
+   注意：hydrateThread 和 submitMessage 里调的是 syncSnapshot()（不合并），
+   因为它们各自代表一次用户可见的完整动作（切换会话、发出消息），必须马上看到结果。 */
+let pendingSnapshotFrame = 0;
+
+/** 把下一次快照渲染排到当前这一帧的末尾。同一帧里重复调用只会排一次。 */
+function scheduleSnapshot() {
+  if (pendingSnapshotFrame) {
+    return;
+  }
+  pendingSnapshotFrame = requestAnimationFrame(() => {
+    pendingSnapshotFrame = 0;
+    syncSnapshot();
+  });
+}
+
+/** 取消排队中、还没执行的那次合并渲染。 */
+function cancelScheduledSnapshot() {
+  if (pendingSnapshotFrame) {
+    cancelAnimationFrame(pendingSnapshotFrame);
+    pendingSnapshotFrame = 0;
+  }
+}
+
 /** 把聚合器快照写回响应式状态。只有在用户没有手动向上滚动时才自动滚到底部。 */
 function syncSnapshot() {
+  // 中文说明：这里要立刻生效，所以先把排队中的合并渲染取消掉 ——
+  // 否则它下一帧会拿一份旧快照，把刚写进去的新结果覆盖回去。
+  cancelScheduledSnapshot();
   timelineSnapshot.value = aggregator.snapshot();
   // 中文注释：流式输出时如果用户向上滚了想回看前面的内容，就不强制滚到底部。
   if (!userScrolledUp.value) {
@@ -415,7 +520,9 @@ function openStream(sessionKey: string, streamUrl: string) {
     },
     onEvent: async (event) => {
       aggregator.apply(event);
-      syncSnapshot();
+      // 中文说明：不在这里直接渲染，而是排到本帧末尾统一渲染一次，
+      // 把密集的流式事件合并掉（详见 scheduleSnapshot 的注释）。
+      scheduleSnapshot();
       // 中文注释：检索工具一执行完就会推一条 kind=paper_list 的消息，这时论文已经写进工作区。
       // 顺手让左侧论文面板重拉一次，用户不用刷新页面就能看到刚检索到的论文。
       const cardKind = typeof event.metadata?.kind === "string" ? event.metadata.kind : "";
@@ -686,6 +793,16 @@ function handleError(error: unknown, title: string) {
 <template>
   <section class="page-shell chat-view-shell">
     <header v-if="!showWelcome" class="chat-view-header">
+      <!-- 中文说明：这个按钮只在窄屏出现（宽屏右栏一直在，不需要开关）。 -->
+      <button
+        type="button"
+        class="panel-toggle-narrow"
+        :aria-expanded="narrowPanelOpen"
+        @click="narrowPanelOpen = !narrowPanelOpen"
+      >
+        <Library :size="15" />
+        <span>论文</span>
+      </button>
       <div class="chat-view-heading">
         <h1>{{ selectedTitle }}</h1>
         <p>多轮对话式论文调研：检索、筛选、评价、精读、追问与综述都由助手按需执行。</p>
@@ -696,89 +813,109 @@ function handleError(error: unknown, title: string) {
       </div>
     </header>
 
-    <div class="chat-main-layout">
-      <div ref="scrollElement" class="chat-flow" :data-welcome="showWelcome" @scroll="handleScroll">
-        <div v-if="showWelcome" class="chat-welcome">
-          <ChatComposer
-            v-model="draft"
-            variant="welcome"
-            heading="今天想调研什么方向？"
-            helper-text="直接用一句话描述你的调研需求，助手会检索论文、给出卡片，并陪你逐步筛选、精读和追问。"
-            placeholder="例如：帮我调研 LLM 推理优化的最新论文"
-            :rows="3"
-            :running="isRunning"
-            :sending="sending || props.creatingSession"
-            :cancellable="Boolean(activeRunId)"
-            :cancelling="cancelling"
-            :status-text="statusText"
-            @submit="submitMessage()"
-            @cancel="cancelActiveRun"
-          />
-        </div>
-
-        <template v-else>
-          <div v-if="threadLoading" class="chat-loading">
-            <LoaderCircle class="spinning" :size="16" />
-            <span>正在恢复对话…</span>
+    <div
+      class="chat-main-layout"
+      :style="layoutStyle"
+      :data-panel="panelVisible ? 'true' : undefined"
+      :data-narrow-open="narrowPanelOpen ? 'true' : undefined"
+      :data-resizing="resizing"
+    >
+      <div class="chat-column">
+        <div ref="scrollElement" class="chat-flow" :data-welcome="showWelcome" @scroll="handleScroll">
+          <div v-if="showWelcome" class="chat-welcome">
+            <ChatComposer
+              v-model="draft"
+              variant="welcome"
+              heading="今天想调研什么方向？"
+              helper-text="直接用一句话描述你的调研需求，助手会检索论文、给出卡片，并陪你逐步筛选、精读和追问。"
+              placeholder="例如：帮我调研 LLM 推理优化的最新论文"
+              :rows="3"
+              :running="isRunning"
+              :sending="sending || props.creatingSession"
+              :cancellable="Boolean(activeRunId)"
+              :cancelling="cancelling"
+              :status-text="statusText"
+              @submit="submitMessage()"
+              @cancel="cancelActiveRun"
+            />
           </div>
 
-          <section v-for="(turn, turnIndex) in flowTurns" :key="turn.turnId ?? `turn-${turnIndex}`" class="chat-turn">
-            <template v-for="message in turn.messages" :key="message.id">
-              <UserBubble
-                v-if="message.role === 'user'"
-                :content="message.content"
-                :created-at="message.createdAt"
-                @resend="(content) => submitMessage(content)"
-              />
-              <AssistantBubble
-                v-else-if="message.role === 'assistant'"
-                :content="message.content"
-                :reasoning="message.reasoning"
-                :is-streaming="message.isStreaming"
-                :reasoning-streaming="message.reasoningStreaming"
-                :known-paper-ids="workspacePaperIds"
-                @paper-click="handlePaperClick"
-              />
-              <PaperCardGroup
-                v-else-if="message.kind === 'paper_list' && asPaperList(message)"
-                :payload="asPaperList(message)!"
-                :readable-paper-ids="readablePaperIds"
-                :busy="isRunning || sending"
-                @deep-read="requestDeepRead"
-                @open-report="openReportForPaper"
-              />
-              <DeepReadReportCard
-                v-else-if="message.kind === 'deep_read_report' && asDeepRead(message)"
-                :payload="asDeepRead(message)!"
-                @open="openReportFromCard"
-              />
-              <ReviewMessage
-                v-else-if="message.kind === 'review' && asReview(message)"
-                :payload="asReview(message)!"
-                :session-key="selectedSessionKey"
-              />
-              <div v-else-if="message.kind === 'error'" class="chat-system-line" data-tone="danger">
-                <MathText :text="message.content" />
-                <button
-                  type="button"
-                  class="chat-retry-button"
-                  @click="retryTurn(turn.turnId)"
-                >
-                  重试
-                </button>
-              </div>
-              <div v-else-if="message.role === 'system' && message.content" class="chat-system-line">
-                <MathText :text="message.content" />
-              </div>
-            </template>
+          <template v-else>
+            <div v-if="threadLoading" class="chat-loading">
+              <LoaderCircle class="spinning" :size="16" />
+              <span>正在恢复对话…</span>
+            </div>
 
-            <ToolCallTrace
-              :events="turn.events"
-              :active="isRunning && turnIndex === flowTurns.length - 1"
-              :on-resume="resumeHandler"
-            />
-          </section>
-        </template>
+            <section v-for="(turn, turnIndex) in flowTurns" :key="turn.turnId ?? `turn-${turnIndex}`" class="chat-turn">
+              <template v-for="message in turn.messages" :key="message.id">
+                <UserBubble
+                  v-if="message.role === 'user'"
+                  :content="message.content"
+                  :created-at="message.createdAt"
+                  @resend="(content) => submitMessage(content)"
+                />
+                <AssistantBubble
+                  v-else-if="message.role === 'assistant'"
+                  :content="message.content"
+                  :reasoning="message.reasoning"
+                  :is-streaming="message.isStreaming"
+                  :reasoning-streaming="message.reasoningStreaming"
+                  :known-paper-ids="workspacePaperIds"
+                  @paper-click="handlePaperClick"
+                />
+                <PaperCardGroup
+                  v-else-if="message.kind === 'paper_list' && asPaperList(message)"
+                  :payload="asPaperList(message)!"
+                  :readable-paper-ids="readablePaperIds"
+                  :busy="isRunning || sending"
+                  @deep-read="requestDeepRead"
+                  @open-report="openReportForPaper"
+                />
+                <DeepReadReportCard
+                  v-else-if="message.kind === 'deep_read_report' && asDeepRead(message)"
+                  :payload="asDeepRead(message)!"
+                  @open="openReportFromCard"
+                />
+                <ReviewMessage
+                  v-else-if="message.kind === 'review' && asReview(message)"
+                  :payload="asReview(message)!"
+                  :session-key="selectedSessionKey"
+                />
+                <div v-else-if="message.kind === 'error'" class="chat-system-line" data-tone="danger">
+                  <MathText :text="message.content" />
+                  <button
+                    type="button"
+                    class="chat-retry-button"
+                    @click="retryTurn(turn.turnId)"
+                  >
+                    重试
+                  </button>
+                </div>
+                <div v-else-if="message.role === 'system' && message.content" class="chat-system-line">
+                  <MathText :text="message.content" />
+                </div>
+              </template>
+
+              <ToolCallTrace
+                :events="turn.events"
+                :active="isRunning && turnIndex === flowTurns.length - 1"
+                :on-resume="resumeHandler"
+              />
+            </section>
+          </template>
+        </div>
+
+        <ChatComposer
+          v-if="!showWelcome"
+          v-model="draft"
+          :running="isRunning"
+          :sending="sending || props.creatingSession"
+          :cancellable="Boolean(activeRunId)"
+          :cancelling="cancelling"
+          :status-text="statusText"
+          @submit="submitMessage()"
+          @cancel="cancelActiveRun"
+        />
       </div>
 
       <!-- 回到底部按钮：用户向上滚动后出现 -->
@@ -792,6 +929,18 @@ function handleError(error: unknown, title: string) {
         ↓
       </button>
 
+      <!-- 中文说明：右栏的拖拽把手，只有右栏真的显示出来时才出现。
+           按住左右拖动可以调整论文工作区的宽度，双击恢复成默认的 320px。 -->
+      <button
+        v-if="selectedSessionKey && !showWelcome"
+        type="button"
+        class="panel-resizer"
+        aria-label="拖拽调整论文工作区宽度"
+        title="左右拖动调整宽度，双击恢复默认"
+        @pointerdown.prevent="startPanelResize"
+        @dblclick="resetPanelWidth"
+      ></button>
+
       <PaperLibraryPanel
         v-if="selectedSessionKey && !showWelcome"
         ref="libraryPanelRef"
@@ -803,17 +952,6 @@ function handleError(error: unknown, title: string) {
       />
     </div>
 
-    <ChatComposer
-      v-if="!showWelcome"
-      v-model="draft"
-      :running="isRunning"
-      :sending="sending || props.creatingSession"
-      :cancellable="Boolean(activeRunId)"
-      :cancelling="cancelling"
-      :status-text="statusText"
-      @submit="submitMessage()"
-      @cancel="cancelActiveRun"
-    />
 
     <DeepReadDrawer
       :visible="drawerVisible"

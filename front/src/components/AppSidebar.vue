@@ -117,10 +117,11 @@ function statusLabel(status: SessionStatus) {
   <aside class="sidebar" :data-collapsed="collapsed">
     <div class="sidebar-head">
       <div class="brand-lockup">
-        <div class="brand-mark">PA</div>
+        <!-- 品牌 logo：同一个 SVG 文件也用作浏览器标签页图标（见 index.html） -->
+        <img class="brand-mark" src="/logo.svg" alt="PaperAgent 标志" />
         <div v-if="!collapsed" class="brand-copy">
-          <span class="eyebrow">Papers Agents</span>
-          <strong>Console</strong>
+          <span class="eyebrow">论文调研工作台</span>
+          <strong>PaperAgent</strong>
         </div>
       </div>
       <button

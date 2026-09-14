@@ -38,7 +38,11 @@ class LLMDefaults:
     temperature: float | None = 0.7
     max_tokens: int | None = 4000
     reasoning_effort: str | None = "none"
-    context_window_tokens: int | None = 64000
+    # 中文注释：模型上下文窗口默认按 1M token 计（DeepSeek 等长窗口模型的实际量级）。
+    # 这个值会被主 Agent 用来给对话历史算预算：窗口 × 0.8 = 历史可占用的 token 上限，
+    # 超出才触发「工具结果归档 → LLM 压缩」。想立刻验证压缩效果，可以在 system.yaml
+    # 把这个值调小（比如 8000）。
+    context_window_tokens: int | None = 1048576
 
 
 @dataclass(slots=True)
@@ -98,7 +102,7 @@ class SystemConfig:
                 temperature=llm.get("temperature", 0.7),
                 max_tokens=llm.get("max_tokens", 4000),
                 reasoning_effort=llm.get("reasoning_effort", "none"),
-                context_window_tokens=llm.get("context_window_tokens", 64000),
+                context_window_tokens=llm.get("context_window_tokens", 1048576),
             ),
             paper_retrieval=PaperRetrievalConfig(
                 # 中文说明：配置里的 null 或空白内容都按“没有配置密钥”处理，

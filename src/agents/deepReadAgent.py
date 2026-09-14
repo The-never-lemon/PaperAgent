@@ -68,10 +68,15 @@ DEEP_READ_MAP_CONCURRENCY = 3
 MAP_NOTE_MAX_CHARS = 500
 
 # reduce 输入（分段笔记拼成的总文本）最多保留多少字，超出按块序截断并标注省略。
-REDUCE_INPUT_MAX_CHARS = 60000
+# 中文注释：替代按需拉取的更简方案——1M 窗口下直接放宽上限，绝大多数论文的
+# 全部笔记都能给到汇总阶段，"[部分内容已省略]"只在极端长文的兜底里出现。
+REDUCE_INPUT_MAX_CHARS = 150000
 
 # 返回给工具调用方的 report_summary 截断长度。
-REPORT_SUMMARY_CHARS = 300
+# 中文注释：300 → 1500。主 Agent 的工具结果上限也已放宽到 20000 字符，
+# 多给一些报告要点，主 Agent 转述/追问时不再只凭 300 字判断，减少
+# "以为没读过又去 deep_read 一遍"的误判。
+REPORT_SUMMARY_CHARS = 1500
 
 # 精读进度事件的 stage 名，对应 runtime.py 里 ("tool","deep_read_paper") 映射。
 DEEP_READ_STAGE = "deep_read_paper"

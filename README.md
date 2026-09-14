@@ -66,6 +66,7 @@ Paper-Agent 3.0 是相对旧版<a href="https://github.com/GreatZack">@GreatZack
 |--|------|-----------|
 | 🔍 | **多来源论文检索** | 内置 arXiv、OpenAlex、Semantic Scholar 连接器，统一为 `PaperDocument`，按年份、来源、数量和排除词筛选并去重；多源结果用 RRF（排名融合）排序——每篇论文按它在各源里给出的名次累计得分，被多个源同时命中、且名次靠前的排在前面 |
 | 📖 | **从摘要到全文的渐进式阅读** | 先读摘要判断相关性，满足条件的论文走下载 → PDF 转 Markdown（公式截图转成 LaTeX、表格截图重排成表头正确的 Markdown 表）→ 分块 → 逐块精读；同时把论文插图连着图注和正文里讲到它的段落一起交给模型读一遍，让它写清每张图画了什么；最后汇总成报告。全文下载或转换失败时自动降级为「基于摘要的精读」，并把失败原因告知用户 |
+| 🧠 | **上下文预算与自动压缩** | 对话历史不再按固定轮数截断，而是按「模型窗口 × 0.8」的 token 预算管理：超预算先免费归档旧工具结果（附 `get_history` 取回工具），仍不够再把最老的整轮经一次 LLM 调用压成要点摘要（带缓存、不落库）；问答子 Agent 同样改为「全文目录 + read_sections 按需取原文」，长论文中间内容不再被截断弄丢 |
 | 🔬 | **分层研究分析** | `AnalyseAgent` 先把工作区全部论文的结构化摘要做一次整体分析，再做一次全局综合，形成研究现状、共识、争议、空白、时间演化与展望等结构化内容 |
 | ✍️ | **证据约束下的综述写作** | `WritingOutlineAgent` 生成大纲与证据映射，`WritingAgent` 逐节写作、证据不足时检索补充、完成后审查并限次修改 |
 | 📡 | **实时会话工作台** | SSE 实时推送检索、阅读、分析、大纲与逐节写作进度，SQLite + 文件系统持久化，刷新后历史可恢复 |
@@ -95,7 +96,7 @@ flowchart TB
     subgraph SubAgents["子 Agent（agent-as-tool）"]
         direction TB
         DR[DeepReadAgent\n全文精读 map-reduce]
-        PQ[PaperQAAgent\n基于全文的追问]
+        PQ[PaperQAAgent\n目录 + read_sections 按需取原文追问]
         RV[ReviewPipeline\nStateGraph 编排综述流程]
     end
     
@@ -329,6 +330,8 @@ uv run python scripts/package.py    # 生成 Paper-Agent-<日期>.zip
 ### 系统参数
 
 `config/system.yaml` 存放系统级默认值和阅读参数：`defaults.llm` 是所有 Agent 档位未声明字段时的兜底生成参数，`paper_retrieval` 是检索数据源密钥，`read` 是阅读与下载参数（缓存目录、连接/下载超时、最大文件大小、PDF 解析器、公式识别开关）。
+
+其中 `defaults.llm.context_window_tokens` 默认按 1M token 计（DeepSeek 等长窗口模型的量级），主 Agent 用它给对话历史算预算：窗口 × 0.8 = 历史可占用上限，超出会自动「归档旧工具结果 → 整轮 LLM 压缩」。想快速验证压缩效果，可临时把它调小（如 8000）。
 
 其中 `read.formula_ocr` 默认开启：打开后会把论文里独立成段的公式截成小图交给对话模型转写成 LaTeX 再写进 `paper.md`，这样精读、问答、写作拿到的才是模型读得懂的公式写法。代价是每篇论文多出几十次模型调用（同一页的公式会合并成一次请求，一篇 35 页论文实测约 5 次）。关掉则退回「把公式字形原样放进 `$$` 块」的做法。
 

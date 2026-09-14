@@ -646,7 +646,6 @@ function handleError(error: unknown, title: string) {
   <section class="page-shell settings-page">
     <header class="hero-card">
       <div class="hero-copy">
-        <span class="eyebrow">Runtime Configuration</span>
         <h1>系统配置工作台</h1>
         <p>
           用一个干净的控制台统一管理模型上游与智能体配置。
@@ -684,7 +683,6 @@ function handleError(error: unknown, title: string) {
       <section class="panel-section">
         <div class="section-heading">
           <div>
-            <span class="eyebrow">01 Provider Workspace</span>
             <h2>模型提供商配置</h2>
             <p>Provider 类型来自后端接口，当前参数直接回填自配置文件。</p>
           </div>
@@ -863,7 +861,6 @@ function handleError(error: unknown, title: string) {
             <template v-if="!isCreatingProvider && selectedProvider">
               <div class="provider-footer">
                 <div class="mini-note">
-                  <span class="eyebrow">Model Catalog</span>
                   <p>
                     目录抓取只用于辅助选择模型名，不能代表当前智能体配置已经真实可调用。
                   </p>
@@ -898,7 +895,6 @@ function handleError(error: unknown, title: string) {
       <section class="panel-section">
         <div class="section-heading">
           <div>
-            <span class="eyebrow">02 Agent Matrix</span>
             <h2>智能体配置</h2>
             <p>以表格管理大量智能体，并为每个智能体提供独立的连通性测试入口。</p>
           </div>

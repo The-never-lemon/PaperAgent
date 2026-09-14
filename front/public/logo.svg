@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!--
+    PaperAgent 品牌标志：蓝紫渐变圆角方块 + 白色描边的「折角纸张 + 放大镜」。
+    设计说明：
+    1. 纸张代表论文，放大镜代表检索调研，线条风格与界面里的 lucide 图标一致；
+    2. 渐变使用 gradientUnits="userSpaceOnUse"，让放大镜镜片内部填充的渐变
+       和背景渐变完全同一套坐标，镜片压住纸张的地方看起来就像真的"挖空"了一块；
+    3. 线条加粗到 16px 大小时依然清晰，所以同一个文件可以直接当浏览器标签页图标。
+  -->
+  <defs>
+    <linearGradient id="pa-bg" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3b4d7a"/>
+      <stop offset="1" stop-color="#1a2440"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 圆角方块底 -->
+  <rect width="64" height="64" rx="16" fill="url(#pa-bg)"/>
+
+  <g fill="none" stroke="#ffffff" stroke-linecap="round" stroke-linejoin="round">
+    <!-- 折角纸张：右上角折一个三角 -->
+    <g transform="translate(11 12) scale(1.4)">
+      <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" stroke-width="3.4"/>
+      <path d="M14 2v4a2 2 0 0 0 2 2h4" stroke-width="3.4"/>
+    </g>
+    <!-- 放大镜：镜片填充与背景相同的渐变，压在纸张右下角 -->
+    <g transform="translate(29.3 30.3) scale(1.15)">
+      <circle cx="11" cy="11" r="8" fill="url(#pa-bg)" stroke-width="4.1"/>
+      <path d="m21 21-4.35-4.35" stroke-width="4.1"/>
+    </g>
+  </g>
+</svg>

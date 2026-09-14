@@ -1,9 +1,16 @@
-"""论文问答子 Agent（agent-as-tool 模式）。
+"""论文问答子 Agent（agent-as-tool 模式，按需取原文）。
 
 这个模块是对话式调研"追问已精读论文"链路的执行核心。主 Agent 通过
-ask_paper 工具把用户关于某篇论文的细节问题委派到这里，本模块负责：从工作区
-加载精读报告 → 从会话产物加载论文全文（拿不到全文时退回摘要）→ 组装上下文
-（超长截断）→ 单次模型调用（标注出处）→ 解析返回 {answer, source_sections}。
+ask_paper 工具把用户关于某篇论文的细节问题委派到这里。本模块负责：
+从工作区加载精读报告 → 定位论文全文缓存（chunk.json 切片） → 组装一个
+"只放报告 + 全文目录 + 问题"的轻上下文 → 小工具循环（模型通过
+read_sections 工具按需拉取相关原文片段）→ 解析最终回答
+返回 {answer, source_sections}。
+
+按需加载的设计动机（方案"上下文分配与自动压缩"）：长论文全文动辄几万
+字符，一次塞进提示词既浪费预算，超过上限还要硬截断、把中间内容弄丢。
+现在提示词里只放全文的"目录"（每个片段的编号 + 起始文字预览），模型按
+问题自己取回相关片段，长论文中间内容不再有截断盲区。
 
 整个流程自包含，不依赖 research_tools / researchAgent / deepReadAgent，所有
 运行时依赖通过 PaperQaDeps 显式传入，避免 Agent 间横向依赖和循环导入。
@@ -17,8 +24,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from src.llm.base import normalize_token_usage
+from src.llm.config import SystemConfig
 from src.utils import get_logger
 from src.utils.llm_json import parse_llm_json
+from src.utils.read_utils.chunkers import load_chunks_file
 
 from .contracts import JsonObject
 from .Prompts import PAPER_QA_SYSTEM_PROMPT
@@ -30,6 +39,7 @@ if TYPE_CHECKING:
     from src.llm.base import LLMResponse
     from src.models.workspace import SessionWorkspace, WorkspacePaperEntry
     from src.repositories.sessions.base import SessionRepository
+    from src.utils.read_utils.chunkers import TextChunk
 
 
 logger = get_logger(__name__)
@@ -42,14 +52,26 @@ logger = get_logger(__name__)
 # 问答进度事件的 stage 名，对应 runtime.py 里 ("tool","ask_paper") 映射。
 QA_STAGE = "ask_paper"
 
-# 组装给模型的论文全文上下文最大字符数，超出按"前 2/3 + 后 1/3"截断。
-QA_CONTEXT_MAX_CHARS = 30000
+# 一次 read_sections 最多取回的片段数。
+# 中文注释：片段上限 ≈ 精读切片大小（1200 字），一次最多 6 片，既让模型
+# 拿到足够上下文，又不会一小轮调用把问答上下文撑爆。
+QA_READ_MAX_CHUNKS = 6
+QA_READ_CHUNK_MAX_CHARS = 1200
 
-# 全文截断时夹在前后两段中间的省略提示语。
-QA_TRUNCATION_MARKER = "[全文中间部分已省略]"
+# 问答上下文里全文目录的最多条目数（切片更多时只展示前 N 条 + 一句"共 N 段"）。
+QA_TOC_MAX_ENTRIES = 60
+
+# 目录条目里每个片段预览文本的截断长度。
+QA_TOC_PREVIEW_CHARS = 60
 
 # 模型调用失败时，写进失败原因的错误正文截断长度。
 QA_ERROR_DETAIL_CHARS = 120
+
+# 问答小工具循环的最大轮数（每轮模型可调 read_sections 拉原文片段）。
+QA_MAX_TOOL_ROUNDS = 4
+
+# 未找到相关片段时 read_sections 返回的提示语。
+QA_READ_MISS_NOTE = "[未找到匹配的原文片段，可换关键词重试，或直接基于精读报告回答]"
 
 
 # ---------------------------------------------------------------------------
@@ -130,67 +152,154 @@ async def _run_paper_qa_impl(*, paper_id: str, question: str, deps: PaperQaDeps)
     if deps.llm is None:
         return _fail(deps, "模型未装配，无法回答")
 
-    # 第四步：加载材料。报告直接从工作区取；全文优先从会话产物读，读不到就用摘要代替。
+    # 第四步：定位材料。报告直接从工作区取；全文优先从会话产物读，
+    # 读不到时（摘要降级精读的论文本来就没有全文）用摘要代替。
     _check_cancellation(deps)
     deps.reporter.progress("正在准备问答材料", stage=QA_STAGE, event_key=deps.event_key)
     report = entry.deep_read.to_dict()
-    fulltext, used_abstract = await _load_fulltext(deps, entry, paper_id)
-    if used_abstract:
-        # 拿不到全文（摘要降级精读或读取失败），用报告加摘要回答，不报错。
+
+    chunks: "list[TextChunk]" | None = None
+    abstract = ""
+    fallback_fulltext = ""
+    if report.get("fulltext_artifact_id"):
+        # 有全文产物：读全文文本，并尝试加载它的切片目录。
+        fulltext = await _load_fulltext(deps, str(report["fulltext_artifact_id"]))
+        if fulltext:
+            chunks = await _load_chunks_from_cache(deps, paper_id)
+            if chunks is None:
+                # 中文注释：全文在但切片缓存没了（paper_cache 被清理、换机器等）。
+                # 不学旧版把全文白白丢掉——把全文截断后直接放进提示词，
+                # 比"基于摘要回答"保留多得多的论文信息。
+                fallback_fulltext = fulltext
+                deps.reporter.progress(
+                    "切片缓存不可用，将截断后的全文直接放进提示词",
+                    stage=QA_STAGE,
+                    event_key=deps.event_key,
+                )
+    if chunks is None and not fallback_fulltext:
+        # 既没有全文也没有可用切片：退回"报告 + 摘要"语义，和摘要降级精读一致。
+        abstract = str(entry.paper.get("abstract") or "")
         deps.reporter.progress(
             "未找到全文，使用报告与摘要回答",
             stage=QA_STAGE,
             event_key=deps.event_key,
         )
 
-    # 第五步：组装上下文（超长截断），拼成 JSON 字符串作为 user 消息。
+    # 第五步：组装轻上下文（报告 + 全文目录或截断全文（可选） + 问题 + 工具说明）。
     _check_cancellation(deps)
-    truncated = _truncate_fulltext(fulltext)
     user_content = json.dumps(
         {
             "精读报告": report,
-            "论文全文": truncated,
+            "论文全文目录": _build_toc(chunks) if chunks else None,
+            # 中文注释：切片不可用但有全文时，退回旧版语义——截断后的全文直接
+            # 放进提示词（保留前 2/3 + 后 1/3），保证回答仍基于正文。
+            "论文全文": _truncate_fulltext(fallback_fulltext) if fallback_fulltext else None,
+            "论文摘要": abstract or None,
             "论文标题": str(entry.paper.get("title") or ""),
             "用户问题": question,
         },
         ensure_ascii=False,
     )
 
-    # 第六步：单次调用模型，温度设 0 追求稳定、可核对的回答。
+    # 第六步：小工具循环。模型可调 read_sections 拉取相关原文片段，
+    # 最多 QA_MAX_TOOL_ROUNDS 轮；直到模型不再调工具，最后一轮输出就是回答。
     _check_cancellation(deps)
     deps.reporter.progress("正在生成回答", stage=QA_STAGE, event_key=deps.event_key)
-    messages = [
-        {"role": "system", "content": PAPER_QA_SYSTEM_PROMPT},
+    system_prompt = PAPER_QA_SYSTEM_PROMPT + _build_tool_instructions(chunks is not None)
+
+    messages: list[JsonObject] = [
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_content},
     ]
-    response = await deps.llm.provider.chat(messages, temperature=0)
+    qa_tools = _build_qa_tools(chunks) if chunks else []
 
-    # token 用量累加器：主调用 + 可能的一次 repair 重试都累加到这里。
+    # token 用量累加器：主调用 + 取文轮次 + 可能的 repair 重试都累加到这里。
     total_input = 0
     total_output = 0
-    usage = normalize_token_usage(response.usage)
-    total_input += usage["input_tokens"]
-    total_output += usage["output_tokens"]
 
-    # 模型调用失败 → 折叠成 failed（用量不单独上报，和 deepRead 的失败处理一致）。
-    if not response.ok:
-        return _fail(deps, _model_error_summary(response))
+    # 未压缩的原始对话（含 assistant(tool_calls) 与 tool 结果），repair 时复用。
+    conversation: list[JsonObject] = list(messages)
+    final_text = ""
+
+    for qa_round in range(1, QA_MAX_TOOL_ROUNDS + 1):
+        _check_cancellation(deps)
+        # 最后一轮不带工具收敛（和主 Agent 的强制收敛同一思路）：
+        # 让模型基于已取回的片段直接给出（最后一次）最终回答，
+        # 避免把"正在调用工具的过场白"当成最终回答。
+        tools_for_this_round = qa_tools if qa_round < QA_MAX_TOOL_ROUNDS else []
+        response = await deps.llm.provider.chat(conversation, temperature=0, tools=tools_for_this_round)
+        usage = normalize_token_usage(response.usage)
+        total_input += usage["input_tokens"]
+        total_output += usage["output_tokens"]
+
+        if not response.ok:
+            return _fail(deps, _model_error_summary(response))
+
+        # 模型没调工具（或者已经到了最后一轮）：这份输出就是最终回答。
+        if not response.tool_calls or qa_round == QA_MAX_TOOL_ROUNDS:
+            final_text = response.content or ""
+            break
+
+        # 有工具调用：执行 read_sections，把结果回填进对话，进入下一轮。
+        tool_calls = _normalize_tool_calls(response.tool_calls)
+        recorded_calls = []
+        for call in tool_calls:
+            tool_result = _handle_read_sections(call["arguments"], chunks)
+            recorded_calls.append(
+                {
+                    "role": "assistant",
+                    "content": response.content or "",
+                    "tool_calls": [
+                        {
+                            "id": call["id"],
+                            "type": "function",
+                            "function": {
+                                "name": call["name"],
+                                "arguments": json.dumps(call["arguments"], ensure_ascii=False),
+                            },
+                        }
+                    ],
+                }
+            )
+            conversation.extend(
+                [
+                    recorded_calls[-1],
+                    {"role": "tool", "tool_call_id": call["id"], "name": call["name"], "content": tool_result},
+                ]
+            )
+
+    # final_text 一直为空说明循环跑满了还在调工具（防御）。此时用最后一段
+    # 正文兜底；连正文都没有就报失败。
+    if not final_text:
+        for message in reversed(conversation):
+            if str(message.get("role") or "") == "assistant":
+                text = str(message.get("content") or "").strip()
+                if text:
+                    final_text = text
+                    break
+    if not final_text:
+        return _fail(deps, "模型没有给出回答内容")
 
     # 第七步：解析模型输出。解析失败会带错误信息重试一次（在 _repair 闭包里发生）。
     # 这就是"失败重试1次"，业务层不再自己套重试循环。
     async def _repair(error: str) -> str:
         """带着原始材料、上次的坏输出和解析错误信息让模型重新输出一次。
 
-        中文注释：重试时必须把精读报告和论文材料一起还给模型——只发一句错误
-        提示的话，模型看不到材料，只能编一个空洞回答，重试就失去意义了。
+        中文注释：重试时把完整对话（含取回的原文片段）一起还给模型——
+        只发一句错误提示的话，模型看不到材料，只能编一个空洞回答。
         """
 
         nonlocal total_input, total_output
         repair_messages = [
-            {"role": "system", "content": PAPER_QA_SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-            {"role": "assistant", "content": response.content or ""},
-            {"role": "user", "content": f"你上次的输出无法解析成要求的 JSON：{error}。请重新只输出一个符合要求的 JSON 对象。"},
+            *conversation,
+            {"role": "assistant", "content": final_text},
+            {
+                "role": "user",
+                "content": (
+                    f"你上次的输出无法解析成要求的 JSON：{error}。"
+                    "请重新只输出一个符合要求的 JSON 对象（answer + source_sections）。"
+                ),
+            },
         ]
         repair_response = await deps.llm.provider.chat(repair_messages, temperature=0)
         repair_usage = normalize_token_usage(repair_response.usage)
@@ -198,7 +307,7 @@ async def _run_paper_qa_impl(*, paper_id: str, question: str, deps: PaperQaDeps)
         total_output += repair_usage["output_tokens"]
         return repair_response.content or ""
 
-    payload = await parse_llm_json(response.content or "", fallback={}, repair=_repair)
+    payload = await parse_llm_json(final_text, fallback={}, repair=_repair)
     # payload 含 parse_error 说明解析彻底失败（连重试也没救回来）。
     if "parse_error" in payload:
         logger.warning(
@@ -229,7 +338,7 @@ async def _run_paper_qa_impl(*, paper_id: str, question: str, deps: PaperQaDeps)
         extra={
             "session_key": deps.session_key,
             "paper_id": paper_id,
-            "used_abstract": used_abstract,
+            "chunked": chunks is not None,
             "answer_chars": len(answer),
             "input_tokens": total_input,
             "output_tokens": total_output,
@@ -244,66 +353,274 @@ async def _run_paper_qa_impl(*, paper_id: str, question: str, deps: PaperQaDeps)
 # ---------------------------------------------------------------------------
 
 
-async def _load_fulltext(
-    deps: PaperQaDeps,
-    entry: "WorkspacePaperEntry",
-    paper_id: str,
-) -> tuple[str, bool]:
-    """加载论文全文，读不到就退回摘要。
+async def _load_fulltext(deps: PaperQaDeps, artifact_id: str) -> str:
+    """从会话产物加载论文全文文本，读不到返回空字符串（不报错）。
 
-    返回 (全文文本, 是否用了摘要代替)。优先用精读报告里记录的全文产物编号
-    去会话产物里取文件路径，再读文本；任何一步失败或没有全文产物，就用论文
-    摘要代替，不报错（摘要降级精读的论文本来就没有全文产物）。
+    中文注释：全文正文本身这里只用来测"有没有全文"和触发切片定位，
+    不再整体塞进提示词——它是模板 read_sections 工具背后的数据源。
     """
 
-    # 调用方已保证 entry.deep_read 不为 None（在 _run_paper_qa_impl 第二步检查过）。
-    report = entry.deep_read
-    artifact_id = str(report.fulltext_artifact_id or "").strip() if report is not None else ""
-    if artifact_id:
-        try:
-            # 走仓储的 read_artifact_path 拿路径（自带路径安全校验），放在线程里避免阻塞。
-            path = await asyncio.to_thread(
-                deps.repo.read_artifact_path, deps.session_key, artifact_id
-            )
-            if path is not None:
-                # 路径拿到再在线程里读文本，避免同步 IO 卡住事件循环。
-                text = await asyncio.to_thread(path.read_text, encoding="utf-8")
-                if text:
+    try:
+        # 走仓储的 read_artifact_path 拿路径（自带路径安全校验），放在线程里避免阻塞。
+        path = await asyncio.to_thread(deps.repo.read_artifact_path, deps.session_key, artifact_id)
+        if path is not None:
+            text = await asyncio.to_thread(path.read_text, encoding="utf-8")
+            return text or ""
+    except Exception as exc:
+        # 读不到全文不报错，降级用摘要回答（不捕获 CancelledError，它属于 BaseException）。
+        logger.warning(
+            "读取论文全文产物失败，改用摘要",
+            extra={"session_key": deps.session_key, "artifact_id": artifact_id, "error": str(exc)[:200]},
+        )
+    return ""
+
+
+async def _load_chunks_from_cache(deps: PaperQaDeps, paper_id: str) -> "list[TextChunk] | None":
+    """从论文缓存目录加载 chunk.json 切片，成功返回 TextChunk 列表。
+
+    中文注释：精读时 PageChunker 切好的切片就躺在 data/paper_cache 的论文
+    缓存目录里（chunk.json）。问答直接复用这份切片，不需要重新切分。
+    缓存目录可能带日期后缀等五花八门的名字，按写作 Agent 的同款策略
+    （metadata.json 里的 paperId 反查）兜底定位。
+    """
+
+    try:
+        # 中文注释：用 SystemConfig.load()（会读 config/system.yaml）取缓存目录，
+        # 不能用 SystemConfig()——直接构造不会读配置文件，用户改过的
+        # paper_cache_dir 就不生效了。
+        cache_dir = SystemConfig.load().read.paper_cache_dir
+        from pathlib import Path
+
+        root = Path(cache_dir)
+        if not root.exists():
+            return None
+        # 第一选择：safe_cache_name(paper_id) 直名目录；找不到就遍历目录
+        # 用 metadata.json 里的 paperId 反查。
+        from src.utils.read_utils.cache import safe_cache_name
+
+        candidates: "list[Path]" = []
+        direct = root / safe_cache_name(paper_id)
+        if direct.exists():
+            candidates.append(direct)
+        for directory in root.iterdir():
+            if not directory.is_dir() or directory in candidates:
+                continue
+            metadata_path = directory / "metadata.json"
+            try:
+                payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            paper = dict(payload.get("paper") or {})
+            if paper_id in {
+                str(payload.get("paperId") or ""),
+                str(paper.get("paperId") or ""),
+                str(paper.get("id") or ""),
+            }:
+                candidates.append(directory)
+        for directory in candidates:
+            chunks_path = directory / "chunk.json"
+            if chunks_path.exists():
+                chunks = await asyncio.to_thread(load_chunks_file, chunks_path)
+                if chunks:
                     logger.info(
-                        "问答加载到论文全文",
-                        extra={
-                            "session_key": deps.session_key,
-                            "paper_id": paper_id,
-                            "chars": len(text),
-                        },
+                        "问答加载到全文切片",
+                        extra={"session_key": deps.session_key, "paper_id": paper_id, "chunks": len(chunks)},
                     )
-                    return text, False
-        except Exception as exc:
-            # 读不到全文不报错，降级用摘要回答（不捕获 CancelledError，它属于 BaseException）。
-            logger.warning(
-                "读取论文全文产物失败，改用摘要",
-                extra={
-                    "session_key": deps.session_key,
-                    "paper_id": paper_id,
-                    "error": str(exc)[:200],
+                    return chunks
+    except Exception as exc:
+        logger.warning(
+            "定位问答切片缓存失败，回退摘要模式",
+            extra={"session_key": deps.session_key, "paper_id": paper_id, "error": str(exc)[:200]},
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 轻上下文组装
+# ---------------------------------------------------------------------------
+
+
+def _build_toc(chunks: "list[TextChunk] | None") -> JsonObject | None:
+    """把切片清单压成一份"目录"（编号 + 章节 + 起始文字预览）。
+
+    中文注释：目录远小于全文，几万字符的论文在提示词里只占几百到一两千
+    字符。模型看到"哪一段大概在讲什么"，需要细节时再用 read_sections 按
+    编号精确取原文。
+    """
+
+    if not chunks:
+        return None
+    entries = []
+    for chunk in chunks[:QA_TOC_MAX_ENTRIES]:
+        preview = " ".join(chunk.content.split())[:QA_TOC_PREVIEW_CHARS]
+        entries.append(
+            {
+                "chunkId": chunk.chunk_id,
+                "章节": chunk.section or "（未标注章节）",
+                "起始文字": preview,
+            }
+        )
+    toc: JsonObject = {"总段数": len(chunks), "目录": entries}
+    if len(chunks) > QA_TOC_MAX_ENTRIES:
+        toc["提醒"] = f"只展示前 {QA_TOC_MAX_ENTRIES} 段，更多段可用 read_sections 按关键词查找"
+    return toc
+
+
+def _build_tool_instructions(chunks: "list[TextChunk] | None") -> str:
+    """给系统提示词追加 read_sections 的使用说明（有切片时才追加）。"""
+
+    if not chunks:
+        return ""
+    return (
+        "\n\n## 按需取原文\n"
+        "本次会话你有一个工具可以调用：read_sections({\"keywords\": [\"关键词1\"], "
+        "\"chunk_ids\": [\"chunk-x\"]})。当精读报告或目录不足以回答问题时，"
+        "先用关键词或目录里的编号调用它取回相关原文片段，再基于片段内容回答；"
+        "最多可以调用几轮。出处标注规则不变：来自取回片段的结论标"
+        " [全文:章节/段落标识]（片段头部会写明所属章节）。"
+    )
+
+
+# ---------------------------------------------------------------------------
+# read_sections 工具（只读，从切片缓存拉取原文）
+# ---------------------------------------------------------------------------
+
+# read_sections 工具的 LLM function schema（传给 provider.chat 的 tools 参数）。
+_QA_READ_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "read_sections",
+        "description": (
+            "按关键词或片段编号从论文全文里取回相关片段（最多 6 段，每段最多 1200 字）。"
+            "回答问题前，如果精读报告和全文目录不够用，先用它取回原文再回答。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "keywords": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "要找的内容关键词（中英文均可），命中越多段的排序越靠前",
                 },
-            )
+                "chunk_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "全文目录里看到的片段编号，点名要某一段时使用",
+                },
+            },
+        },
+    },
+}
 
-    # 走到这里说明没有全文产物，或者读取失败：用摘要代替。
-    abstract = str(entry.paper.get("abstract") or "")
-    return abstract, True
+
+def _handle_read_sections(arguments: JsonObject, chunks: "list[TextChunk]") -> str:
+    """执行 read_sections：按关键词/编号从切片列表里挑片段，返回拼接文本。
+
+   挑法（中文注释）：先按关键词计分（大小写不敏感、命中关键词数多者优先），
+    没给关键词时按给出的 chunk_ids 直接取；两种都没给就返回未命中提示。
+    取回的每段头部会写明编号和章节，方便模型标注出处。
+    """
+
+    keywords = [str(k or "").strip().lower() for k in (arguments.get("keywords") or []) if str(k or "").strip()]
+    wanted_ids = {str(k or "").strip() for k in (arguments.get("chunk_ids") or []) if str(k or "").strip()}
+
+    scored: "list[tuple[int, int, TextChunk]]" = []
+    for index, chunk in enumerate(chunks):
+        content = chunk.content or ""
+        lowered = content.lower()
+        score = sum(1 for keyword in keywords if keyword and keyword in lowered)
+        if wanted_ids and chunk.chunk_id in wanted_ids:
+            score += len(keywords) + 1  # 点名要的片段直接排最前
+        if score > 0 or (not keywords and not wanted_ids):
+            scored.append((score, -index, chunk))
+
+    if not scored:
+        return QA_READ_MISS_NOTE
+
+    # 计分高在前，同分的按位置（老段优先）。
+    scored.sort(key=lambda pair: (pair[0], pair[1]), reverse=True)
+    picked = scored[:QA_READ_MAX_CHUNKS]
+
+    lines: "list[str]" = []
+    for score, _, chunk in picked:
+        content = (chunk.content or "")[:QA_READ_CHUNK_MAX_CHARS]
+        section_label = chunk.section or "（未标注章节）"
+        lines.append(f"### 片段 {chunk.chunk_id}（章节：{section_label}）\n{content}")
+
+    # 中文注释：按模型给的 chunk_ids 点名取却没找到的片段，如实提示。
+    picked_ids = {chunk.chunk_id for _, _, chunk in picked}
+    if wanted_ids - picked_ids:
+        lines.append(f"[以下编号没有对应片段或没有命中内容：{', '.join(sorted(wanted_ids - picked_ids))}]")
+
+    text = "\n\n".join(lines)
+    logger.info(
+        "问答 read_sections 取回片段",
+        extra={"chunks": len(picked), "chars": len(text)},
+    )
+    return text
+
+
+def _build_qa_tools(chunks: "list[TextChunk]") -> list[JsonObject]:
+    """构建传给 provider.chat 的工具 schema 列表（有切片时只有一个 read_sections）。"""
+
+    return [_QA_READ_TOOL_SCHEMA]
+
+
+def _normalize_tool_calls(tool_calls: Any) -> list[JsonObject]:
+    """把 provider 返回的 tool_calls 整理成 [{"id", "name", "arguments"(dict)}]。
+
+    中文注释：arguments 上游可能返回原始 JSON 字符串，这里统一解析成字典，
+    解析失败按空参数处理（read_sections 两个参数都是可选的）。
+    """
+
+    normalized: "list[JsonObject]" = []
+    for call in tool_calls or []:
+        if not isinstance(call, dict):
+            # provider 的统一结构是 ToolCallRequest（dataclass），转字典处理。
+            call = {
+                "id": getattr(call, "id", None) or "",
+                "name": getattr(call, "name", "") or "",
+                "arguments": getattr(call, "arguments", None),
+            }
+        arguments = call.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except (json.JSONDecodeError, TypeError):
+                arguments = {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        # 中文注释：有的供应商不返回 tool_call id，此时 assistant/tool 消息会
+        # 拼出空 id 配对，部分上游会直接拒绝。没有 id 就按调用顺序补一个。
+        call_id = str(call.get("id") or "").strip()
+        if not call_id:
+            call_id = f"qa_call_{len(normalized) + 1}"
+        normalized.append(
+            {
+                "id": call_id,
+                "name": str(call.get("name") or "read_sections"),
+                "arguments": arguments,
+            }
+        )
+    return normalized
 
 
 # ---------------------------------------------------------------------------
-# 上下文截断
+# 上下文截断（全文直接放进提示词的降级路径用）
 # ---------------------------------------------------------------------------
+
+# 切片缓存不可用但有全文时，塞进提示词的全文上限。
+QA_CONTEXT_MAX_CHARS = 30000
+
+# 全文截断时夹在前后两段中间的省略提示语。
+QA_TRUNCATION_MARKER = "[全文中间部分已省略]"
 
 
 def _truncate_fulltext(text: str) -> str:
     """全文超长时保留前 2/3 和后 1/3，中间用一行省略提示标注。
 
-    全文长度没超过 QA_CONTEXT_MAX_CHARS 时原样返回；超过时按预算的前 2/3 + 后 1/3
-    截断，保证模型既能看到开头的方法/背景，也能看到结尾的结论。
+    中文注释：这条路径只在"全文在但切片缓存丢了"时使用——正常路径下模型
+    通过 read_sections 按需取原文，根本不需要全文进提示词。
     """
 
     if len(text) <= QA_CONTEXT_MAX_CHARS:

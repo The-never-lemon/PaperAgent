@@ -1,33 +1,100 @@
 @import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap");
 
+/* ==========================================================================
+   设计令牌（全站唯一的颜色 / 字号 / 间距 / 圆角 / 阴影来源）
+
+   这一套是「单一阅读面 · 灰阶定层级」体系：
+   整个界面只有一个白色「阅读面」，只给三样东西用 —— 对话气泡、精读报告、综述正文。
+   论文卡片、执行过程、筛选栏、设置页全部退到次级面和全局底上，只靠 1px 细线划界。
+   层级由五档灰阶加字重表达，不再靠边框和阴影。
+   蓝紫色只出现在用户能动手的地方（按钮、选中的行、输入框焦点、可点的引用）。
+   ========================================================================== */
+
 :root {
   color-scheme: light;
-  --bg: #f4f7fb;
-  --bg-strong: #eef3f8;
-  --surface: rgba(255, 255, 255, 0.9);
-  --surface-strong: #ffffff;
-  --surface-muted: #f8fbfd;
-  --border: rgba(14, 30, 50, 0.08);
-  --border-strong: rgba(14, 30, 50, 0.12);
-  --text: #0f1726;
-  --text-soft: #516174;
-  --text-faint: #7c8a9d;
-  --accent: #1f8fb5;
-  --accent-soft: rgba(31, 143, 181, 0.12);
-  --success: #20745f;
-  --success-soft: rgba(32, 116, 95, 0.12);
-  --warning: #a86b11;
-  --warning-soft: rgba(168, 107, 17, 0.12);
-  --danger: #b14343;
-  --danger-soft: rgba(177, 67, 67, 0.12);
-  --shadow-lg: 0 24px 80px rgba(15, 23, 38, 0.08);
-  --shadow-md: 0 16px 40px rgba(15, 23, 38, 0.06);
-  --radius-xl: 30px;
-  --radius-lg: 22px;
-  --radius-md: 16px;
-  --radius-sm: 12px;
+
+  /* ---- 字体 ---- */
   --font-sans: "Manrope", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+
+  /* ---- 墨色五档：越靠上越深，用来分信息层级 ---- */
+  --ink-0: #0e1524; /* 论文标题、段落标题、评分数字 */
+  --ink-1: #1e2a40; /* 正文默认、对话气泡、摘要 */
+  --ink-2: #47536b; /* 精读报告的段落正文 */
+  --ink-3: #5f6b83; /* 作者 / 年份 / 来源 / 时间戳 / 状态标签，用得最多的一档 */
+  --ink-4: #8b95a9; /* 只给输入框占位文字和禁用态用，不承载任何需要阅读的内容（对比度只有 3.01:1） */
+
+  /* ---- 面：阅读面只有一个 ---- */
+  --paper: #ffffff; /* 只给：对话气泡、精读报告、综述正文 */
+  --paper-2: #fafbfd; /* 次级面：代码块、右栏列表底、筛选栏 */
+  --ground: #f1f3f9; /* 全局底色，纯色 */
+  --sunken: #eef0f6; /* 凹下去的地方：输入框、表头、只读字段、工具调用区 */
+
+  /* ---- 细线：靠 1px 分界，不靠阴影 ---- */
+  --line: #e4e8f0; /* 常规分隔线、列表行 */
+  --line-2: #d2d8e4; /* 需要明确「这是一块边界」时：输入框、下拉框、卡片描边、拖拽把手 */
+
+  /* ---- 主色：只出现在用户能动手的地方 ---- */
+  --accent: #536cf5;
+  --accent-ink: #3a49c4; /* 小字专用的主色，白底上对比度 7.17:1，够清楚 */
+  --accent-tint: #eef0fe; /* 选中行的底色、小标签的底色 */
+  --accent-edge: #c9d0fb; /* 浅色底块的边界，浅底块要边界不要阴影 */
+
+  /* ---- 星标：这是「收藏」标记，不是状态，所以单独一色 ---- */
+  --star: #e8a33d;
+  --star-ink: #8a5a10;
+
+  /* ---- 语义色：浅底加深字成对使用；纯色只用于图标和状态点 ---- */
+  --success: #2f8f6b;
+  --success-soft: #e9f5ef;
+  --success-ink: #1f6b4f;
+  --warning: #b7791f;
+  --warning-soft: #fdf4e3;
+  --warning-ink: #7d5310;
+  --danger: #c0455a;
+  --danger-soft: #fdeef1;
+  --danger-ink: #9b3448;
+
+  /* ---- 字号阶梯 ---- */
+  --fs-micro: 11.5px; /* 次要徽章、时间戳、篇数、token 用量 */
+  --fs-meta: 12.5px; /* 卡片元信息、表头、筛选控件、报告段落标题 */
+  --fs-small: 13.5px; /* 论文摘要、列表标题、按钮、表单标签 */
+  --fs-body: 14.5px; /* 对话气泡正文 */
+  --fs-read: 15.5px; /* 长文阅读：精读报告正文、综述正文 */
+  --fs-title: 17px; /* 卡片标题、抽屉论文标题、区块标题 */
+  --fs-display: 20px; /* 欢迎页大标题 */
+  --fs-metric: 28px; /* 指标数字（统计数、评分），配合 tabular-nums 用 */
+
+  /* ---- 间距阶梯（4px 为基准） ---- */
+  --sp-1: 4px; /* 图标与文字、徽章内边距、列表项之间 */
+  --sp-2: 8px; /* 标题与它自己的副标题 */
+  --sp-3: 12px; /* 紧凑卡片内边距、列表行上下 */
+  --sp-4: 16px; /* 常规卡片内边距、表单字段之间 */
+  --sp-6: 24px; /* 卡片之间、对话轮之间、报告段落之间 */
+  --sp-8: 32px; /* 大区块之间、报告正文左右留白 */
+  --sp-12: 48px; /* 欢迎页上下留白 */
+
+  /* ---- 圆角：跟「这块东西离阅读面有多远」绑定 ---- */
+  --r-flat: 4px; /* 徽章、小标签、评分、状态、来源 */
+  --r-inline: 6px; /* 行内代码、小按钮、下拉框 */
+  --r-box: 10px; /* 输入框、对话气泡、论文卡、列表选中块 */
+  --r-block: 14px; /* 论文卡组、报告卡、综述卡、筛选栏 */
+  --r-sheet: 18px; /* 只有抽屉和弹窗用这一档 */
+
+  /* ---- 阴影：只有真正浮起来的东西才有阴影，静态的一律没有 ---- */
+  --sh-none: none; /* 所有静态面：卡片、面板、侧栏、气泡、筛选栏 */
+  --sh-raise: 0 4px 14px rgba(13, 21, 38, 0.07); /* 粘底的输入框、粘顶的筛选栏、下拉菜单 */
+  --sh-float: 0 16px 48px rgba(13, 21, 38, 0.14); /* 抽屉、弹窗、右上角提示 */
+
+  /* ---- 动效：全站只允许三个时长，避免各种毫秒数混在一起 ---- */
+  --ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+  --dur-fast: 120ms; /* 按钮、小标签的颜色变化 */
+  --dur-mid: 140ms; /* 新消息出现 */
+  --dur-slow: 180ms; /* 抽屉滑出 */
+
+  /* ---- 右侧论文栏的宽度（用户可以拖拽调整，会存到浏览器里） ---- */
+  --panel-w: 320px;
+
 }
 
 * {
@@ -43,10 +110,9 @@ body,
 body {
   margin: 0;
   font-family: var(--font-sans);
-  background:
-    radial-gradient(circle at top left, rgba(31, 143, 181, 0.1), transparent 28%),
-    linear-gradient(180deg, #f7fafc 0%, var(--bg) 48%, #f1f5f9 100%);
-  color: var(--text);
+  /* 中文说明：全局底色用纯色。之前这里铺了两层渐变，会把所有卡片的边界糊在一起。 */
+  background: var(--ground);
+  color: var(--ink-1);
 }
 
 button,
@@ -91,11 +157,10 @@ a {
   padding: 18px 16px;
   margin: 16px;
   margin-right: 18px;
-  border: 1px solid var(--border);
-  border-radius: calc(var(--radius-xl) + 6px);
+  border: 1px solid var(--line);
+  border-radius: calc(var(--r-sheet) + 6px);
   background: rgba(255, 255, 255, 0.72);
-  backdrop-filter: blur(18px);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--sh-none);
   overflow: hidden;
 }
 
@@ -140,18 +205,26 @@ a {
   gap: 12px;
 }
 
-.brand-mark,
 .metric-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 42px;
   height: 42px;
-  border-radius: 14px;
-  background: linear-gradient(180deg, rgba(31, 143, 181, 0.18), rgba(31, 143, 181, 0.08));
-  color: var(--accent);
+  border-radius: var(--r-box);
+  background: var(--paper-2);
+  color: var(--ink-3);
   font-weight: 800;
   letter-spacing: 0.04em;
+}
+
+/* 中文说明：品牌 logo（front/public/logo.svg，纸张+放大镜图案）。
+   SVG 自带圆角渐变底，这里只负责撑住尺寸，避免在 flex 布局里被压扁。 */
+.brand-mark {
+  display: block;
+  flex-shrink: 0;
+  width: 42px;
+  height: 42px;
 }
 
 .brand-copy strong,
@@ -163,16 +236,17 @@ a {
   margin: 0;
 }
 
+/* 中文说明：区块上方的小标签。原来写成了「全大写 + 拉宽字距 + 等宽字体」，
+   每个标题上方都来一遍，看着很像套模板，但它其实没多说出什么信息。
+   改成正常的句式标签，靠灰度和字号来区分层级。 */
 .eyebrow {
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: var(--accent);
+  font-size: var(--fs-meta);
+  font-weight: 600;
+  color: var(--ink-3);
 }
 
 .brand-copy .eyebrow {
-  color: var(--text-faint);
+  color: var(--ink-3);
 }
 
 .icon-button,
@@ -181,11 +255,14 @@ a {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 14px;
-  background: var(--surface-strong);
-  color: var(--text);
-  transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+  background: var(--paper);
+  color: var(--ink-1);
+  /* 中文说明：只让边框和底色变化。原来这里带了 transform，
+     鼠标一移上去按钮就往上弹一下 —— 界面上按钮很多，一片一起动，
+     看起来就像每点一下就缩放／抖动一次。 */
+  transition: border-color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease);
 }
 
 .icon-button {
@@ -203,7 +280,7 @@ a {
   min-height: 36px;
   padding: 0 12px;
   border-radius: 12px;
-  font-size: 0.92rem;
+  font-size: var(--fs-body);
 }
 
 .button.block {
@@ -211,20 +288,20 @@ a {
 }
 
 .button.primary {
-  border-color: rgba(31, 143, 181, 0.22);
-  background: linear-gradient(180deg, #2197bf, #177fa3);
-  color: white;
+  border-color: rgba(83, 108, 245, 0.22);
+  background: linear-gradient(180deg, var(--accent), var(--accent-ink));
+  color: var(--paper);
 }
 
 /* 中文注释：删除类操作统一用红色描边和文字，避免误点后无法挽回。 */
 .button.danger {
-  border-color: rgba(190, 62, 62, 0.32);
-  color: #c93a3a;
+  border-color: rgba(192, 69, 90, 0.32);
+  color: var(--danger-ink);
   background: rgba(255, 255, 255, 0.78);
 }
 
 .button.danger:hover {
-  background: rgba(201, 58, 58, 0.08);
+  background: rgba(192, 69, 90, 0.08);
 }
 
 .button.secondary,
@@ -243,13 +320,6 @@ a {
   padding: 0 10px;
 }
 
-.button:hover,
-.icon-button:hover,
-.nav-item:hover,
-.provider-tab:hover {
-  transform: translateY(-1px);
-}
-
 .rotated {
   transform: rotate(180deg);
 }
@@ -266,22 +336,22 @@ a {
   padding: 14px 16px;
   border: 1px solid transparent;
   border-radius: 18px;
-  color: var(--text-soft);
+  color: var(--ink-2);
 }
 
 .nav-item.active {
-  border-color: rgba(31, 143, 181, 0.16);
-  background: linear-gradient(180deg, rgba(31, 143, 181, 0.12), rgba(31, 143, 181, 0.06));
-  color: var(--text);
+  border-color: rgba(83, 108, 245, 0.16);
+  background: linear-gradient(180deg, rgba(83, 108, 245, 0.12), rgba(83, 108, 245, 0.06));
+  color: var(--ink-1);
 }
 
 .sidebar-foot {
   margin-top: auto;
   padding: 16px;
   border-radius: 18px;
-  background: rgba(248, 251, 253, 0.9);
-  color: var(--text-soft);
-  font-size: 0.9rem;
+  background: rgba(250, 251, 253, 0.9);
+  color: var(--ink-2);
+  font-size: var(--fs-body);
   line-height: 1.6;
 }
 
@@ -291,7 +361,7 @@ a {
   gap: 12px;
   min-height: 0;
   padding-top: 6px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--line);
 }
 
 .sidebar-history-head,
@@ -304,7 +374,7 @@ a {
 
 .sidebar-history-head h2 {
   margin: 2px 0 0;
-  font-size: 0.98rem;
+  font-size: var(--fs-read);
 }
 
 .sidebar-history-create:disabled {
@@ -318,11 +388,11 @@ a {
   gap: 8px;
   min-height: 88px;
   padding: 14px;
-  border: 1px dashed var(--border-strong);
+  border: 1px dashed var(--line-2);
   border-radius: 18px;
-  background: rgba(248, 251, 253, 0.72);
-  color: var(--text-soft);
-  font-size: 0.9rem;
+  background: rgba(250, 251, 253, 0.72);
+  color: var(--ink-2);
+  font-size: var(--fs-body);
 }
 
 .sidebar-session-list {
@@ -341,10 +411,10 @@ a {
 .sidebar-session-group-title {
   padding-inline: 4px;
   font-family: var(--font-mono);
-  font-size: 0.72rem;
+  font-size: var(--fs-micro);
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--text-faint);
+  color: var(--ink-3);
 }
 
 .sidebar-session-item {
@@ -357,20 +427,21 @@ a {
   border: 1px solid transparent;
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.62);
-  color: var(--text);
+  color: var(--ink-1);
   text-align: left;
-  transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+  transition: border-color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease);
 }
 
+/* 中文说明：hover 只变边框和底色，不做上下位移。
+   列表行一起一伏的时候，扫读的视线会被反复拽走。 */
 .sidebar-session-item:hover {
-  transform: translateY(-1px);
-  border-color: rgba(31, 143, 181, 0.14);
+  border-color: rgba(83, 108, 245, 0.14);
   background: rgba(255, 255, 255, 0.9);
 }
 
 .sidebar-session-item.active {
-  border-color: rgba(31, 143, 181, 0.2);
-  background: linear-gradient(180deg, rgba(31, 143, 181, 0.1), rgba(255, 255, 255, 0.86));
+  border-color: rgba(83, 108, 245, 0.2);
+  background: linear-gradient(180deg, rgba(83, 108, 245, 0.1), rgba(255, 255, 255, 0.86));
 }
 
 .sidebar-session-accent {
@@ -397,15 +468,15 @@ a {
 }
 
 .sidebar-session-title {
-  font-size: 0.94rem;
+  font-size: var(--fs-read);
   font-weight: 700;
   white-space: nowrap;
 }
 
 .sidebar-session-preview {
   display: -webkit-box;
-  color: var(--text-soft);
-  font-size: 0.84rem;
+  color: var(--ink-2);
+  font-size: var(--fs-small);
   line-height: 1.45;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -413,15 +484,15 @@ a {
 
 .sidebar-session-meta {
   justify-content: flex-start;
-  color: var(--text-faint);
-  font-size: 0.78rem;
+  color: var(--ink-3);
+  font-size: var(--fs-meta);
 }
 
 .sidebar-session-status-dot {
   width: 7px;
   height: 7px;
-  border-radius: 999px;
-  background: var(--text-faint);
+  border-radius: 50%;
+  background: var(--ink-3);
 }
 
 .sidebar-session-item[data-status="running"] .sidebar-session-status-dot,
@@ -447,7 +518,7 @@ a {
   width: 30px;
   height: 30px;
   border-radius: 10px;
-  color: var(--text-faint);
+  color: var(--ink-3);
 }
 
 .sidebar-session-delete:hover {
@@ -468,15 +539,15 @@ a {
   justify-content: center;
   width: 38px;
   height: 38px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.78);
-  color: var(--text-soft);
+  color: var(--ink-2);
 }
 
 .sidebar-session-mini.active {
-  border-color: rgba(31, 143, 181, 0.24);
-  background: var(--accent-soft);
+  border-color: rgba(83, 108, 245, 0.24);
+  background: var(--accent-tint);
   color: var(--accent);
 }
 
@@ -488,8 +559,8 @@ a {
   width: 7px;
   height: 7px;
   border: 2px solid white;
-  border-radius: 999px;
-  background: var(--text-faint);
+  border-radius: 50%;
+  background: var(--ink-3);
 }
 
 @keyframes pulse {
@@ -515,10 +586,12 @@ a {
 .provider-editor-card,
 .provider-create-card,
 .metric-card {
-  border: 1px solid var(--border);
-  background: var(--surface);
-  box-shadow: var(--shadow-md);
-  backdrop-filter: blur(12px);
+  border: 1px solid var(--line);
+  /* 中文说明：这些是设置页的容器卡片，退到次级面上去。
+     白色只留给对话气泡和报告正文 —— 这样「正在读的正式内容」和「操作面板」
+     一眼就能分开，不会满屏都是白卡片分不清主次。 */
+  background: var(--paper-2);
+  box-shadow: var(--sh-none);
 }
 
 .hero-card,
@@ -528,21 +601,13 @@ a {
   overflow: hidden;
 }
 
-.hero-card::before,
-.panel-section::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 28px;
-  right: 28px;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(31, 143, 181, 0.55), transparent);
-}
+/* 中文说明：卡片顶部原来有一道渐变的装饰光带，纯装饰、不表达任何信息，已删除。
+   卡片之间靠 1px 细线加留白区分就够了。 */
 
 .hero-card {
   align-items: flex-start;
-  padding: 30px;
-  border-radius: 34px;
+  padding: var(--sp-8);
+  border-radius: var(--r-block);
 }
 
 .hero-copy {
@@ -567,7 +632,7 @@ a {
 .metric-card span,
 .toast p {
   margin: 0;
-  color: var(--text-soft);
+  color: var(--ink-2);
 }
 
 .metrics-grid {
@@ -584,7 +649,7 @@ a {
 }
 
 .metric-card strong {
-  font-size: 2rem;
+  font-size: var(--fs-metric);
 }
 
 .panel-section {
@@ -638,21 +703,21 @@ a {
   gap: 14px;
   width: 100%;
   padding: 16px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 20px;
   background: rgba(255, 255, 255, 0.82);
   text-align: left;
 }
 
 .provider-tab.active {
-  border-color: rgba(31, 143, 181, 0.22);
-  background: linear-gradient(180deg, rgba(31, 143, 181, 0.1), rgba(255, 255, 255, 0.94));
+  border-color: rgba(83, 108, 245, 0.22);
+  background: linear-gradient(180deg, rgba(83, 108, 245, 0.1), rgba(255, 255, 255, 0.94));
 }
 
 .provider-tab strong,
 .primary-cell strong,
 .catalog-item strong {
-  font-size: 0.96rem;
+  font-size: var(--fs-read);
 }
 
 .provider-toolbar {
@@ -678,8 +743,8 @@ a {
 }
 
 .field-group span {
-  font-size: 0.92rem;
-  color: var(--text-soft);
+  font-size: var(--fs-body);
+  color: var(--ink-2);
 }
 
 .field-group-wide {
@@ -689,26 +754,26 @@ a {
 .field,
 .textarea {
   width: 100%;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 16px;
-  background: var(--surface-strong);
-  color: var(--text);
+  background: var(--paper);
+  color: var(--ink-1);
   padding: 14px 16px;
   outline: none;
-  transition: border-color 160ms ease, box-shadow 160ms ease;
+  transition: border-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
 }
 
 .field:focus,
 .textarea:focus {
-  border-color: rgba(31, 143, 181, 0.35);
-  box-shadow: 0 0 0 4px rgba(31, 143, 181, 0.08);
+  border-color: rgba(83, 108, 245, 0.35);
+  box-shadow: 0 0 0 4px rgba(83, 108, 245, 0.08);
 }
 
 .textarea {
   resize: vertical;
   min-height: 180px;
   font-family: var(--font-mono);
-  font-size: 0.9rem;
+  font-size: var(--fs-body);
   line-height: 1.6;
 }
 
@@ -723,12 +788,12 @@ a {
   align-items: center;
   min-height: 30px;
   padding: 0 10px;
-  border-radius: 999px;
+  border-radius: var(--r-flat);
   font-family: var(--font-mono);
-  font-size: 0.76rem;
+  font-size: var(--fs-meta);
   letter-spacing: 0.04em;
-  background: rgba(15, 23, 38, 0.05);
-  color: var(--text-soft);
+  background: rgba(13, 21, 38, 0.05);
+  color: var(--ink-2);
 }
 
 .status-pill[data-tone="success"] {
@@ -766,15 +831,15 @@ a {
   flex-direction: column;
   gap: 6px;
   padding: 14px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 16px;
-  background: rgba(248, 251, 253, 0.84);
+  background: rgba(250, 251, 253, 0.84);
 }
 
 .catalog-item span,
 .empty-line span {
-  font-size: 0.92rem;
-  color: var(--text-soft);
+  font-size: var(--fs-body);
+  color: var(--ink-2);
 }
 
 .empty-line {
@@ -782,9 +847,9 @@ a {
   align-items: center;
   justify-content: center;
   min-height: 80px;
-  border: 1px dashed var(--border-strong);
+  border: 1px dashed var(--line-2);
   border-radius: 18px;
-  background: rgba(248, 251, 253, 0.66);
+  background: rgba(250, 251, 253, 0.66);
 }
 
 .table-card {
@@ -799,18 +864,18 @@ a {
 .data-table th,
 .data-table td {
   padding: 18px 20px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--line);
   text-align: left;
   vertical-align: middle;
 }
 
 .data-table th {
   font-family: var(--font-mono);
-  font-size: 0.74rem;
+  font-size: var(--fs-micro);
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--text-faint);
+  color: var(--ink-3);
 }
 
 .data-table tbody tr:last-child td {
@@ -839,7 +904,7 @@ a {
   justify-content: space-between;
   gap: 12px;
   padding: 18px 4px 6px;
-  font-size: 0.9rem;
+  font-size: var(--fs-body);
 }
 
 .toast-stack {
@@ -858,18 +923,18 @@ a {
   justify-content: space-between;
   gap: 12px;
   padding: 16px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.92);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--sh-none);
 }
 
 .toast[data-tone="success"] {
-  border-color: rgba(32, 116, 95, 0.18);
+  border-color: rgba(47, 143, 107, 0.18);
 }
 
 .toast[data-tone="error"] {
-  border-color: rgba(177, 67, 67, 0.18);
+  border-color: rgba(192, 69, 90, 0.18);
 }
 
 .toast-copy {
@@ -886,7 +951,7 @@ a {
 .session-hero-card {
   min-height: 0;
   background:
-    radial-gradient(circle at top right, rgba(31, 143, 181, 0.12), transparent 30%),
+    radial-gradient(circle at top right, rgba(83, 108, 245, 0.12), transparent 30%),
     linear-gradient(160deg, rgba(255, 255, 255, 0.96), rgba(241, 248, 252, 0.84));
 }
 
@@ -908,7 +973,7 @@ a {
 }
 
 .session-compact-copy p {
-  font-size: 0.92rem;
+  font-size: var(--fs-body);
 }
 
 .session-compact-meta,
@@ -924,8 +989,8 @@ a {
 }
 
 .session-compact-time {
-  color: var(--text-soft);
-  font-size: 0.88rem;
+  color: var(--ink-2);
+  font-size: var(--fs-body);
 }
 
 .session-workbench {
@@ -984,11 +1049,10 @@ a {
 
 .session-sidebar-card,
 .session-composer-card {
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 28px;
-  background: var(--surface);
-  box-shadow: var(--shadow-md);
-  backdrop-filter: blur(12px);
+  background: var(--paper);
+  box-shadow: var(--sh-none);
 }
 
 .session-timeline-card {
@@ -1049,12 +1113,12 @@ a {
   border: 0;
   border-radius: 8px;
   background: transparent;
-  color: var(--text-soft);
-  font-size: 0.84rem;
+  color: var(--ink-2);
+  font-size: var(--fs-small);
 }
 
 .session-composer-constraints-toggle:hover {
-  background: var(--accent-soft);
+  background: var(--accent-tint);
   color: var(--accent);
 }
 
@@ -1064,19 +1128,19 @@ a {
 
 .session-composer-constraints-badge {
   padding: 2px 6px;
-  border-radius: 999px;
-  background: var(--accent-soft);
+  border-radius: var(--r-flat);
+  background: var(--accent-tint);
   color: var(--accent);
-  font-size: 0.72rem;
+  font-size: var(--fs-micro);
 }
 
 .session-composer-constraints-panel {
   display: grid;
   gap: 12px;
   padding: 14px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 16px;
-  background: var(--surface-muted);
+  background: var(--paper-2);
 }
 
 .session-composer-constraint-grid {
@@ -1093,15 +1157,15 @@ a {
 
 .session-composer-constraint-field > span,
 .session-composer-source-field legend {
-  color: var(--text-soft);
-  font-size: 0.78rem;
+  color: var(--ink-2);
+  font-size: var(--fs-meta);
 }
 
 .session-composer-constraint-field .field {
   min-height: 38px;
   padding: 8px 10px;
   border-radius: 10px;
-  font-size: 0.84rem;
+  font-size: var(--fs-small);
 }
 
 .session-composer-constraint-wide {
@@ -1128,8 +1192,8 @@ a {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: var(--text);
-  font-size: 0.84rem;
+  color: var(--ink-1);
+  font-size: var(--fs-small);
 }
 
 .session-composer-source-option input {
@@ -1137,8 +1201,8 @@ a {
 }
 
 .session-composer-source-field small {
-  color: var(--text-faint);
-  font-size: 0.76rem;
+  color: var(--ink-3);
+  font-size: var(--fs-meta);
 }
 
 .session-workspace-shell[data-timeline-visible="true"] .session-composer-card {
@@ -1154,7 +1218,7 @@ a {
   padding: 24px;
   border-radius: 32px;
   background:
-    radial-gradient(circle at top right, rgba(31, 143, 181, 0.12), transparent 34%),
+    radial-gradient(circle at top right, rgba(83, 108, 245, 0.12), transparent 34%),
     rgba(255, 255, 255, 0.96);
 }
 
@@ -1187,19 +1251,18 @@ a {
   padding: 0;
   border: 1px solid transparent;
   border-radius: 22px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(248, 251, 253, 0.9));
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(250, 251, 253, 0.9));
   text-align: left;
-  transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+  transition: border-color var(--dur-fast) var(--ease);
 }
 
 .session-list-item:hover {
-  transform: translateY(-1px);
-  border-color: rgba(31, 143, 181, 0.16);
+  border-color: rgba(83, 108, 245, 0.16);
 }
 
 .session-list-item.active {
-  border-color: rgba(31, 143, 181, 0.24);
-  box-shadow: 0 18px 36px rgba(31, 143, 181, 0.08);
+  border-color: rgba(83, 108, 245, 0.24);
+  box-shadow: 0 18px 36px rgba(83, 108, 245, 0.08);
 }
 
 .session-list-main {
@@ -1220,7 +1283,7 @@ a {
 .runtime-event-detail summary,
 .runtime-event-resume-hint {
   margin: 0;
-  color: var(--text-soft);
+  color: var(--ink-2);
 }
 
 .session-list-main p,
@@ -1231,7 +1294,7 @@ a {
 }
 
 .session-list-meta {
-  font-size: 0.88rem;
+  font-size: var(--fs-body);
 }
 
 .session-empty {
@@ -1241,9 +1304,9 @@ a {
   gap: 10px;
   min-height: 120px;
   margin-top: 18px;
-  border: 1px dashed var(--border-strong);
+  border: 1px dashed var(--line-2);
   border-radius: 24px;
-  background: rgba(248, 251, 253, 0.66);
+  background: rgba(250, 251, 253, 0.66);
 }
 
 .session-empty-large {
@@ -1262,11 +1325,11 @@ a {
   justify-content: center;
   gap: 10px;
   padding: 12px 16px;
-  border: 1px solid rgba(31, 143, 181, 0.12);
-  border-radius: 999px;
-  background: rgba(31, 143, 181, 0.08);
-  color: var(--text-soft);
-  font-size: 0.92rem;
+  border: 1px solid rgba(83, 108, 245, 0.12);
+  border-radius: var(--r-flat);
+  background: rgba(83, 108, 245, 0.08);
+  color: var(--ink-2);
+  font-size: var(--fs-body);
 }
 
 .session-timeline-scroll {
@@ -1287,14 +1350,14 @@ a {
   grid-template-columns: 42px minmax(0, 1fr);
   gap: 14px;
   padding: 18px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 24px;
   background: rgba(255, 255, 255, 0.88);
 }
 
 .session-message-card[data-role="user"] {
   margin-left: 72px;
-  background: linear-gradient(180deg, rgba(31, 143, 181, 0.12), rgba(255, 255, 255, 0.92));
+  background: linear-gradient(180deg, rgba(83, 108, 245, 0.12), rgba(255, 255, 255, 0.92));
 }
 
 .session-message-card[data-role="assistant"] {
@@ -1302,11 +1365,11 @@ a {
 }
 
 .session-message-card[data-kind="progress"] {
-  background: rgba(248, 251, 253, 0.92);
+  background: rgba(250, 251, 253, 0.92);
 }
 
 .session-message-card[data-kind="error"] {
-  border-color: rgba(177, 67, 67, 0.18);
+  border-color: rgba(192, 69, 90, 0.18);
   background: rgba(255, 247, 247, 0.92);
 }
 
@@ -1317,7 +1380,7 @@ a {
   width: 42px;
   height: 42px;
   border-radius: 14px;
-  background: rgba(31, 143, 181, 0.08);
+  background: rgba(83, 108, 245, 0.08);
   color: var(--accent);
 }
 
@@ -1330,20 +1393,20 @@ a {
 .session-reasoning-card pre {
   margin: 0;
   font-family: var(--font-sans);
-  font-size: 0.95rem;
+  font-size: var(--fs-read);
   line-height: 1.7;
 }
 
 .session-reasoning-card {
   padding: 12px 14px;
   border-radius: 18px;
-  background: rgba(15, 23, 38, 0.04);
+  background: rgba(13, 21, 38, 0.04);
 }
 
 .session-reasoning-card summary {
   cursor: pointer;
   font-family: var(--font-mono);
-  color: var(--text-soft);
+  color: var(--ink-2);
 }
 
 .session-streaming-hint {
@@ -1352,8 +1415,8 @@ a {
   gap: 8px;
   width: fit-content;
   padding: 6px 10px;
-  border-radius: 999px;
-  background: rgba(31, 143, 181, 0.08);
+  border-radius: var(--r-flat);
+  background: rgba(83, 108, 245, 0.08);
 }
 
 .session-artifact-inline,
@@ -1375,13 +1438,13 @@ a {
 
 .runtime-event-section-head h3 {
   margin: 0;
-  font-size: 1rem;
+  font-size: var(--fs-read);
 }
 
 .runtime-event-section-head p,
 .runtime-event-show,
 .runtime-event-resume-hint {
-  font-size: 0.9rem;
+  font-size: var(--fs-body);
   line-height: 1.6;
 }
 
@@ -1427,13 +1490,13 @@ a {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--text-faint);
+  color: var(--ink-3);
 }
 
 .runtime-event-toggle {
   width: 18px;
   height: 24px;
-  transition: transform 180ms ease;
+  transition: transform var(--dur-slow) var(--ease);
 }
 
 .runtime-event-branch[open] > .runtime-event-row .runtime-event-toggle {
@@ -1454,7 +1517,7 @@ a {
   left: 50%;
   width: 1px;
   content: "";
-  background: rgba(15, 23, 38, 0.1);
+  background: rgba(13, 21, 38, 0.1);
 }
 
 .runtime-event-item:last-child > .runtime-event-row .runtime-event-dot::before,
@@ -1491,7 +1554,7 @@ a {
 }
 
 .runtime-event-title-line strong {
-  font-size: 0.94rem;
+  font-size: var(--fs-read);
 }
 
 /* 中文注释：事件卡片上的"继续"按钮（综述跑到一半失败或被停止时出现）。
@@ -1501,23 +1564,23 @@ a {
   align-items: center;
   gap: 3px;
   padding: 1px 7px;
-  font-size: 0.72rem;
-  color: #2563eb;
-  background: #dbeafe;
-  border: 1px solid #93c5fd;
+  font-size: var(--fs-micro);
+  color: var(--accent-ink);
+  background: var(--accent-tint);
+  border: 1px solid var(--accent-edge);
   border-radius: 3px;
   cursor: pointer;
   transition: background 0.2s;
 }
 
 .runtime-event-resume:hover {
-  background: #bfdbfe;
+  background: var(--accent-edge);
 }
 
 .runtime-event-time {
   padding-top: 2px;
   font-family: var(--font-mono);
-  font-size: 0.76rem;
+  font-size: var(--fs-meta);
   white-space: nowrap;
 }
 
@@ -1529,9 +1592,9 @@ a {
 }
 
 .runtime-event-tokens {
-  color: var(--text-faint);
+  color: var(--ink-3);
   font-family: var(--font-mono);
-  font-size: 0.7rem;
+  font-size: var(--fs-micro);
   white-space: nowrap;
 }
 
@@ -1548,7 +1611,7 @@ a {
 .runtime-event-detail summary {
   width: fit-content;
   cursor: pointer;
-  font-size: 0.84rem;
+  font-size: var(--fs-small);
 }
 
 .runtime-event-detail pre {
@@ -1557,10 +1620,10 @@ a {
   padding: 10px 12px;
   overflow-x: auto;
   border-radius: 12px;
-  background: rgba(15, 23, 38, 0.05);
-  color: var(--text);
+  background: rgba(13, 21, 38, 0.05);
+  color: var(--ink-1);
   font-family: var(--font-mono);
-  font-size: 0.82rem;
+  font-size: var(--fs-small);
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
@@ -1573,9 +1636,9 @@ a {
 
 .session-artifact-panel {
   padding: 20px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 24px;
-  background: rgba(248, 251, 253, 0.8);
+  background: rgba(250, 251, 253, 0.8);
 }
 
 .session-artifact-grid {
@@ -1588,20 +1651,20 @@ a {
   display: grid;
   gap: 8px;
   padding: 14px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.88);
 }
 
 .session-composer-status {
   padding: 8px 12px;
-  border-radius: 999px;
-  background: rgba(15, 23, 38, 0.05);
+  border-radius: var(--r-flat);
+  background: rgba(13, 21, 38, 0.05);
 }
 
 .session-composer-shortcut {
-  color: var(--text-faint);
-  font-size: 0.86rem;
+  color: var(--ink-3);
+  font-size: var(--fs-small);
 }
 
 .session-composer-intro {
@@ -1619,8 +1682,8 @@ a {
 
 .session-composer-helper {
   margin: 0;
-  color: var(--text-soft);
-  font-size: 0.92rem;
+  color: var(--ink-2);
+  font-size: var(--fs-body);
   line-height: 1.6;
   text-align: center;
 }
@@ -1632,17 +1695,17 @@ a {
   padding: 11px 14px;
   border: 0;
   border-radius: 16px;
-  background: rgba(248, 251, 253, 0.92);
-  color: var(--text);
+  background: rgba(250, 251, 253, 0.92);
+  color: var(--ink-1);
   resize: none;
   line-height: 1.5;
   outline: none;
-  transition: background 160ms ease, box-shadow 160ms ease;
+  transition: background-color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
 }
 
 .session-composer-textarea:focus {
   background: rgba(255, 255, 255, 0.98);
-  box-shadow: inset 0 0 0 1px rgba(31, 143, 181, 0.28), 0 0 0 4px rgba(31, 143, 181, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(83, 108, 245, 0.28), 0 0 0 4px rgba(83, 108, 245, 0.08);
 }
 
 .session-composer-card[data-variant="welcome"] .session-composer-textarea {
@@ -1650,7 +1713,7 @@ a {
   max-height: 220px;
   padding: 18px 20px;
   border-radius: 24px;
-  font-size: 1rem;
+  font-size: var(--fs-read);
 }
 
 .session-composer-send {
@@ -1912,42 +1975,11 @@ a {
   }
 }
 
-/* 工作台视觉覆盖：用轻量蓝紫色、清晰边界和紧凑间距还原参考图的控制台布局。 */
-:root {
-  --bg: #f3f6fc;
-  --bg-strong: #edf2fb;
-  --surface: rgba(255, 255, 255, 0.94);
-  --surface-strong: #ffffff;
-  --surface-muted: #f7f9fd;
-  --border: #e7ebf3;
-  --border-strong: #dbe2ef;
-  --text: #182033;
-  --text-soft: #748096;
-  --text-faint: #98a3b5;
-  --accent: #536cf5;
-  --accent-soft: #eef0ff;
-  --success: #21b477;
-  --success-soft: #e8f8f0;
-  --warning: #d98b30;
-  --warning-soft: #fff4e5;
-  --danger: #d65b6b;
-  --danger-soft: #fff0f2;
-  --shadow-lg: 0 18px 44px rgba(43, 61, 105, 0.08);
-  --shadow-md: 0 7px 22px rgba(43, 61, 105, 0.05);
-  --radius-xl: 18px;
-  --radius-lg: 15px;
-  --radius-md: 12px;
-  --radius-sm: 9px;
-}
-
-body {
-  background: linear-gradient(135deg, #f4f7fd 0%, #eef3fb 48%, #f9fbff 100%);
-}
-
+/* 中文说明：会话工作台的整体框架。左侧栏固定 248px，剩下的宽度全给主内容区。
+   之前这里用的是随屏幕缩放的宽度，导致同一套界面在不同屏幕上栏宽都不一样。 */
 .app-shell,
 .app-shell[data-collapsed="true"] {
-  /* 中文说明：侧栏宽度随屏幕变化，大屏更宽，小屏仍给主界面保留足够空间。 */
-  grid-template-columns: clamp(220px, 16vw, 340px) minmax(0, 1fr);
+  grid-template-columns: 248px minmax(0, 1fr);
 }
 
 .app-shell[data-collapsed="true"] {
@@ -1966,11 +1998,9 @@ body {
   margin: 0;
   padding: 16px 12px 14px;
   border: 0;
-  border-right: 1px solid #e7ebf3;
+  border-right: 1px solid var(--line);
   border-radius: 0;
-  background: rgba(255, 255, 255, 0.9);
-  box-shadow: 8px 0 28px rgba(44, 64, 112, 0.03);
-  backdrop-filter: blur(20px);
+  background: var(--paper-2);
 }
 
 .sidebar-head {
@@ -1982,13 +2012,11 @@ body {
   gap: 9px;
 }
 
+/* 中文说明：侧边栏里的品牌 logo 缩小版。背景渐变已经画在 SVG 里了，
+   不再需要文字方块时期的背景色和字体设定。 */
 .brand-mark {
   width: 30px;
   height: 30px;
-  border-radius: 9px;
-  background: linear-gradient(135deg, #566ff7, #7668e9);
-  color: #fff;
-  font-size: 0.78rem;
 }
 
 .brand-copy {
@@ -1997,14 +2025,14 @@ body {
 
 .brand-copy .eyebrow {
   font-family: var(--font-sans);
-  font-size: 0.59rem;
+  font-size: var(--fs-micro);
   font-weight: 700;
   letter-spacing: 0.04em;
-  color: #566274;
+  color: var(--ink-3);
 }
 
 .brand-copy strong {
-  font-size: 0.82rem;
+  font-size: var(--fs-small);
   line-height: 1.05;
 }
 
@@ -2013,7 +2041,7 @@ body {
   height: 24px;
   border: 0;
   background: transparent;
-  color: #9aa5b7;
+  color: var(--ink-3);
 }
 
 .sidebar[data-collapsed="true"] .sidebar-head > .icon-button {
@@ -2023,7 +2051,7 @@ body {
 .sidebar-nav {
   gap: 5px;
   padding-bottom: 14px;
-  border-bottom: 1px solid #eef1f6;
+  border-bottom: 1px solid var(--sunken);
 }
 
 .nav-item {
@@ -2031,15 +2059,15 @@ body {
   padding: 9px 10px;
   border: 0;
   border-radius: 7px;
-  color: #647187;
-  font-size: 0.77rem;
+  color: var(--ink-3);
+  font-size: var(--fs-meta);
   font-weight: 600;
 }
 
 .nav-item.active {
   border: 0;
-  background: linear-gradient(100deg, #4968ef, #6980f8);
-  color: #fff;
+  background: linear-gradient(100deg, var(--accent), var(--accent));
+  color: var(--paper);
   box-shadow: 0 5px 12px rgba(83, 108, 245, 0.2);
 }
 
@@ -2051,8 +2079,8 @@ body {
 
 .sidebar-history-head h2 {
   margin: 2px 0 0;
-  font-size: 0.76rem;
-  color: #3e4a60;
+  font-size: var(--fs-meta);
+  color: var(--ink-2);
 }
 
 .sidebar-history-head .eyebrow {
@@ -2062,7 +2090,7 @@ body {
 .sidebar-history-create {
   width: 30px;
   height: 27px;
-  border-color: #e5e9f3;
+  border-color: var(--line);
   border-radius: 6px;
   color: var(--accent);
 }
@@ -2079,38 +2107,38 @@ body {
 .sidebar-session-group-title {
   padding-inline: 5px;
   font-family: var(--font-sans);
-  font-size: 0.68rem;
+  font-size: var(--fs-micro);
   letter-spacing: 0;
-  color: #9aa5b7;
+  color: var(--ink-3);
 }
 
 .sidebar-session-item {
   grid-template-columns: 3px minmax(0, 1fr) 18px;
   gap: 7px;
   padding: 9px 5px 9px 0;
-  border: 1px solid #edf0f6;
+  border: 1px solid var(--sunken);
   border-radius: 8px;
-  background: #fff;
+  background: var(--paper);
 }
 
 .sidebar-session-item.active {
-  border-color: #abbaff;
-  background: #f1f4ff;
+  border-color: var(--accent-edge);
+  background: var(--accent-tint);
   box-shadow: 0 3px 10px rgba(83, 108, 245, 0.08);
 }
 
 .sidebar-session-title {
-  font-size: 0.68rem;
+  font-size: var(--fs-micro);
 }
 
 .sidebar-session-preview {
-  font-size: 0.63rem;
+  font-size: var(--fs-micro);
   line-height: 1.35;
 }
 
 .sidebar-session-meta {
   gap: 4px;
-  font-size: 0.59rem;
+  font-size: var(--fs-micro);
 }
 
 .sidebar-session-delete {
@@ -2124,7 +2152,7 @@ body {
   gap: 8px;
   margin-top: auto;
   padding: 12px 4px 3px;
-  border-top: 1px solid #eef1f6;
+  border-top: 1px solid var(--sunken);
 }
 
 .sidebar-user-avatar {
@@ -2134,8 +2162,8 @@ body {
   width: 27px;
   height: 27px;
   border-radius: 50%;
-  background: #5f75f4;
-  color: #fff;
+  background: var(--accent);
+  color: var(--paper);
 }
 
 .sidebar-user-copy {
@@ -2146,19 +2174,19 @@ body {
 }
 
 .sidebar-user-copy strong {
-  font-size: 0.67rem;
+  font-size: var(--fs-micro);
 }
 
 .sidebar-user-copy small {
   overflow: hidden;
-  color: #9aa5b7;
-  font-size: 0.57rem;
+  color: var(--ink-3);
+  font-size: var(--fs-micro);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .sidebar-user-chevron {
-  color: #7f8ba2;
+  color: var(--ink-3);
   transform: rotate(-90deg);
 }
 
@@ -2176,10 +2204,10 @@ body {
   gap: 14px;
   min-height: 84px;
   padding: 16px 20px;
-  border: 1px solid #e9edf5;
+  border: 1px solid var(--sunken);
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.95);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--sh-none);
 }
 
 .session-hero-card::before {
@@ -2193,8 +2221,8 @@ body {
   width: 46px;
   height: 46px;
   border-radius: 14px;
-  background: linear-gradient(145deg, #f0edff, #e6e8ff);
-  color: #6d5cf1;
+  background: linear-gradient(145deg, var(--accent-tint), var(--accent-tint));
+  color: var(--accent-ink);
 }
 
 .session-compact-copy {
@@ -2202,13 +2230,13 @@ body {
 }
 
 .session-compact-copy h1 {
-  font-size: 1.15rem;
+  font-size: var(--fs-title);
   line-height: 1.25;
 }
 
 .session-compact-copy p {
-  color: #8a95a8;
-  font-size: 0.72rem;
+  color: var(--ink-3);
+  font-size: var(--fs-micro);
 }
 
 .session-compact-meta {
@@ -2219,8 +2247,8 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: #8290a5;
-  font-size: 0.68rem;
+  color: var(--ink-3);
+  font-size: var(--fs-micro);
   white-space: nowrap;
 }
 
@@ -2228,7 +2256,7 @@ body {
   min-height: 24px;
   padding: 0 9px;
   font-family: var(--font-sans);
-  font-size: 0.67rem;
+  font-size: var(--fs-micro);
   letter-spacing: 0;
   font-weight: 600;
 }
@@ -2266,14 +2294,14 @@ body {
 
 .session-timeline-head h2 {
   margin: 0;
-  font-size: 0.9rem;
-  color: #2d3950;
+  font-size: var(--fs-body);
+  color: var(--ink-1);
 }
 
 .session-timeline-subtitle {
   margin: 3px 0 0;
-  color: #8a95a8;
-  font-size: 0.66rem;
+  color: var(--ink-3);
+  font-size: var(--fs-micro);
 }
 
 .session-timeline-head .eyebrow {
@@ -2309,7 +2337,7 @@ body {
   left: 10px;
   width: 1px;
   content: "";
-  background: #d6deed;
+  background: var(--accent-edge);
 }
 
 .runtime-event-item:last-child::before {
@@ -2321,9 +2349,9 @@ body {
   align-items: center;
   min-height: 66px;
   padding: 12px 14px 12px 10px;
-  border: 1px solid #e7ebf3;
+  border: 1px solid var(--line);
   border-radius: 11px;
-  background: #fff;
+  background: var(--paper);
   box-shadow: 0 3px 10px rgba(45, 62, 104, 0.03);
 }
 
@@ -2336,8 +2364,8 @@ body {
   height: 28px;
   margin-left: -2px;
   border-radius: 8px;
-  background: #edf4ff;
-  color: #4d76ed;
+  background: var(--accent-tint);
+  color: var(--accent-ink);
 }
 
 .runtime-event-dot::before {
@@ -2346,14 +2374,14 @@ body {
 
 .runtime-event-item[data-status="completed"] > .runtime-event-row .runtime-event-dot,
 .runtime-event-item[data-status="completed"] > .runtime-event-branch > .runtime-event-row .runtime-event-dot {
-  background: #e8f8f0;
-  color: #20ad74;
+  background: var(--success-soft);
+  color: var(--success-ink);
 }
 
 .runtime-event-item[data-status="running"] > .runtime-event-row .runtime-event-dot,
 .runtime-event-item[data-status="running"] > .runtime-event-branch > .runtime-event-row .runtime-event-dot {
-  background: #fff3df;
-  color: #dc9137;
+  background: var(--warning-soft);
+  color: var(--warning);
 }
 
 .runtime-event-copy {
@@ -2365,14 +2393,14 @@ body {
 }
 
 .runtime-event-title-line strong {
-  font-size: 0.78rem;
-  color: #26334a;
+  font-size: var(--fs-meta);
+  color: var(--ink-1);
 }
 
 .runtime-event-show {
   overflow: hidden;
-  color: #8792a4;
-  font-size: 0.67rem;
+  color: var(--ink-3);
+  font-size: var(--fs-micro);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2382,15 +2410,15 @@ body {
 }
 
 .runtime-event-time {
-  color: #7d899d;
+  color: var(--ink-3);
   font-family: var(--font-sans);
-  font-size: 0.63rem;
+  font-size: var(--fs-micro);
 }
 
 .runtime-event-tokens {
-  color: #a3adbb;
+  color: var(--ink-3);
   font-family: var(--font-sans);
-  font-size: 0.58rem;
+  font-size: var(--fs-micro);
 }
 
 .runtime-event-children {
@@ -2402,7 +2430,7 @@ body {
 .session-workspace-shell[data-timeline-visible="true"] .session-composer-card {
   width: 100%;
   padding: 8px;
-  border: 1px solid #e3e8f2;
+  border: 1px solid var(--line);
   border-radius: 13px;
   background: rgba(255, 255, 255, 0.96);
   box-shadow: 0 10px 28px rgba(46, 66, 111, 0.07);
@@ -2412,15 +2440,15 @@ body {
   min-height: 44px;
   padding: 10px 12px;
   border-radius: 9px;
-  background: #f7f9fd;
-  font-size: 0.75rem;
+  background: var(--paper-2);
+  font-size: var(--fs-micro);
 }
 
 .session-composer-send {
   width: 40px;
   height: 40px;
   border-radius: 9px;
-  background: linear-gradient(135deg, #546cf4, #6c5be9);
+  background: linear-gradient(135deg, var(--accent), var(--accent));
 }
 
 .session-composer-constraints {
@@ -2432,7 +2460,7 @@ body {
 
 .session-composer-constraints-toggle {
   padding: 2px 4px;
-  font-size: 0.68rem;
+  font-size: var(--fs-micro);
 }
 
 .session-composer-constraints-panel {
@@ -2441,7 +2469,7 @@ body {
   bottom: calc(100% + 8px);
   left: 8px;
   z-index: 4;
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--sh-float);
 }
 
 .session-insights {
@@ -2454,23 +2482,23 @@ body {
   display: grid;
   gap: 13px;
   padding: 14px;
-  border: 1px solid #e7ebf3;
+  border: 1px solid var(--line);
   border-radius: 11px;
   background: rgba(255, 255, 255, 0.94);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--sh-none);
 }
 
 .insight-card-heading {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  color: #5870ec;
+  color: var(--accent-ink);
 }
 
 .insight-card-heading h2 {
   margin: 0;
-  color: #354158;
-  font-size: 0.76rem;
+  color: var(--ink-2);
+  font-size: var(--fs-meta);
 }
 
 .insight-status-value {
@@ -2480,8 +2508,8 @@ body {
 }
 
 .insight-status-value strong {
-  color: #159b65;
-  font-size: 0.86rem;
+  color: var(--success-ink);
+  font-size: var(--fs-small);
 }
 
 .insight-status-icon {
@@ -2491,14 +2519,14 @@ body {
   width: 42px;
   height: 42px;
   border-radius: 50%;
-  background: #dff6e9;
-  color: #21b477;
+  background: var(--success-soft);
+  color: var(--success-ink);
 }
 
 .insight-card p {
   margin: 0;
-  color: #8994a6;
-  font-size: 0.64rem;
+  color: var(--ink-3);
+  font-size: var(--fs-micro);
 }
 
 .insight-metric-grid {
@@ -2514,26 +2542,26 @@ body {
 }
 
 .insight-metric-grid strong {
-  color: #27344b;
-  font-size: 0.77rem;
+  color: var(--ink-1);
+  font-size: var(--fs-meta);
 }
 
 .insight-metric-grid span,
 .insight-token-breakdown span {
-  color: #98a3b4;
-  font-size: 0.6rem;
+  color: var(--ink-3);
+  font-size: var(--fs-micro);
 }
 
 .insight-token-total {
-  color: #2d3950;
-  font-size: 0.92rem;
+  color: var(--ink-1);
+  font-size: var(--fs-body);
   font-weight: 700;
 }
 
 .insight-token-total span {
   margin-left: 3px;
-  color: #8995a8;
-  font-size: 0.63rem;
+  color: var(--ink-3);
+  font-size: var(--fs-micro);
   font-weight: 400;
 }
 
@@ -2541,14 +2569,14 @@ body {
   height: 5px;
   overflow: hidden;
   border-radius: 999px;
-  background: #e8edf5;
+  background: var(--sunken);
 }
 
 .insight-progress span {
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, #516cf5, #7963e9);
+  background: linear-gradient(90deg, var(--accent), var(--accent));
 }
 
 .insight-token-breakdown {
@@ -2558,8 +2586,8 @@ body {
 }
 
 .insight-token-breakdown strong {
-  color: #354158;
-  font-size: 0.72rem;
+  color: var(--ink-2);
+  font-size: var(--fs-micro);
 }
 
 .insight-artifact {
@@ -2567,7 +2595,7 @@ body {
   align-items: center;
   gap: 8px;
   padding: 8px;
-  border: 1px solid #edf0f5;
+  border: 1px solid var(--sunken);
   border-radius: 8px;
 }
 
@@ -2578,8 +2606,8 @@ body {
   width: 27px;
   height: 27px;
   border-radius: 6px;
-  background: #eaf0ff;
-  color: #4f6deb;
+  background: var(--accent-tint);
+  color: var(--accent-ink);
 }
 
 .insight-artifact > span:last-child {
@@ -2590,42 +2618,42 @@ body {
 
 .insight-artifact strong {
   overflow: hidden;
-  color: #4b5870;
-  font-size: 0.64rem;
+  color: var(--ink-2);
+  font-size: var(--fs-micro);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .insight-artifact small {
-  color: #a0aabb;
-  font-size: 0.58rem;
+  color: var(--ink-3);
+  font-size: var(--fs-micro);
 }
 
 .insight-no-output {
   display: flex;
   align-items: center;
   gap: 7px;
-  color: #99a4b6;
-  font-size: 0.63rem;
+  color: var(--ink-3);
+  font-size: var(--fs-micro);
 }
 
 /* 中文注释：产物卡片现在是一个可点击的链接，去掉默认下划线并补充悬停反馈。 */
 .insight-artifact {
   text-decoration: none;
   cursor: pointer;
-  transition: border-color 0.15s ease, background-color 0.15s ease;
+  transition: border-color var(--dur-fast) var(--ease), background-color var(--dur-fast) var(--ease);
 }
 
 .insight-artifact:hover {
-  border-color: #c7d2fe;
-  background: #f7f9ff;
+  border-color: var(--accent-edge);
+  background: var(--paper-2);
 }
 
 /* 中文注释：最终结果卡片，超长论文内容在卡片内部滚动，不会撑乱整体布局。 */
 .session-final-result {
-  border: 1px solid #edf0f5;
+  border: 1px solid var(--sunken);
   border-radius: 12px;
-  background: #ffffff;
+  background: var(--paper);
 }
 
 .session-final-result-head {
@@ -2633,12 +2661,12 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 14px 18px;
-  border-bottom: 1px solid #edf0f5;
+  border-bottom: 1px solid var(--sunken);
 }
 
 .session-final-result-head h3 {
   margin: 0;
-  font-size: 0.95rem;
+  font-size: var(--fs-read);
 }
 
 .session-final-result-body {
@@ -2646,11 +2674,11 @@ body {
   padding: 18px;
   max-height: 60vh;
   overflow-y: auto;
-  font-size: 0.85rem;
+  font-size: var(--fs-small);
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
-  color: #354158;
+  color: var(--ink-2);
 }
 
 @media (max-width: 980px) {
@@ -2665,7 +2693,7 @@ body {
     height: auto;
     min-height: 0;
     border-right: 0;
-    border-bottom: 1px solid #e7ebf3;
+    border-bottom: 1px solid var(--line);
   }
 
   .sidebar-user {
@@ -2719,10 +2747,6 @@ body {
 
 /* 设置页使用更紧凑的工作台排版，避免影响会话工作区的视觉样式。 */
 .settings-page {
-  --settings-blue: #2563eb;
-  --settings-text: #17233d;
-  --settings-muted: #71809a;
-  --settings-border: #e5eaf2;
   max-width: 1320px;
   margin: 0 auto;
   padding: 4px 0 20px;
@@ -2736,22 +2760,15 @@ body {
 .settings-page .editor-card,
 .settings-page .provider-editor-card,
 .settings-page .provider-create-card {
-  border-color: var(--settings-border);
-  border-radius: 12px;
-  background: #fff;
-  box-shadow: 0 2px 10px rgba(27, 48, 86, 0.045);
+  border-color: var(--line);
+  border-radius: var(--r-box);
+  background: var(--paper-2);
+  box-shadow: var(--sh-none);
 }
 
 .settings-page .hero-card {
   align-items: center;
-  padding: 22px 24px;
-}
-
-.settings-page .hero-card::before,
-.settings-page .panel-section::before {
-  left: 20px;
-  right: 20px;
-  background: linear-gradient(90deg, transparent, rgba(37, 99, 235, 0.28), transparent);
+  padding: var(--sp-6);
 }
 
 .settings-page .hero-copy {
@@ -2759,48 +2776,42 @@ body {
 }
 
 .settings-page .hero-copy h1 {
-  color: var(--settings-text);
-  font-size: 1.75rem;
+  color: var(--ink-1);
+  font-size: var(--fs-display);
   line-height: 1.25;
   letter-spacing: 0;
 }
 
 .settings-page .hero-copy p {
   max-width: 780px;
-  font-size: 0.82rem;
+  font-size: var(--fs-small);
   line-height: 1.6;
-  color: var(--settings-muted);
-}
-
-.settings-page .eyebrow {
-  color: var(--settings-blue);
-  font-size: 0.67rem;
-  letter-spacing: 0.08em;
+  color: var(--ink-2);
 }
 
 .settings-page .button {
   min-height: 34px;
   border-radius: 8px;
-  border-color: var(--settings-border);
+  border-color: var(--line);
   padding: 0 12px;
-  font-size: 0.78rem;
+  font-size: var(--fs-meta);
   box-shadow: none;
 }
 
 .settings-page .button.primary {
-  border-color: #2563eb;
-  background: #2563eb;
+  border-color: var(--accent);
+  background: var(--accent);
 }
 
 .settings-page .button.secondary,
 .settings-page .button.ghost-link {
-  background: #fff;
-  color: #34425e;
+  background: var(--paper);
+  color: var(--ink-2);
 }
 
 .settings-page .button:hover {
-  border-color: rgba(37, 99, 235, 0.38);
-  background: #f8faff;
+  border-color: rgba(83, 108, 245, 0.38);
+  background: var(--paper-2);
 }
 
 .settings-page .metrics-grid {
@@ -2818,18 +2829,18 @@ body {
 }
 
 .settings-page .metric-card:nth-child(1) .metric-icon {
-  background: #e7f0ff;
-  color: #3277ed;
+  background: var(--accent-tint);
+  color: var(--accent-ink);
 }
 
 .settings-page .metric-card:nth-child(2) .metric-icon {
-  background: #e6f8ef;
-  color: #2db675;
+  background: var(--success-soft);
+  color: var(--success-ink);
 }
 
 .settings-page .metric-card:nth-child(3) .metric-icon {
-  background: #f0eaff;
-  color: #875ce8;
+  background: var(--accent-tint);
+  color: var(--accent-ink);
 }
 
 .settings-page .metric-icon {
@@ -2851,20 +2862,20 @@ body {
 }
 
 .settings-page .metric-card strong {
-  color: var(--settings-text);
-  font-size: 1.55rem;
+  color: var(--ink-1);
+  font-size: var(--fs-metric);
   line-height: 1;
 }
 
 .settings-page .metric-card span {
-  color: #3e4c66;
-  font-size: 0.78rem;
+  color: var(--ink-2);
+  font-size: var(--fs-meta);
   font-weight: 600;
 }
 
 .settings-page .metric-card p {
-  color: var(--settings-muted);
-  font-size: 0.7rem;
+  color: var(--ink-2);
+  font-size: var(--fs-micro);
   line-height: 1.45;
 }
 
@@ -2880,22 +2891,22 @@ body {
 
 .settings-page .section-heading h2 {
   margin-top: 4px;
-  color: var(--settings-text);
-  font-size: 1.05rem;
+  color: var(--ink-1);
+  font-size: var(--fs-title);
   letter-spacing: 0;
 }
 
 .settings-page .section-heading p {
   margin-top: 5px;
-  color: var(--settings-muted);
-  font-size: 0.75rem;
+  color: var(--ink-2);
+  font-size: var(--fs-micro);
 }
 
 .settings-page .status-pill {
   min-height: 24px;
   padding: 0 8px;
   border-radius: 6px;
-  font-size: 0.68rem;
+  font-size: var(--fs-micro);
   font-family: inherit;
   letter-spacing: 0;
 }
@@ -2920,8 +2931,8 @@ body {
 }
 
 .settings-page .provider-list-header > strong {
-  color: var(--settings-text);
-  font-size: 0.82rem;
+  color: var(--ink-1);
+  font-size: var(--fs-small);
   line-height: 1.2;
 }
 
@@ -2935,21 +2946,21 @@ body {
   gap: 8px;
   padding: 12px;
   border-radius: 9px;
-  background: #fbfcff;
+  background: var(--paper-2);
   box-shadow: none;
 }
 
 .settings-page .provider-create-head {
   justify-content: flex-start;
   gap: 7px;
-  color: var(--settings-text);
-  font-size: 0.82rem;
+  color: var(--ink-1);
+  font-size: var(--fs-small);
 }
 
 .settings-page .provider-list-label {
   padding: 5px 2px 1px;
-  color: var(--settings-muted);
-  font-size: 0.69rem;
+  color: var(--ink-2);
+  font-size: var(--fs-micro);
   font-weight: 700;
 }
 
@@ -2957,25 +2968,25 @@ body {
   min-height: 64px;
   padding: 10px 11px;
   border-radius: 8px;
-  border-color: var(--settings-border);
-  background: #fff;
+  border-color: var(--line);
+  background: var(--paper);
   box-shadow: none;
 }
 
 .settings-page .provider-tab.active {
-  border-color: #7ca7ff;
-  background: #f2f6ff;
-  box-shadow: inset 3px 0 0 #2563eb;
+  border-color: var(--accent);
+  background: var(--ground);
+  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 .settings-page .provider-tab strong {
-  color: #273653;
-  font-size: 0.78rem;
+  color: var(--ink-1);
+  font-size: var(--fs-meta);
 }
 
 .settings-page .provider-tab span {
   margin-top: 3px;
-  font-size: 0.67rem;
+  font-size: var(--fs-micro);
 }
 
 .settings-page .provider-editor-card {
@@ -2986,15 +2997,15 @@ body {
 
 .settings-page .provider-header-row h3,
 .settings-page .editor-head h3 {
-  color: var(--settings-text);
-  font-size: 0.98rem;
+  color: var(--ink-1);
+  font-size: var(--fs-read);
 }
 
 .settings-page .provider-header-row p,
 .settings-page .editor-head p {
   margin-top: 4px;
-  color: var(--settings-muted);
-  font-size: 0.71rem;
+  color: var(--ink-2);
+  font-size: var(--fs-micro);
 }
 
 .settings-page .provider-toolbar {
@@ -3011,8 +3022,8 @@ body {
 }
 
 .settings-page .field-group span {
-  color: #64728b;
-  font-size: 0.7rem;
+  color: var(--ink-3);
+  font-size: var(--fs-micro);
 }
 
 .settings-page .field,
@@ -3020,8 +3031,8 @@ body {
   min-height: 36px;
   padding: 9px 11px;
   border-radius: 7px;
-  border-color: #e1e7f0;
-  font-size: 0.76rem;
+  border-color: var(--line);
+  font-size: var(--fs-meta);
   box-shadow: none;
 }
 
@@ -3032,16 +3043,16 @@ body {
 
 .settings-page .field:focus,
 .settings-page .textarea:focus {
-  border-color: #91b4ff;
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.09);
+  border-color: var(--accent-edge);
+  box-shadow: 0 0 0 3px rgba(83, 108, 245, 0.09);
 }
 
 .settings-page .provider-footer {
   margin-top: 14px;
   padding: 10px 12px;
-  border: 1px solid #d9e6ff;
+  border: 1px solid var(--line);
   border-radius: 8px;
-  background: #f5f8ff;
+  background: var(--paper-2);
 }
 
 .settings-page .mini-note {
@@ -3049,8 +3060,8 @@ body {
 }
 
 .settings-page .mini-note p {
-  color: #607292;
-  font-size: 0.7rem;
+  color: var(--ink-3);
+  font-size: var(--fs-micro);
 }
 
 .settings-page .model-catalog {
@@ -3068,7 +3079,7 @@ body {
 
 .settings-page .catalog-item strong,
 .settings-page .catalog-item span {
-  font-size: 0.7rem;
+  font-size: var(--fs-micro);
 }
 
 .settings-page .table-card {
@@ -3083,14 +3094,14 @@ body {
 .settings-page .data-table th,
 .settings-page .data-table td {
   padding: 11px 13px;
-  border-bottom-color: #edf0f5;
-  font-size: 0.73rem;
+  border-bottom-color: var(--sunken);
+  font-size: var(--fs-micro);
 }
 
 .settings-page .data-table th {
-  background: #f8faff;
-  color: #7a879c;
-  font-size: 0.65rem;
+  background: var(--paper-2);
+  color: var(--ink-3);
+  font-size: var(--fs-micro);
   letter-spacing: 0.04em;
 }
 
@@ -3099,12 +3110,12 @@ body {
 }
 
 .settings-page .primary-cell strong {
-  color: #273653;
-  font-size: 0.76rem;
+  color: var(--ink-1);
+  font-size: var(--fs-meta);
 }
 
 .settings-page .primary-cell span {
-  font-size: 0.66rem;
+  font-size: var(--fs-micro);
 }
 
 .settings-page .table-state {
@@ -3113,9 +3124,9 @@ body {
   min-height: 22px;
   padding: 0 7px;
   border-radius: 5px;
-  background: #e8f8f0;
-  color: #249461;
-  font-size: 0.65rem;
+  background: var(--success-soft);
+  color: var(--success-ink);
+  font-size: var(--fs-micro);
 }
 
 .settings-page .editor-card {
@@ -3131,8 +3142,8 @@ body {
 
 .settings-page .page-footer {
   padding: 13px 2px 0;
-  color: #9aa5b7;
-  font-size: 0.68rem;
+  color: var(--ink-3);
+  font-size: var(--fs-micro);
 }
 
 @media (max-width: 900px) {
@@ -3238,12 +3249,12 @@ body {
   min-height: 32px;
   gap: 7px;
   padding: 0 14px;
-  border: 1px solid #dce5ff;
-  border-radius: 999px;
-  background: #edf2ff;
-  color: #4e6ef2;
+  border: 1px solid var(--line);
+  border-radius: var(--r-flat);
+  background: var(--accent-tint);
+  color: var(--accent-ink);
   font-family: var(--font-mono);
-  font-size: 0.7rem;
+  font-size: var(--fs-micro);
   font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
@@ -3251,23 +3262,23 @@ body {
 
 .session-welcome-heading h2 {
   margin: 0;
-  color: #17233d;
-  font-size: 2.35rem;
+  color: var(--ink-1);
+  font-size: var(--fs-display);
   font-weight: 800;
   line-height: 1.18;
   letter-spacing: 0;
 }
 
 .session-welcome-heading h2 strong {
-  color: #4e6ef2;
+  color: var(--accent-ink);
   font-weight: inherit;
 }
 
 .session-welcome-heading p {
   max-width: 760px;
   margin: 0;
-  color: #74829a;
-  font-size: 0.88rem;
+  color: var(--ink-3);
+  font-size: var(--fs-body);
   line-height: 1.65;
 }
 
@@ -3275,7 +3286,7 @@ body {
   display: grid;
   gap: 14px;
   padding: 16px;
-  border: 1px solid #dce5fb;
+  border: 1px solid var(--line);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.9);
   box-shadow: 0 18px 45px rgba(64, 83, 140, 0.1);
@@ -3288,14 +3299,14 @@ body {
   gap: 12px;
   min-height: 190px;
   padding: 20px 22px 12px;
-  border: 1px solid #dce5fb;
+  border: 1px solid var(--line);
   border-radius: 8px;
-  background: #fff;
+  background: var(--paper);
 }
 
 .session-welcome-input-icon {
   margin-top: 4px;
-  color: #5271f2;
+  color: var(--accent-ink);
 }
 
 .session-composer-card[data-variant="welcome"] .session-composer-textarea {
@@ -3304,14 +3315,14 @@ body {
   padding: 0;
   border-radius: 0;
   background: transparent;
-  color: #24324b;
-  font-size: 0.98rem;
+  color: var(--ink-1);
+  font-size: var(--fs-read);
   line-height: 1.65;
   resize: vertical;
 }
 
 .session-composer-card[data-variant="welcome"] .session-composer-textarea::placeholder {
-  color: #9aa7bb;
+  color: var(--ink-3);
 }
 
 .session-composer-card[data-variant="welcome"] .session-composer-textarea:focus {
@@ -3325,13 +3336,12 @@ body {
   margin-bottom: 2px;
   border: 0;
   border-radius: 50%;
-  background: #536df2;
-  box-shadow: 0 8px 18px rgba(83, 109, 242, 0.25);
+  background: var(--accent);
+  box-shadow: 0 8px 18px rgba(83, 108, 245, 0.25);
 }
 
 .session-composer-card[data-variant="welcome"] .session-composer-send:hover:not(:disabled) {
-  background: #415fe9;
-  transform: translateY(-1px);
+  background: var(--accent);
 }
 
 .session-welcome-settings-button,
@@ -3340,20 +3350,21 @@ body {
   align-items: center;
   justify-content: center;
   min-height: 32px;
-  border: 1px solid #dce5fb;
-  background: #fff;
-  color: #596a87;
-  font-size: 0.72rem;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--ink-3);
+  font-size: var(--fs-micro);
   font-weight: 600;
   line-height: 1.2;
-  transition: border-color 160ms ease, color 160ms ease, background 160ms ease, transform 160ms ease;
+  transition: border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
 }
 
 .session-welcome-settings-button:hover,
 .session-welcome-topic-button:hover {
-  border-color: #aebfff;
-  background: #f6f8ff;
-  color: #4e6ef2;
+  border-color: var(--accent-edge);
+  background: var(--paper-2);
+  color: var(--accent-ink);
 }
 
 .session-welcome-settings-button {
@@ -3367,9 +3378,9 @@ body {
 .session-composer-card[data-variant="welcome"] .session-composer-constraints-panel {
   position: static;
   margin: 0 4px;
-  border-color: #dce5fb;
+  border-color: var(--line);
   border-radius: 8px;
-  background: #fafcff;
+  background: var(--paper-2);
   box-shadow: none;
 }
 
@@ -3378,7 +3389,7 @@ body {
   align-items: center;
   gap: 8px;
   padding: 4px;
-  border-top: 1px solid #edf1f8;
+  border-top: 1px solid var(--sunken);
 }
 
 .session-welcome-quick-label {
@@ -3386,8 +3397,8 @@ body {
   flex: 0 0 auto;
   align-items: center;
   gap: 5px;
-  color: #5371f3;
-  font-size: 0.7rem;
+  color: var(--accent-ink);
+  font-size: var(--fs-micro);
   font-weight: 700;
 }
 
@@ -3395,7 +3406,7 @@ body {
   min-width: 0;
   gap: 6px;
   padding: 0 10px;
-  border-radius: 999px;
+  border-radius: var(--r-flat);
   white-space: nowrap;
 }
 
@@ -3410,12 +3421,12 @@ body {
   justify-self: center;
   gap: 7px;
   margin: 0;
-  color: #7988a2;
-  font-size: 0.72rem;
+  color: var(--ink-3);
+  font-size: var(--fs-micro);
 }
 
 .session-welcome-inspiration svg {
-  color: #6d84ef;
+  color: var(--accent-ink);
 }
 
 /* 中文说明：历史会话的删除入口保持文字和图标同一行，颜色明确但不使用厚重边框。 */
@@ -3436,16 +3447,16 @@ body {
   border: 0;
   border-radius: 4px;
   background: transparent;
-  color: #ff4d4f;
-  font-size: 0.62rem;
+  color: var(--danger-ink);
+  font-size: var(--fs-micro);
   line-height: 1;
   white-space: nowrap;
 }
 
 .sidebar-session-delete:hover,
 .sidebar-session-delete:focus-visible {
-  background: #fff0f0;
-  color: #f23636;
+  background: var(--danger-soft);
+  color: var(--danger-ink);
   outline: 0;
 }
 
@@ -3457,16 +3468,16 @@ body {
   display: grid;
   place-items: center;
   padding: 20px;
-  background: rgba(15, 23, 42, 0.26);
+  background: rgba(13, 21, 38, 0.26);
 }
 
 .session-delete-dialog {
   width: min(420px, 100%);
   padding: 26px 24px 22px;
-  border: 1px solid #edf0f5;
+  border: 1px solid var(--sunken);
   border-radius: 12px;
-  background: #fff;
-  box-shadow: 0 18px 42px rgba(15, 23, 42, 0.22);
+  background: var(--paper);
+  box-shadow: 0 18px 42px rgba(13, 21, 38, 0.22);
 }
 
 .session-delete-dialog-copy {
@@ -3484,8 +3495,8 @@ body {
   height: 20px;
   margin-top: 1px;
   border-radius: 50%;
-  background: #f59e0b;
-  color: #fff;
+  background: var(--star);
+  color: var(--paper);
 }
 
 .session-delete-dialog-icon svg {
@@ -3498,16 +3509,16 @@ body {
 }
 
 .session-delete-dialog h2 {
-  color: #1f2937;
-  font-size: 0.98rem;
+  color: var(--ink-0);
+  font-size: var(--fs-read);
   font-weight: 700;
   line-height: 1.45;
 }
 
 .session-delete-dialog p {
   margin-top: 12px;
-  color: #313b4c;
-  font-size: 0.82rem;
+  color: var(--ink-1);
+  font-size: var(--fs-small);
   line-height: 1.5;
 }
 
@@ -3526,30 +3537,30 @@ body {
   height: 38px;
   padding: 0 18px;
   border-radius: 9px;
-  font-size: 0.82rem;
+  font-size: var(--fs-small);
   font-weight: 600;
 }
 
 .session-delete-dialog-cancel {
-  border: 1px solid #e1e6ee;
-  background: #fff;
-  color: #4b5565;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--ink-2);
 }
 
 .session-delete-dialog-confirm {
-  border: 1px solid #ff3f3f;
-  background: #ff3f3f;
-  color: #fff;
+  border: 1px solid var(--danger);
+  background: var(--danger);
+  color: var(--paper);
 }
 
 .session-delete-dialog-cancel:hover:not(:disabled) {
-  border-color: #cbd3df;
-  background: #f8fafc;
+  border-color: var(--line-2);
+  background: var(--paper-2);
 }
 
 .session-delete-dialog-confirm:hover:not(:disabled) {
-  border-color: #ec2828;
-  background: #ec2828;
+  border-color: var(--danger);
+  background: var(--danger);
 }
 
 .session-delete-dialog-actions button:disabled {
@@ -3595,12 +3606,12 @@ body {
 
   .session-welcome-heading h2 {
     max-width: 100%;
-    font-size: 1.75rem;
+    font-size: var(--fs-display);
     overflow-wrap: anywhere;
   }
 
   .session-welcome-heading p {
-    font-size: 0.78rem;
+    font-size: var(--fs-meta);
   }
 
   .session-welcome-prompt-card {
@@ -3616,7 +3627,7 @@ body {
 
   .session-composer-card[data-variant="welcome"] .session-composer-textarea {
     min-height: 138px;
-    font-size: 0.86rem;
+    font-size: var(--fs-small);
   }
 
   .session-composer-card[data-variant="welcome"] .session-composer-send {
@@ -3651,38 +3662,68 @@ body {
   flex-direction: column;
   height: 100vh;
   min-height: 0;
-  gap: 12px;
-  padding: 18px 22px 16px;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
 }
 
 .chat-view-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 10px 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--surface);
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-box);
+  background: var(--paper-2);
+}
+
+/* 中文说明：标题块占满中间的空间，这样它在头部始终靠左，
+   不会因为窄屏多出来一个「论文」按钮就被挤到正中间。 */
+.chat-view-heading {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 中文说明：窄屏专用的「论文」开关。宽屏时右栏一直在，不需要它，所以默认藏起来。 */
+.panel-toggle-narrow {
+  display: none;
+  align-items: center;
+  gap: var(--sp-1);
+  flex-shrink: 0;
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-inline);
+  background: var(--paper);
+  color: var(--ink-2);
+  font-size: var(--fs-small);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.panel-toggle-narrow:hover {
+  border-color: var(--ink-3);
+  color: var(--ink-1);
 }
 
 .chat-view-heading h1 {
   margin: 0;
-  font-size: 17px;
+  font-size: var(--fs-title);
   font-weight: 700;
 }
 
 .chat-view-heading p {
   margin: 2px 0 0;
-  font-size: 12px;
-  color: var(--text-faint);
+  font-size: var(--fs-micro);
+  color: var(--ink-3);
 }
 
 .chat-view-status {
   display: flex;
   align-items: center;
-  gap: 8px;
-  color: var(--accent);
+  gap: var(--sp-2);
+  /* 中文说明：状态文字本身用中性灰。蓝色留给「这里可以点」，
+     一个只负责显示状态的地方用蓝色，是在浪费这个信号。 */
+  color: var(--ink-3);
 }
 
 /* ---- 对话流滚动区 ---- */
@@ -3693,18 +3734,20 @@ body {
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 6px 4px 12px;
-  scroll-behavior: smooth;
+  gap: var(--sp-3);
+  /* 中文说明：底部不用再留大内边距 —— 它和输入框之间的距离由 .chat-column 的 gap 管。 */
+  padding: var(--sp-2) var(--sp-1);
 }
 
 .chat-flow[data-welcome="true"] {
   justify-content: center;
 }
 
+/* 中文说明：这一层只是把欢迎页占满对话区的宽度，本身不限定宽窄。
+   真正决定「多宽」的是里头的 .chat-composer（最宽 900px 居中），
+   标题、引导语、推荐调研方向卡片、输入框都在它里面，所以跟着一起收在同一个宽度上。 */
 .chat-welcome {
-  width: min(760px, 100%);
-  margin: 0 auto;
+  width: 100%;
 }
 
 .chat-loading {
@@ -3713,14 +3756,18 @@ body {
   justify-content: center;
   gap: 8px;
   padding: 14px;
-  color: var(--text-faint);
-  font-size: 13px;
+  color: var(--ink-3);
+  font-size: var(--fs-meta);
 }
 
+/* 中文说明：一轮对话铺满整个对话区，不再收在一个窄列里居中。
+   论文卡片、精读卡片、综述卡片都是 width:100%，所以会跟着一起铺开。
+   只有气泡另有上限（长段文字铺太宽不好读）。 */
 .chat-turn {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--sp-3);
+  width: 100%;
 }
 
 .chat-row {
@@ -3743,28 +3790,29 @@ body {
 /* ---- 气泡 ---- */
 
 .chat-bubble {
-  max-width: min(78%, 780px);
+  /* 中文说明：气泡单独设 860px 上限 —— 长段文字铺到 1200px，一行太长，眼睛容易串行。 */
+  max-width: min(78%, 860px);
   padding: 10px 14px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
-  box-shadow: var(--shadow-md);
+  border-radius: var(--r-box);
+  border: 1px solid var(--line);
+  box-shadow: var(--sh-none);
 }
 
 .chat-bubble-user {
   background: var(--accent);
   border-color: transparent;
-  color: #fff;
+  color: var(--paper);
   border-bottom-right-radius: 6px;
 }
 
 .chat-bubble-assistant {
-  background: var(--surface-strong);
+  background: var(--paper);
   border-bottom-left-radius: 6px;
 }
 
 .chat-bubble-text {
   margin: 0;
-  font-size: 14px;
+  font-size: var(--fs-small);
   line-height: 1.65;
   white-space: pre-wrap;
   word-break: break-word;
@@ -3773,15 +3821,15 @@ body {
 .chat-bubble-time {
   display: block;
   margin-top: 4px;
-  font-size: 11px;
+  font-size: var(--fs-micro);
   opacity: 0.72;
   text-align: right;
 }
 
 .chat-bubble-placeholder {
   margin: 0;
-  font-size: 13px;
-  color: var(--text-faint);
+  font-size: var(--fs-meta);
+  color: var(--ink-3);
 }
 
 .chat-cursor {
@@ -3806,15 +3854,15 @@ body {
   gap: 6px;
   margin-bottom: 6px;
   padding: 3px 9px;
-  border: 1px dashed var(--border-strong);
-  border-radius: 999px;
-  background: var(--surface-muted);
-  color: var(--text-faint);
-  font-size: 12px;
+  border: 1px dashed var(--line-2);
+  border-radius: var(--r-flat);
+  background: var(--paper-2);
+  color: var(--ink-3);
+  font-size: var(--fs-micro);
 }
 
 .chat-reasoning-toggle svg:last-child {
-  transition: transform 0.15s ease;
+  transition: transform var(--dur-fast) var(--ease);
 }
 
 .chat-reasoning-toggle svg:last-child.expanded {
@@ -3824,11 +3872,11 @@ body {
 .chat-reasoning-body {
   margin: 0 0 8px;
   padding: 8px 10px;
-  border-left: 2px solid var(--accent-soft);
+  border-left: 2px solid var(--accent-tint);
   border-radius: 6px;
-  background: var(--surface-muted);
-  color: var(--text-soft);
-  font-size: 12px;
+  background: var(--paper-2);
+  color: var(--ink-2);
+  font-size: var(--fs-micro);
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
@@ -3840,11 +3888,11 @@ body {
   align-self: center;
   max-width: 86%;
   padding: 4px 12px;
-  border-radius: 999px;
-  background: var(--surface-muted);
-  border: 1px solid var(--border);
-  color: var(--text-faint);
-  font-size: 12px;
+  border-radius: var(--r-flat);
+  background: var(--paper-2);
+  border: 1px solid var(--line);
+  color: var(--ink-3);
+  font-size: var(--fs-micro);
   text-align: center;
 }
 
@@ -3858,10 +3906,10 @@ body {
 
 .paper-card-group {
   width: 100%;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--surface);
-  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-block);
+  background: var(--paper);
+  padding: var(--sp-4);
 }
 
 .paper-card-group-head {
@@ -3873,34 +3921,36 @@ body {
 }
 
 .paper-card-group-title {
-  font-size: 13px;
+  font-size: var(--fs-meta);
   font-weight: 700;
-  color: var(--text);
+  color: var(--ink-1);
 }
 
 .paper-card-group-query {
   font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-faint);
-  background: var(--surface-muted);
+  font-size: var(--fs-micro);
+  color: var(--ink-3);
+  background: var(--paper-2);
   border-radius: 6px;
   padding: 2px 7px;
 }
 
 .paper-card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 10px;
+  /* 中文说明：卡片最小宽度从 280px 提到 340px，并按容器宽度自动分列 ——
+     对话区铺开之后，大屏上能排到 3 列，每张卡片本身也更大、更好扫。 */
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: var(--sp-3);
 }
 
 .paper-card {
   display: flex;
   flex-direction: column;
-  gap: 7px;
-  padding: 11px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface-strong);
+  gap: var(--sp-2);
+  padding: var(--sp-4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-box);
+  background: var(--paper);
 }
 
 .paper-card-title-row {
@@ -3912,9 +3962,9 @@ body {
 
 .paper-card-title {
   margin: 0;
-  font-size: 13.5px;
+  font-size: var(--fs-body);
   font-weight: 700;
-  line-height: 1.4;
+  line-height: 1.45;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -3924,46 +3974,48 @@ body {
 .paper-score {
   flex-shrink: 0;
   padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 11.5px;
+  border-radius: var(--r-flat);
+  font-size: var(--fs-micro);
   font-weight: 700;
 }
 
 .paper-score[data-tone="good"] { background: var(--success-soft); color: var(--success); }
 .paper-score[data-tone="mid"] { background: var(--warning-soft); color: var(--warning); }
-.paper-score[data-tone="low"] { background: var(--surface-muted); color: var(--text-faint); }
-.paper-score[data-tone="neutral"] { background: var(--surface-muted); color: var(--text-faint); }
+.paper-score[data-tone="low"] { background: var(--paper-2); color: var(--ink-3); }
+.paper-score[data-tone="neutral"] { background: var(--paper-2); color: var(--ink-3); }
 
 .paper-card-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--sp-2);
   margin: 0;
-  font-size: 11.5px;
-  color: var(--text-faint);
+  font-size: var(--fs-meta);
+  color: var(--ink-3);
 }
 
 .paper-source-badge,
 .paper-status-badge {
   padding: 1px 7px;
-  border-radius: 999px;
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-size: 11px;
+  border-radius: var(--r-flat);
+  background: var(--accent-tint);
+  /* 中文说明：小字放在浅蓝底上，用深一号的主色才够清楚（对比度 6.3:1）。
+     直接用 --accent 只有 4.0:1，这么小的字看着会发虚。 */
+  color: var(--accent-ink);
+  font-size: var(--fs-micro);
 }
 
 .paper-status-badge {
-  background: var(--surface-muted);
-  color: var(--text-soft);
+  background: var(--paper-2);
+  color: var(--ink-2);
 }
 
 .paper-card-abstract {
   margin: 0;
-  font-size: 12px;
-  line-height: 1.55;
-  color: var(--text-soft);
+  font-size: var(--fs-small);
+  line-height: 1.65;
+  color: var(--ink-2);
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -3980,13 +4032,13 @@ body {
   align-items: center;
   gap: 5px;
   padding: 4px 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: 999px;
-  background: var(--surface-strong);
-  color: var(--text-soft);
-  font-size: 12px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-flat);
+  background: var(--paper);
+  color: var(--ink-2);
+  font-size: var(--fs-micro);
   text-decoration: none;
-  transition: border-color 0.15s ease, color 0.15s ease;
+  transition: border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 }
 
 .paper-card-action:hover:not(:disabled) {
@@ -4005,7 +4057,7 @@ body {
   position: fixed;
   inset: 0;
   z-index: 60;
-  background: rgba(15, 23, 38, 0.35);
+  background: rgba(13, 21, 38, 0.35);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -4022,15 +4074,17 @@ body {
   /* 中文注释：底部内边距交给 .paper-dialog-actions 自己撑，
      这样它用 position:sticky 贴在底部时才是严丝合缝的。 */
   padding: 16px 18px 0;
-  border-radius: var(--radius-md);
-  background: var(--surface-strong);
-  box-shadow: var(--shadow-lg);
-  animation: paper-dialog-in 0.16s ease;
+  border-radius: var(--r-box);
+  background: var(--paper);
+  box-shadow: var(--sh-float);
+  animation: paper-dialog-in var(--dur-slow) var(--ease);
 }
 
+/* 中文说明：弹窗出现时只做轻微上移 + 淡入，不要缩放 ——
+   缩放会让内容看起来在「变大变小」，比单纯淡入更晃眼。 */
 @keyframes paper-dialog-in {
-  from { transform: translateY(10px) scale(0.99); opacity: 0.4; }
-  to { transform: translateY(0) scale(1); opacity: 1; }
+  from { transform: translateY(6px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
 }
 
 .paper-dialog-head {
@@ -4043,19 +4097,19 @@ body {
 .paper-dialog-close {
   border: 0;
   background: transparent;
-  color: var(--text-faint);
+  color: var(--ink-3);
   cursor: pointer;
   padding: 2px;
   display: inline-flex;
 }
 
 .paper-dialog-close:hover {
-  color: var(--text-soft);
+  color: var(--ink-2);
 }
 
 .paper-dialog-title {
   margin: 0;
-  font-size: 15.5px;
+  font-size: var(--fs-read);
   font-weight: 700;
   line-height: 1.45;
 }
@@ -4070,13 +4124,13 @@ body {
      之前给这里加过 max-height + overflow，结果文字被截在框的边缘、
      滚动条又是悬浮式的看不见，看起来就像摘要在半句话处断了。
      现在统一交给最外层弹窗滚动。 */
-  font-size: 13px;
+  font-size: var(--fs-meta);
   line-height: 1.7;
-  color: var(--text-soft);
+  color: var(--ink-2);
 }
 
 .paper-dialog-empty {
-  color: var(--text-faint);
+  color: var(--ink-3);
   font-style: italic;
 }
 
@@ -4088,7 +4142,7 @@ body {
   flex-wrap: wrap;
   gap: 8px;
   padding: 10px 0 14px;
-  background: var(--surface-strong);
+  background: var(--paper);
 }
 
 /* ---- 精读报告卡片 ---- */
@@ -4097,28 +4151,29 @@ body {
   width: 100%;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 12px 14px;
-  border: 1px solid var(--border);
+  gap: var(--sp-2);
+  padding: var(--sp-4);
+  border: 1px solid var(--line);
   border-left: 3px solid var(--accent);
-  border-radius: var(--radius-md);
-  background: var(--surface);
+  border-radius: var(--r-box);
+  background: var(--paper);
 }
 
 .deep-read-card-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  color: var(--accent);
+  gap: var(--sp-2);
+  /* 中文说明：卡片标题行是内容，不是操作入口，用墨色。 */
+  color: var(--ink-3);
 }
 
 .deep-read-card-title {
   margin: 0;
   flex: 1;
   min-width: 0;
-  font-size: 13.5px;
+  font-size: var(--fs-body);
   font-weight: 700;
-  color: var(--text);
+  color: var(--ink-0);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -4127,55 +4182,76 @@ body {
 .deep-read-source-badge {
   flex-shrink: 0;
   padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 11px;
+  border-radius: var(--r-flat);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  /* 中文说明：小字放在浅色底上，用深一号的语义色才够清楚。 */
   background: var(--success-soft);
-  color: var(--success);
+  color: var(--success-ink);
 }
 
 .deep-read-source-badge[data-source="abstract_fallback"] {
   background: var(--warning-soft);
-  color: var(--warning);
+  color: var(--warning-ink);
 }
 
 .deep-read-overall {
   flex-shrink: 0;
-  font-size: 14px;
-  font-weight: 800;
-  color: var(--accent);
+  font-size: var(--fs-body);
+  font-weight: 700;
+  /* 中文说明：这里是分数本身，是内容不是操作，所以用最深的墨色而不是主色。 */
+  color: var(--ink-0);
+  font-variant-numeric: tabular-nums;
 }
 
 .deep-read-summary {
   margin: 0;
-  font-size: 12.5px;
-  line-height: 1.6;
-  color: var(--text-soft);
+  font-size: var(--fs-small);
+  line-height: 1.65;
+  color: var(--ink-1);
 }
 
 /* 中文注释：没能下载到全文时的提示条，用警示色让它比正文更显眼。 */
 .deep-read-warning {
   margin: 0;
-  padding: 6px 9px;
-  border-radius: 6px;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-inline);
   background: var(--warning-soft);
-  color: var(--warning);
-  font-size: 12px;
-  line-height: 1.55;
+  /* 中文说明：小字放浅底上，用深一号的警示色更清楚。 */
+  color: var(--warning-ink);
+  font-size: var(--fs-meta);
+  line-height: 1.6;
 }
 
 .deep-read-dims {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--sp-2);
 }
 
+/* 中文说明：每个小标签里是「维度名 + 分数」两块，所以要让它们对齐。
+   名字用中灰小字，分数用更深更大的字 —— 一眼能看出哪个是分数。
+   标签底色比卡片浅一点，整体读起来像一块「数据」而不是一句描述。 */
 .deep-read-dim {
-  padding: 2px 9px;
-  border-radius: 999px;
-  background: var(--surface-muted);
-  border: 1px solid var(--border);
-  color: var(--text-soft);
-  font-size: 11.5px;
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sp-1);
+  padding: 3px 10px;
+  border-radius: var(--r-flat);
+  background: var(--paper-2);
+  border: 1px solid var(--line);
+}
+
+.deep-read-dim-label {
+  font-size: var(--fs-micro);
+  color: var(--ink-2);
+}
+
+.deep-read-dim-score {
+  font-size: var(--fs-small);
+  font-weight: 700;
+  color: var(--ink-0);
+  font-variant-numeric: tabular-nums;
 }
 
 .deep-read-card-actions {
@@ -4189,12 +4265,12 @@ body {
   width: 100%;
   display: flex;
   flex-direction: column;
-  gap: 9px;
-  padding: 12px 14px;
-  border: 1px solid var(--border);
+  gap: var(--sp-2);
+  padding: var(--sp-4);
+  border: 1px solid var(--line);
   border-left: 3px solid var(--success);
-  border-radius: var(--radius-md);
-  background: var(--surface);
+  border-radius: var(--r-box);
+  background: var(--paper);
 }
 
 .review-card-head {
@@ -4206,22 +4282,22 @@ body {
 
 .review-card-title {
   margin: 0;
-  font-size: 13.5px;
+  font-size: var(--fs-small);
   font-weight: 700;
-  color: var(--text);
+  color: var(--ink-1);
 }
 
 .review-card-meta {
   margin-left: auto;
-  font-size: 11.5px;
-  color: var(--text-faint);
+  font-size: var(--fs-micro);
+  color: var(--ink-3);
 }
 
 .review-card-sections {
   margin: 0;
   padding-left: 20px;
-  font-size: 12.5px;
-  color: var(--text-soft);
+  font-size: var(--fs-meta);
+  color: var(--ink-2);
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -4229,8 +4305,8 @@ body {
 
 .review-card-sections code {
   font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-faint);
+  font-size: var(--fs-micro);
+  color: var(--ink-3);
   margin-right: 5px;
 }
 
@@ -4247,9 +4323,9 @@ body {
 
 .tool-trace {
   width: 100%;
-  border: 1px dashed var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--surface-muted);
+  border: 1px dashed var(--line-2);
+  border-radius: var(--r-inline);
+  background: var(--paper-2);
   overflow: hidden;
 }
 
@@ -4261,14 +4337,14 @@ body {
   padding: 7px 12px;
   border: 0;
   background: transparent;
-  color: var(--text-faint);
-  font-size: 12px;
+  color: var(--ink-3);
+  font-size: var(--fs-micro);
   text-align: left;
 }
 
 .tool-trace-chevron {
   margin-left: auto;
-  transition: transform 0.15s ease;
+  transition: transform var(--dur-fast) var(--ease);
 }
 
 .tool-trace-chevron.expanded {
@@ -4277,14 +4353,23 @@ body {
 
 .tool-trace-body {
   padding: 6px 12px 10px;
-  border-top: 1px dashed var(--border);
+  border-top: 1px dashed var(--line);
 }
 
 /* ---- 输入框 ---- */
 
+/* 中文说明：输入框最宽 900px 并左右居中，欢迎页和进入对话后的底部输入框
+   用的是同一条规则，所以两者宽度始终一样，发第一条消息时不会突然变宽。
+   为什么要收窄：铺满整宽时，新建对话页的标题、推荐调研方向卡片、输入框会被
+   拉成一整页那么宽，看着像被撑开的。900px 是用户选的比例。
+   margin 用 auto 居中而不是写 left/right 偏移，是因为这块东西在两种布局里：
+   欢迎页里它是普通块级元素；进入对话后它是 .chat-column 这个纵向 flex 的子项，
+   此时 auto 外边距会盖过 align-items 默认的 stretch，同样能居中。
+   注意：只有输入框和欢迎页这一块收窄，对话气泡和论文卡片仍然铺满整宽。 */
 .chat-composer {
   flex-shrink: 0;
-  width: min(860px, 100%);
+  width: 100%;
+  max-width: 900px;
   margin: 0 auto;
 }
 
@@ -4293,16 +4378,24 @@ body {
   margin-bottom: 14px;
 }
 
+/* 中文说明：欢迎页首屏的品牌 logo，居中放在大标题上方。 */
+.welcome-logo {
+  display: block;
+  width: 52px;
+  height: 52px;
+  margin: 0 auto 12px;
+}
+
 .chat-composer-welcome-copy h2 {
   margin: 0 0 6px;
-  font-size: 22px;
+  font-size: var(--fs-display);
   font-weight: 800;
 }
 
 .chat-composer-welcome-copy p {
   margin: 0;
-  font-size: 13px;
-  color: var(--text-faint);
+  font-size: var(--fs-meta);
+  color: var(--ink-3);
 }
 
 .chat-composer-box {
@@ -4310,10 +4403,10 @@ body {
   flex-direction: column;
   gap: 8px;
   padding: 10px 12px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
-  background: var(--surface-strong);
-  box-shadow: var(--shadow-md);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-box);
+  background: var(--paper);
+  box-shadow: var(--sh-none);
 }
 
 .chat-composer-input {
@@ -4322,9 +4415,9 @@ body {
   outline: none;
   resize: none;
   background: transparent;
-  font-size: 14px;
+  font-size: var(--fs-small);
   line-height: 1.6;
-  color: var(--text);
+  color: var(--ink-1);
 }
 
 .chat-composer-actions {
@@ -4339,15 +4432,15 @@ body {
   align-items: center;
   gap: 6px;
   padding: 6px 14px;
-  border-radius: 999px;
+  border-radius: var(--r-flat);
   border: 1px solid transparent;
-  font-size: 13px;
+  font-size: var(--fs-meta);
   font-weight: 600;
 }
 
 .chat-composer-submit {
   background: var(--accent);
-  color: #fff;
+  color: var(--paper);
 }
 
 .chat-composer-submit:disabled {
@@ -4355,9 +4448,17 @@ body {
   cursor: not-allowed;
 }
 
+/* 中文说明：「停止」不是不可撤回的破坏性操作，所以不用红色底。
+   红色应该留给「删掉就没了」的行为（删论文、删会话），否则用户会以为点一下会丢东西。 */
 .chat-composer-cancel {
-  background: var(--danger-soft);
-  color: var(--danger);
+  background: var(--paper);
+  border-color: var(--line-2);
+  color: var(--ink-2);
+}
+
+.chat-composer-cancel:hover:not(:disabled) {
+  border-color: var(--ink-3);
+  color: var(--ink-1);
 }
 
 .chat-composer-cancel:disabled {
@@ -4371,7 +4472,7 @@ body {
   position: fixed;
   inset: 0;
   z-index: 60;
-  background: rgba(15, 23, 38, 0.35);
+  background: rgba(13, 21, 38, 0.35);
   display: flex;
   justify-content: flex-end;
 }
@@ -4379,10 +4480,10 @@ body {
 .deep-read-drawer {
   display: flex;
   flex-direction: column;
-  width: min(560px, 94vw);
+  width: min(640px, 94vw);
   height: 100%;
-  background: var(--surface-strong);
-  box-shadow: var(--shadow-lg);
+  background: var(--paper);
+  box-shadow: var(--sh-float);
   animation: drawer-slide-in 0.18s ease;
 }
 
@@ -4397,79 +4498,88 @@ body {
   justify-content: space-between;
   gap: 10px;
   padding: 16px 18px 12px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--line);
 }
 
 .deep-read-drawer-head h3 {
-  margin: 6px 0 0;
-  font-size: 15.5px;
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-title);
   font-weight: 700;
-  line-height: 1.4;
+  line-height: 1.35;
+  color: var(--ink-0);
 }
 
 .deep-read-drawer-close {
   border: 0;
   background: transparent;
-  color: var(--text-faint);
+  color: var(--ink-3);
   padding: 4px;
   border-radius: 8px;
 }
 
 .deep-read-drawer-close:hover {
-  color: var(--text);
-  background: var(--surface-muted);
+  color: var(--ink-1);
+  background: var(--paper-2);
 }
 
+/* 中文说明：10 个段落之间留足 24px，比「标题到自己正文」的 6px 大得多，
+   这样一眼就能看出哪几行属于同一段。左右留白用 32px，让正文行长控制在好读的范围内。 */
 .deep-read-drawer-body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 14px 18px;
+  padding: var(--sp-6) var(--sp-8);
   display: flex;
   flex-direction: column;
-  gap: 13px;
+  gap: var(--sp-6);
 }
 
 .drawer-empty {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  color: var(--text-faint);
-  font-size: 13px;
+  color: var(--ink-3);
+  font-size: var(--fs-meta);
 }
 
+/* 中文说明：段落标题要三个信号同时和正文拉开 —— 更大（17px vs 15.5px）、
+   更重（700 vs 400）、更深（ink-0 vs ink-1）。原来用的是浅灰，比正文还淡，
+   标题看着反而不像标题。配合「标题离自己的正文近、离上一段远」的间距，
+   10 个段落扫下来才能快速找到落点。 */
 .drawer-section h4 {
-  margin: 0 0 5px;
-  font-size: 12.5px;
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-title);
   font-weight: 700;
-  color: var(--accent);
+  color: var(--ink-0);
 }
 
 .drawer-section p {
   margin: 0;
-  font-size: 13px;
-  line-height: 1.65;
-  color: var(--text-soft);
+  font-size: var(--fs-read);
+  line-height: 1.78;
+  color: var(--ink-1);
   white-space: pre-wrap;
 }
 
 .drawer-section ul {
   margin: 0;
   padding-left: 18px;
-  font-size: 13px;
-  line-height: 1.65;
-  color: var(--text-soft);
+  font-size: var(--fs-read);
+  line-height: 1.78;
+  color: var(--ink-1);
 }
 
+/* 中文说明：评分区整块凹下去（比页底更深），和白色的报告正文分开，
+   让人一眼看出「这块是结论」。 */
 .drawer-score-section {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
-  padding: 12px 14px;
-  border-radius: var(--radius-md);
-  background: var(--surface-muted);
-  border: 1px solid var(--border);
+  gap: var(--sp-4);
+  padding: var(--sp-4);
+  border-radius: var(--r-box);
+  background: var(--sunken);
+  border: 1px solid var(--line-2);
 }
 
 .drawer-overall {
@@ -4480,16 +4590,19 @@ body {
 }
 
 .drawer-overall strong {
-  font-size: 26px;
-  font-weight: 800;
-  color: var(--accent);
+  font-size: var(--fs-metric);
+  font-weight: 700;
+  color: var(--ink-0);
+  font-variant-numeric: tabular-nums;
 }
 
 .drawer-overall span {
-  font-size: 11px;
-  color: var(--text-faint);
+  font-size: var(--fs-meta);
+  color: var(--ink-2);
 }
 
+/* 中文说明：一行是「维度名 + 分数 + 一句理由」。
+   维度名用中灰小字，分数单独加大加深（见下面的 strong），理由最淡。 */
 .drawer-dims {
   flex: 1;
   min-width: 220px;
@@ -4498,23 +4611,29 @@ body {
   list-style: none;
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 6px 12px;
+  gap: var(--sp-2) var(--sp-3);
 }
 
 .drawer-dims li {
   display: flex;
   align-items: baseline;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-soft);
+  gap: var(--sp-2);
+  font-size: var(--fs-meta);
+  color: var(--ink-2);
 }
 
+/* 中文说明：四维分数原来没设字号，跟着 li 用 11.5px，和标签一样大，
+   根本看不出哪个才是分数。现在单独给它字号、字重、最深的墨色，并用等宽数字。 */
 .drawer-dims li strong {
-  color: var(--text);
+  font-size: var(--fs-body);
+  font-weight: 700;
+  color: var(--ink-0);
+  font-variant-numeric: tabular-nums;
 }
 
 .drawer-dims li small {
-  color: var(--text-faint);
+  font-size: var(--fs-micro);
+  color: var(--ink-3);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4524,8 +4643,8 @@ body {
 .drawer-comment {
   flex-basis: 100%;
   margin: 0;
-  font-size: 12.5px;
-  color: var(--text-soft);
+  font-size: var(--fs-small);
+  color: var(--ink-1);
 }
 
 .drawer-footer {
@@ -4536,8 +4655,8 @@ body {
 }
 
 .drawer-created-at {
-  font-size: 11px;
-  color: var(--text-faint);
+  font-size: var(--fs-micro);
+  color: var(--ink-3);
 }
 
 .deep-read-drawer-ask {
@@ -4545,21 +4664,21 @@ body {
   align-items: flex-end;
   gap: 8px;
   padding: 12px 18px 16px;
-  border-top: 1px solid var(--border);
-  background: var(--surface-muted);
+  border-top: 1px solid var(--line);
+  background: var(--paper-2);
 }
 
 .drawer-ask-input {
   flex: 1;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--surface-strong);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-inline);
+  background: var(--paper);
   padding: 8px 10px;
-  font-size: 13px;
+  font-size: var(--fs-meta);
   line-height: 1.5;
   resize: none;
   outline: none;
-  color: var(--text);
+  color: var(--ink-1);
 }
 
 .drawer-ask-input:focus {
@@ -4569,7 +4688,7 @@ body {
 /* ---- 助手气泡内的 Markdown 渲染 ---- */
 
 .chat-md {
-  font-size: 14px;
+  font-size: var(--fs-small);
   line-height: 1.65;
   word-break: break-word;
 }
@@ -4588,10 +4707,10 @@ body {
   line-height: 1.4;
 }
 
-h3.chat-md-heading { font-size: 15.5px; }
-h4.chat-md-heading { font-size: 14.5px; }
+h3.chat-md-heading { font-size: var(--fs-read); }
+h4.chat-md-heading { font-size: var(--fs-body); }
 h5.chat-md-heading,
-h6.chat-md-heading { font-size: 14px; }
+h6.chat-md-heading { font-size: var(--fs-small); }
 
 .chat-md-list {
   margin: 4px 0 8px;
@@ -4603,16 +4722,16 @@ h6.chat-md-heading { font-size: 14px; }
 }
 
 .chat-md-list li::marker {
-  color: var(--text-faint);
+  color: var(--ink-3);
 }
 
 .chat-md-quote {
   margin: 6px 0;
   padding: 4px 12px;
-  border-left: 3px solid var(--accent-soft);
+  border-left: 3px solid var(--accent-tint);
   border-radius: 4px;
-  background: var(--surface-muted);
-  color: var(--text-soft);
+  background: var(--paper-2);
+  color: var(--ink-2);
 }
 
 .chat-md-quote p {
@@ -4622,10 +4741,10 @@ h6.chat-md-heading { font-size: 14px; }
 .chat-md-inline-code {
   padding: 1px 6px;
   border-radius: 6px;
-  background: var(--surface-muted);
-  border: 1px solid var(--border);
+  background: var(--paper-2);
+  border: 1px solid var(--line);
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: var(--fs-meta);
   color: var(--accent);
   word-break: break-all;
 }
@@ -4633,7 +4752,7 @@ h6.chat-md-heading { font-size: 14px; }
 .chat-bubble-user .chat-md-inline-code {
   background: rgba(255, 255, 255, 0.16);
   border-color: transparent;
-  color: #fff;
+  color: var(--paper);
 }
 
 .chat-md-code-wrap {
@@ -4646,18 +4765,18 @@ h6.chat-md-heading { font-size: 14px; }
   top: 6px;
   right: 10px;
   font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: var(--text-faint);
+  font-size: var(--fs-micro);
+  color: var(--ink-3);
 }
 
 .chat-md-code {
   margin: 0;
   padding: 10px 12px;
-  border-radius: var(--radius-sm);
-  background: #101b2a;
-  color: #dbe7f3;
+  border-radius: var(--r-inline);
+  background: var(--sunken);
+  color: var(--ink-1);
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: var(--fs-meta);
   line-height: 1.55;
   overflow-x: auto;
   white-space: pre;
@@ -4666,7 +4785,7 @@ h6.chat-md-heading { font-size: 14px; }
 .chat-md-hr {
   margin: 10px 0;
   border: 0;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--line);
 }
 
 .chat-md-table-wrap {
@@ -4676,20 +4795,20 @@ h6.chat-md-heading { font-size: 14px; }
 
 .chat-md-table {
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: var(--fs-meta);
   width: 100%;
 }
 
 .chat-md-table th,
 .chat-md-table td {
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--line-2);
   padding: 5px 10px;
   text-align: left;
   vertical-align: top;
 }
 
 .chat-md-table th {
-  background: var(--surface-muted);
+  background: var(--paper-2);
   font-weight: 700;
 }
 
@@ -4716,31 +4835,34 @@ h6.chat-md-heading { font-size: 14px; }
 
 /* ---- 欢迎态快速开始按钮 ---- */
 
+/* 中文说明：欢迎页的「快速开始」排成两列小格子，不再横着挤成一长条。
+   横排的时候每个按钮宽度都不一样，看着很乱；格子对齐之后一眼能扫完。 */
 .chat-quick-starts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  justify-content: center;
-  margin-top: 14px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-2);
+  margin-top: var(--sp-6);
 }
 
 .chat-quick-start {
-  padding: 7px 14px;
-  border: 1px solid var(--border-strong);
-  border-radius: 999px;
-  background: var(--surface-strong);
-  color: var(--text-soft);
-  font-size: 12.5px;
-  line-height: 1.4;
-  max-width: 340px;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-inline);
+  background: var(--paper);
+  color: var(--ink-2);
+  font-size: var(--fs-small);
+  line-height: 1.5;
   text-align: left;
-  transition: border-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
+  /* 中文说明：只让颜色变化，不做上下位移。按钮一多，一个个往上跳很闹；
+     而且列表项 hover 位移会让人扫读时视线被拽走。 */
+  transition: border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
 }
 
 .chat-quick-start:hover:not(:disabled) {
-  border-color: var(--accent);
-  color: var(--accent);
-  transform: translateY(-1px);
+  border-color: var(--accent-edge);
+  background: var(--accent-tint);
+  color: var(--accent-ink);
 }
 
 .chat-quick-start:disabled {
@@ -4748,41 +4870,84 @@ h6.chat-md-heading { font-size: 14px; }
   cursor: not-allowed;
 }
 
-/* ---- 窄屏适配 ---- */
-
-@media (max-width: 720px) {
-  .chat-view-shell {
-    padding: 12px 10px 10px;
-  }
-
-  .chat-bubble {
-    max-width: 92%;
-  }
-
-  .paper-card-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .chat-quick-start {
-    max-width: 100%;
-  }
-}
 
 /* 包 1 · F3：ChatComposer 里的运行状态文案。 */
 .chat-composer-status {
-  font-size: 0.8rem;
-  color: var(--text-secondary, #666);
+  font-size: var(--fs-meta);
+  color: var(--ink-3);
   padding: 0.25rem 0.5rem;
   white-space: nowrap;
 }
 
 /* 包 4 · 两栏布局：对话流 + 论文工作区面板 */
+/* 中文说明：左边对话区 + 右边论文工作区并排。右栏宽度由 --panel-w 控制，
+   用户可以拖拽调整（拖拽逻辑写在 ChatView.vue 里）。
+   左栏写 minmax(0, 1fr) 而不是 1fr —— 否则对话里出现长链接或宽表格时，
+   会把左栏直接撑破，右栏被挤出屏幕。 */
+/* 中文说明：左边这一列 = 消息滚动区 + 底部输入框。
+   输入框放在这一列里面，宽度才会和上面的消息区一致。
+   它原来是整个页面壳的子元素，宽度按整页算 —— 所以一发消息就会横伸到右侧论文栏底下。 */
+.chat-column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+  min-height: 0;
+}
+
 .chat-main-layout {
   display: grid;
-  grid-template-columns: 1fr 320px;
-  gap: 1rem;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--sp-4);
   flex: 1;
   overflow: hidden;
+  position: relative;
+}
+
+/* 中文说明：只有右栏真的显示出来时才分成两栏（这个标记由 ChatView 加上）。
+   欢迎页没有右栏，如果照样写成两栏，欢迎页会被挤成左边窄窄的一条。
+   放在 CSS 里而不是写成内联样式，是为了让下面的窄屏断点能覆盖它。 */
+.chat-main-layout[data-panel="true"] {
+  grid-template-columns: minmax(0, 1fr) var(--panel-w);
+}
+
+/* 中文说明：右栏的拖拽把手。它贴在两栏交界处，鼠标移上去会变成左右箭头。
+   平时完全透明，只有鼠标移到上面、或者正在拖动时才画出一条竖线，
+   免得平时界面上多一根没用的线。双击把手可以把宽度恢复到 320px。 */
+.panel-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(100% - var(--panel-w) - 3px);
+  width: 7px;
+  cursor: col-resize;
+  z-index: 5;
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+
+.panel-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+  background: transparent;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.panel-resizer:hover::after,
+.panel-resizer:focus-visible::after,
+.chat-main-layout[data-resizing="true"] .panel-resizer::after {
+  background: var(--accent);
+}
+
+/* 中文说明：正在拖拽时，页面上任何文字都不该被顺手选中（否则拖动会把界面文字刷蓝）。 */
+body[data-resizing="true"] {
+  user-select: none;
+  cursor: col-resize;
 }
 
 .chat-main-layout .chat-flow {
@@ -4793,14 +4958,14 @@ h6.chat-md-heading { font-size: 14px; }
 .paper-library-panel {
   display: flex;
   flex-direction: column;
-  border-left: 1px solid var(--border-color, #e0e0e0);
-  background: var(--panel-bg, #fafafa);
+  border-left: 1px solid var(--line-2);
+  background: var(--paper-2);
   overflow: hidden;
 }
 
 .paper-library-panel .panel-header {
   padding: 0.75rem 1rem;
-  border-bottom: 1px solid var(--border-color, #e0e0e0);
+  border-bottom: 1px solid var(--line-2);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -4808,13 +4973,13 @@ h6.chat-md-heading { font-size: 14px; }
 
 .paper-library-panel .panel-header h3 {
   margin: 0;
-  font-size: 0.95rem;
+  font-size: var(--fs-read);
   font-weight: 600;
 }
 
 .paper-library-panel .paper-count {
-  font-size: 0.8rem;
-  color: var(--text-secondary, #666);
+  font-size: var(--fs-meta);
+  color: var(--ink-3);
 }
 
 /* 中文注释：面板标题栏右侧那一组东西（论文数 + 上传按钮）。 */
@@ -4830,12 +4995,12 @@ h6.chat-md-heading { font-size: 14px; }
   align-items: center;
   gap: 4px;
   padding: 0.2rem 0.6rem;
-  font-size: 0.78rem;
+  font-size: var(--fs-meta);
   font-family: inherit;
-  border: 1px solid var(--border-color, #e0e0e0);
+  border: 1px solid var(--line-2);
   border-radius: 4px;
-  background: var(--bg-primary, #fff);
-  color: var(--text-secondary, #666);
+  background: var(--paper);
+  color: var(--ink-3);
   cursor: pointer;
 }
 
@@ -4870,8 +5035,8 @@ h6.chat-md-heading { font-size: 14px; }
 
 .paper-meta-hint {
   margin: 0 0 0.75rem;
-  font-size: 0.82rem;
-  color: var(--text-secondary, #666);
+  font-size: var(--fs-small);
+  color: var(--ink-3);
   line-height: 1.5;
 }
 
@@ -4882,7 +5047,7 @@ h6.chat-md-heading { font-size: 14px; }
   border-radius: 6px;
   background: var(--warning-soft);
   color: var(--warning);
-  font-size: 0.82rem;
+  font-size: var(--fs-small);
   line-height: 1.5;
 }
 
@@ -4903,18 +5068,18 @@ h6.chat-md-heading { font-size: 14px; }
 }
 
 .paper-meta-label {
-  font-size: 0.78rem;
-  color: var(--text-secondary, #666);
+  font-size: var(--fs-meta);
+  color: var(--ink-3);
 }
 
 .paper-meta-input {
   width: 100%;
   padding: 0.35rem 0.5rem;
-  font-size: 0.85rem;
+  font-size: var(--fs-small);
   font-family: inherit;
-  border: 1px solid var(--border-color, #e0e0e0);
+  border: 1px solid var(--line-2);
   border-radius: 4px;
-  background: var(--bg-primary, #fff);
+  background: var(--paper);
   color: inherit;
   box-sizing: border-box;
 }
@@ -4937,7 +5102,7 @@ h6.chat-md-heading { font-size: 14px; }
 
 .paper-library-panel .filter-bar {
   padding: 0.5rem 1rem;
-  border-bottom: 1px solid var(--border-color, #e0e0e0);
+  border-bottom: 1px solid var(--line-2);
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
@@ -4952,17 +5117,17 @@ h6.chat-md-heading { font-size: 14px; }
 .paper-library-panel .filter-select {
   flex: 1;
   padding: 0.25rem 0.5rem;
-  font-size: 0.8rem;
-  border: 1px solid var(--border-color, #e0e0e0);
+  font-size: var(--fs-meta);
+  border: 1px solid var(--line-2);
   border-radius: 4px;
-  background: var(--bg-primary, #fff);
+  background: var(--paper);
 }
 
 .paper-library-panel .starred-toggle {
   display: flex;
   align-items: center;
   gap: 0.25rem;
-  font-size: 0.8rem;
+  font-size: var(--fs-meta);
   cursor: pointer;
 }
 
@@ -4971,22 +5136,22 @@ h6.chat-md-heading { font-size: 14px; }
 }
 
 .paper-library-panel .starred-toggle .filled {
-  color: #f59e0b;
-  fill: #f59e0b;
+  color: var(--star);
+  fill: var(--star);
 }
 
 .paper-library-panel .search-input {
   padding: 0.35rem 0.5rem;
-  font-size: 0.8rem;
-  border: 1px solid var(--border-color, #e0e0e0);
+  font-size: var(--fs-meta);
+  border: 1px solid var(--line-2);
   border-radius: 4px;
-  background: var(--bg-primary, #fff);
+  background: var(--paper);
 }
 
 .paper-library-panel .selection-bar {
   padding: 0.5rem 1rem;
-  background: var(--accent-bg, #e0f2fe);
-  border-bottom: 1px solid var(--border-color, #e0e0e0);
+  background: var(--accent-tint);
+  border-bottom: 1px solid var(--line-2);
   display: flex;
   align-items: center;
   gap: 0.5rem;
@@ -4995,10 +5160,10 @@ h6.chat-md-heading { font-size: 14px; }
 
 .paper-library-panel .selection-action {
   padding: 0.25rem 0.5rem;
-  font-size: 0.75rem;
-  border: 1px solid var(--border-color, #e0e0e0);
+  font-size: var(--fs-micro);
+  border: 1px solid var(--line-2);
   border-radius: 4px;
-  background: var(--bg-primary, #fff);
+  background: var(--paper);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -5006,12 +5171,12 @@ h6.chat-md-heading { font-size: 14px; }
 }
 
 .paper-library-panel .selection-action:hover {
-  background: var(--hover-bg, #f0f0f0);
+  background: var(--sunken);
 }
 
 .paper-library-panel .selection-action.danger {
-  color: #dc2626;
-  border-color: #dc2626;
+  color: var(--danger-ink);
+  border-color: var(--danger);
 }
 
 .paper-library-panel .export-group {
@@ -5028,18 +5193,18 @@ h6.chat-md-heading { font-size: 14px; }
 
 .paper-library-panel .paper-item {
   padding: 0.5rem 1rem;
-  border-bottom: 1px solid var(--border-color, #e0e0e0);
+  border-bottom: 1px solid var(--line-2);
   display: flex;
   gap: 0.5rem;
   cursor: pointer;
 }
 
 .paper-library-panel .paper-item:hover {
-  background: var(--hover-bg, #f5f5f5);
+  background: var(--sunken);
 }
 
 .paper-library-panel .paper-item.selected {
-  background: var(--accent-bg, #e0f2fe);
+  background: var(--accent-tint);
 }
 
 .paper-library-panel .paper-checkbox {
@@ -5062,21 +5227,21 @@ h6.chat-md-heading { font-size: 14px; }
   border: none;
   padding: 0;
   cursor: pointer;
-  color: var(--text-secondary, #999);
+  color: var(--ink-3);
   flex-shrink: 0;
 }
 
 .paper-library-panel .star-button.starred {
-  color: #f59e0b;
+  color: var(--star);
 }
 
 .paper-library-panel .star-button .filled {
-  fill: #f59e0b;
+  fill: var(--star);
 }
 
 .paper-library-panel .paper-title {
   margin: 0;
-  font-size: 0.85rem;
+  font-size: var(--fs-small);
   font-weight: 500;
   line-height: 1.3;
   overflow: hidden;
@@ -5088,8 +5253,8 @@ h6.chat-md-heading { font-size: 14px; }
 
 .paper-library-panel .paper-meta {
   margin: 0.25rem 0;
-  font-size: 0.75rem;
-  color: var(--text-secondary, #666);
+  font-size: var(--fs-micro);
+  color: var(--ink-3);
   display: flex;
   gap: 0.5rem;
   flex-wrap: wrap;
@@ -5098,26 +5263,26 @@ h6.chat-md-heading { font-size: 14px; }
 .paper-library-panel .status-badge {
   padding: 0.1rem 0.3rem;
   border-radius: 3px;
-  font-size: 0.7rem;
-  background: var(--bg-secondary, #e0e0e0);
+  font-size: var(--fs-micro);
+  background: var(--success-soft);
 }
 
 .paper-library-panel .status-badge[data-status="evaluated"] {
-  background: #fef3c7;
-  color: #92400e;
+  background: var(--warning-soft);
+  color: var(--warning-ink);
 }
 
 .paper-library-panel .status-badge[data-status="deep_read"] {
-  background: #d1fae5;
-  color: #065f46;
+  background: var(--success-soft);
+  color: var(--success-ink);
 }
 
 .paper-library-panel .score-badge {
   padding: 0.1rem 0.3rem;
   border-radius: 3px;
-  font-size: 0.7rem;
-  background: #dbeafe;
-  color: #1e40af;
+  font-size: var(--fs-micro);
+  background: var(--accent-tint);
+  color: var(--accent-ink);
 }
 
 .paper-library-panel .paper-actions {
@@ -5128,10 +5293,10 @@ h6.chat-md-heading { font-size: 14px; }
 
 .paper-library-panel .paper-action {
   padding: 0.15rem 0.4rem;
-  font-size: 0.7rem;
-  border: 1px solid var(--border-color, #e0e0e0);
+  font-size: var(--fs-micro);
+  border: 1px solid var(--line-2);
   border-radius: 3px;
-  background: var(--bg-primary, #fff);
+  background: var(--paper);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -5141,19 +5306,19 @@ h6.chat-md-heading { font-size: 14px; }
 }
 
 .paper-library-panel .paper-action:hover {
-  background: var(--hover-bg, #f0f0f0);
+  background: var(--sunken);
 }
 
 .paper-library-panel .paper-action.link {
-  color: var(--accent-color, #2563eb);
+  color: var(--accent-ink);
 }
 
 .paper-library-panel .panel-loading,
 .paper-library-panel .panel-empty {
   padding: 2rem 1rem;
   text-align: center;
-  color: var(--text-secondary, #666);
-  font-size: 0.85rem;
+  color: var(--ink-3);
+  font-size: var(--fs-small);
 }
 
 /* 包 5 · U4：助手回复里的 [paper_id] 引用按钮 */
@@ -5161,11 +5326,11 @@ h6.chat-md-heading { font-size: 14px; }
   display: inline-block;
   padding: 0.1rem 0.3rem;
   margin: 0 0.1rem;
-  font-size: 0.75rem;
+  font-size: var(--fs-micro);
   font-family: monospace;
-  color: #2563eb;
-  background: #dbeafe;
-  border: 1px solid #93c5fd;
+  color: var(--accent-ink);
+  background: var(--accent-tint);
+  border: 1px solid var(--accent-edge);
   border-radius: 3px;
   cursor: pointer;
   line-height: 1.2;
@@ -5173,22 +5338,22 @@ h6.chat-md-heading { font-size: 14px; }
 }
 
 .chat-md-paper-ref:hover {
-  background: #bfdbfe;
-  border-color: #60a5fa;
+  background: var(--accent-edge);
+  border-color: var(--accent);
 }
 
 /* 包 5 · U6：回到底部按钮 */
 .scroll-to-bottom-button {
   position: absolute;
-  right: 360px; /* 面板宽度 + 间距 */
+  right: calc(var(--panel-w) + var(--sp-6)); /* 贴着右栏左边缘，右栏拖宽拖窄都跟着走 */
   bottom: 100px;
   width: 40px;
   height: 40px;
   border-radius: 50%;
-  background: #2563eb;
-  color: white;
+  background: var(--accent);
+  color: var(--paper);
   border: none;
-  font-size: 1.2rem;
+  font-size: var(--fs-display);
   cursor: pointer;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
   display: flex;
@@ -5199,7 +5364,7 @@ h6.chat-md-heading { font-size: 14px; }
 }
 
 .scroll-to-bottom-button:hover {
-  background: #1d4ed8;
+  background: var(--accent-ink);
 }
 
 /* 包 5 · U8：toast 里的 action 按钮 */
@@ -5211,10 +5376,10 @@ h6.chat-md-heading { font-size: 14px; }
 
 .toast-action-button {
   padding: 0.25rem 0.75rem;
-  font-size: 0.8rem;
+  font-size: var(--fs-meta);
   font-weight: 500;
-  color: white;
-  background: #2563eb;
+  color: var(--paper);
+  background: var(--accent);
   border: none;
   border-radius: 4px;
   cursor: pointer;
@@ -5222,7 +5387,7 @@ h6.chat-md-heading { font-size: 14px; }
 }
 
 .toast-action-button:hover {
-  background: #1d4ed8;
+  background: var(--accent-ink);
 }
 
 /* 包 5 · U5：重试 / 重发按钮 */
@@ -5230,10 +5395,10 @@ h6.chat-md-heading { font-size: 14px; }
 .chat-resend-button {
   margin-left: 0.5rem;
   padding: 0.15rem 0.5rem;
-  font-size: 0.75rem;
-  color: #2563eb;
-  background: #dbeafe;
-  border: 1px solid #93c5fd;
+  font-size: var(--fs-micro);
+  color: var(--accent-ink);
+  background: var(--accent-tint);
+  border: 1px solid var(--accent-edge);
   border-radius: 3px;
   cursor: pointer;
   transition: background 0.2s;
@@ -5241,11 +5406,83 @@ h6.chat-md-heading { font-size: 14px; }
 
 .chat-retry-button:hover,
 .chat-resend-button:hover {
-  background: #bfdbfe;
+  background: var(--accent-edge);
 }
 
 .chat-resend-button {
-  font-size: 1rem;
+  font-size: var(--fs-read);
   padding: 0.1rem 0.4rem;
   line-height: 1;
+}
+
+/* ==========================================================================
+   窄屏适配
+   中文说明：这四段断点统一放在整个文件的最后。CSS 里同样具体度的规则是「后写的赢」，
+   放在最后才能稳稳覆盖前面定义的布局，不会被后面的基础规则反过来压掉。
+   ========================================================================== */
+
+/* 屏幕不够宽时右栏封顶 300px。屏幕本来就挤，让用户拖来拖去没有意义。 */
+@media (max-width: 1280px) {
+  .chat-main-layout[data-panel="true"] {
+    grid-template-columns: minmax(0, 1fr) min(300px, var(--panel-w));
+  }
+}
+
+@media (max-width: 1080px) {
+  .panel-resizer {
+    display: none;
+  }
+}
+
+/* 中文说明：再窄就不适合左右并排了。右栏改成盖在界面上的浮层，
+   用头部那个「论文」按钮开关，这样对话区能拿到完整的宽度。 */
+@media (max-width: 880px) {
+  .chat-main-layout[data-panel="true"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .panel-toggle-narrow {
+    display: inline-flex;
+  }
+
+  .paper-library-panel {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(340px, 88vw);
+    z-index: 60;
+    background: var(--paper);
+    box-shadow: var(--sh-float);
+    transform: translateX(100%);
+    transition: transform var(--dur-slow) var(--ease);
+  }
+
+  .chat-main-layout[data-narrow-open="true"] .paper-library-panel {
+    transform: translateX(0);
+  }
+
+  /* 中文说明：右栏变成浮层之后，它不再占横向位置，"回到底部"按钮就不用再给它让位了。 */
+  .scroll-to-bottom-button {
+    right: var(--sp-6);
+  }
+}
+
+@media (max-width: 720px) {
+  .chat-view-shell {
+    padding: var(--sp-3) var(--sp-2) var(--sp-2);
+  }
+
+  .chat-bubble {
+    max-width: 92%;
+  }
+
+  .paper-card-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* 中文说明：屏幕太窄时，快速开始的两列格子改成一列，否则按钮里的字会被挤成两三行。 */
+  .chat-quick-starts {
+    grid-template-columns: 1fr;
+  }
 }

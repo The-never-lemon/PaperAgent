@@ -101,6 +101,8 @@ defineExpose({ focusInput });
 <template>
   <div class="chat-composer" :data-variant="variant">
     <div v-if="isWelcome" class="chat-composer-welcome-copy">
+      <!-- 品牌 logo：和侧边栏、浏览器标签页图标共用同一个 SVG 文件 -->
+      <img class="welcome-logo" src="/logo.svg" alt="PaperAgent 标志" />
       <h2>{{ heading }}</h2>
       <p v-if="helperText">{{ helperText }}</p>
       <div class="chat-quick-starts">

@@ -8,7 +8,7 @@
  */
 import { FileText } from "lucide-vue-next";
 
-import type { DeepReadCardPayload } from "../../types/chat";
+import type { DeepReadCardPayload, DeepReadReportPayload } from "../../types/chat";
 import MathText from "./MathText.vue";
 
 defineOptions({ name: "DeepReadReportCard" });
@@ -20,6 +20,17 @@ defineProps<{
 const emit = defineEmits<{
   open: [payload: DeepReadCardPayload];
 }>();
+
+/** 中文说明：把四个维度整理成「标签 + 分数」两块，模板里循环渲染，
+ *  避免四段几乎一样的标记。标签用简称，卡片比较窄，长名字放不下。 */
+function dimensions(report: DeepReadReportPayload) {
+  return [
+    { label: "相关", value: report.relevance },
+    { label: "创新", value: report.novelty },
+    { label: "严谨", value: report.rigor },
+    { label: "清晰", value: report.clarity },
+  ];
+}
 </script>
 
 <template>
@@ -44,10 +55,10 @@ const emit = defineEmits<{
       </p>
       <p v-if="payload.report.short_summary" class="deep-read-summary"><MathText :text="payload.report.short_summary" /></p>
       <div class="deep-read-dims">
-        <span class="deep-read-dim">相关 {{ payload.report.relevance?.score ?? 0 }}</span>
-        <span class="deep-read-dim">创新 {{ payload.report.novelty?.score ?? 0 }}</span>
-        <span class="deep-read-dim">严谨 {{ payload.report.rigor?.score ?? 0 }}</span>
-        <span class="deep-read-dim">清晰 {{ payload.report.clarity?.score ?? 0 }}</span>
+        <span v-for="dim in dimensions(payload.report)" :key="dim.label" class="deep-read-dim">
+          <span class="deep-read-dim-label">{{ dim.label }}</span>
+          <strong class="deep-read-dim-score">{{ dim.value?.score ?? 0 }}</strong>
+        </span>
       </div>
       <footer class="deep-read-card-actions">
         <button type="button" class="paper-card-action" @click="emit('open', payload)">

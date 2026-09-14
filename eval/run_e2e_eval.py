@@ -83,6 +83,7 @@ TOOL_NAMES = {
     "deep_read_paper",
     "ask_paper",
     "generate_review",
+    "get_history",
 }
 
 
