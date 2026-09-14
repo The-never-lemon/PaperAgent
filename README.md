@@ -31,13 +31,15 @@ Paper-Agent 3.0 是相对旧版<a href="https://github.com/GreatZack">@GreatZack
 
 
 <p align="center">
-  <img width="2466" height="1266" alt="image" src="https://github.com/user-attachments/assets/37b83c2f-b8cb-4076-92a8-63766f44bb44" />
+  <img width="2463" height="1187" alt="image" src="https://github.com/user-attachments/assets/97ce510d-6b7d-4f81-8173-6d3193ad3bed" />
+  <img width="2463" height="1270" alt="image" src="https://github.com/user-attachments/assets/22c298cf-2748-432b-91a0-88330596a56e" />
   <br>
   <em>输入研究主题，实时追踪检索论文、精读论文、生成综述等各环节进度（综述内部的分析、大纲、逐节写作以同一张卡片的实时状态文字呈现）</em>
 </p>
 
 <p align="center">
- <img width="2473" height="1282" alt="image" src="https://github.com/user-attachments/assets/db38bd19-f602-471f-9a5f-d1287e85be56" />
+ <img width="1885" height="1266" alt="image" src="https://github.com/user-attachments/assets/76896c8f-1023-418d-8da8-40409a8bda20" />
+
   <br>
   <em>在浏览器中可视化配置模型 Provider 与 Agent 档位，一键测试连通性</em>
 </p>
