@@ -89,6 +89,12 @@ export interface SessionRunAccepted {
 export interface SessionRunStartPayload {
   content?: string;
   turn_id?: string;
+  /**
+   * 中文注释：带上这个字段表示"接着写上次没写完的综述"。
+   * 值是后端在失败/停止的卡片上下发的 resume_thread_id，形如"回合编号:卡片编号"。
+   * 不带这个字段就是正常发一条新消息。
+   */
+  resume_review_thread?: string;
 }
 
 export type RuntimeDetailContent = string | Record<string, unknown> | null;

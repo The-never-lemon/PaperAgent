@@ -19,6 +19,11 @@ const props = defineProps<{
   events: UIRuntimeTimelineEvent[];
   /** 是否处于运行中（运行中自动展开）。 */
   active?: boolean;
+  /**
+   * 中文注释：卡片上"继续"按钮的处理函数。后端在失败或停止的综述卡片上下发了
+   * 可续跑编号，点了就接着写。正在跑的时候父组件不会传这个函数，按钮就不显示。
+   */
+  onResume?: (threadId: string) => void;
 }>();
 
 const expanded = ref(Boolean(props.active));
@@ -48,7 +53,7 @@ const summaryText = computed(() => {
         <span class="tool-trace-chevron" :class="{ expanded: expanded }">▾</span>
       </button>
       <div v-if="expanded" class="tool-trace-body">
-        <RuntimeEventTree :events="events" />
+        <RuntimeEventTree :events="events" :on-resume="onResume" />
       </div>
     </section>
   </div>

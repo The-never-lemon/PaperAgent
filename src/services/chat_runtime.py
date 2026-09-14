@@ -16,8 +16,14 @@ from typing import Any
 
 from src.agents.research_tools import ResearchToolContext, build_research_tool_registry
 from src.agents.researchAgent import RESEARCH_LLM_PROFILE, run_conversation_agent
-from src.graph.runtime import InlineWorkflowSyncPort, WorkflowCancellation, WorkflowRuntimeContext
-from src.llm import ModelConfig, make_provider
+from src.agents.reviewPipeline import ReviewDeps, resume_review
+from src.graph.runtime import (
+    InlineWorkflowSyncPort,
+    WorkflowCancellation,
+    WorkflowNodeReporter,
+    WorkflowRuntimeContext,
+)
+from src.llm import ModelConfig, ProviderSnapshot, make_provider
 from src.models.sessions import SessionError
 from src.models.workspace import SessionWorkspace
 from src.repositories.sessions.base import SessionRepository
@@ -107,9 +113,27 @@ def build_chat_message_handler(repo: SessionRepository, settings_repo: SettingsR
                 resources=runtime.resources,
                 llm=llm,
             )
+            # 第四步：先看这一轮到底要干什么。
+            # 中文注释：请求里带了 resume_review_thread，说明用户点的是"继续"——
+            # 这次不是新开一轮对话，而是把上次没写完的综述接着写下去。这条路不经过
+            # 主 Agent 的工具循环，省掉一整轮模型调用。
+            resume_thread_id = str(frame.get("resume_review_thread") or "").strip()
+            if resume_thread_id:
+                await _resume_review_run(
+                    thread_id=resume_thread_id,
+                    session_key=chat_id,
+                    turn_id=turn_id,
+                    workspace=workspace,
+                    repo=repo,
+                    reporter=context.reporter,
+                    cancellation=runtime.cancellation,
+                    llm=llm,
+                )
+                return
+
             registry = build_research_tool_registry(context)
 
-            # 第四步：交给主 Agent 的多轮工具循环。
+            # 第五步：交给主 Agent 的多轮工具循环。
             # 注意：本轮的 user 消息已由 run 服务先行落库，主 Agent 直接从消息表重建历史。
             logger.info(
                 "开始执行对话式调研",
@@ -134,6 +158,49 @@ def build_chat_message_handler(repo: SessionRepository, settings_repo: SettingsR
             await llm.aclose()
 
     return _handler
+
+
+async def _resume_review_run(
+    *,
+    thread_id: str,
+    session_key: str,
+    turn_id: str,
+    workspace: SessionWorkspace,
+    repo: SessionRepository,
+    reporter: WorkflowNodeReporter,
+    cancellation: WorkflowCancellation | None,
+    llm: ProviderSnapshot,
+) -> None:
+    """接着写一篇没写完的综述。
+
+    中文说明：用户点"继续"时走这条路。它不经过主 Agent 的工具循环，而是直接把
+    上次存下来的检查点读出来，从最后一个做完的小节往后写——已经写好的部分不会
+    再花一次模型调用的钱。
+
+    thread_id 形如"回合编号:卡片编号"。前半段是上次那一轮对话的编号，后半段是
+    当初那张综述卡片的编号；卡片编号取回来接着用，前端才能把新进度归到同一类卡片上。
+    """
+
+    # 从编号里把当初的卡片编号取回来（"a:b".partition(":") -> ("a", ":", "b")）。
+    _, _, event_key = thread_id.partition(":")
+    deps = ReviewDeps(
+        session_key=session_key,
+        turn_id=turn_id,
+        workspace=workspace,
+        repo=repo,
+        reporter=reporter,
+        event_key=event_key or "generate_review",
+        cancellation=cancellation,
+        llm=llm,
+    )
+    logger.info("开始继续未写完的综述", extra={"session_key": session_key, "thread_id": thread_id})
+    # 失败已经被 resume_review 折成 {status:"failed", reason}，这里只记日志，不抛异常，
+    # 免得把一次"没找到可续跑的记录"升级成整轮运行失败。
+    result = await resume_review(thread_id=thread_id, deps=deps)
+    logger.info(
+        "继续综述结束",
+        extra={"session_key": session_key, "thread_id": thread_id, "status": result.get("status")},
+    )
 
 
 def _load_llm_snapshot(settings_repo: SettingsRepository):

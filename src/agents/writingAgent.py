@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
@@ -54,9 +55,15 @@ class SectionLoopState(TypedDict, total=False):
     review: JsonObject
     completed: bool
     warnings: list[str]
-    # 中文说明：这是一个可选的界面通知函数，只把当前小节正在做什么告诉外层，
-    # 不参与正文生成，也不会改变循环里的数据。
-    progress_callback: Any
+
+
+# 中文注释：小节内部的进度通知函数放在这里，而不是放进 SectionLoopState。
+#
+# 原因：这张小节图有可能被外面更大的流程图带着一起把状态存进检查点（综述流水线
+# 就是这么干的）。而函数是没办法存进检查点文件的，一旦混进图状态，整个综述跑到
+# 写作那一步就会直接报错。放成"当前任务的上下文变量"就不会进状态，读写都只在
+# 同一个异步任务里，多个小节互不干扰。
+_SECTION_PROGRESS_CALLBACK: ContextVar[Any | None] = ContextVar("section_progress_callback", default=None)
 
 
 class WritingAgent(BaseAgent):
@@ -139,9 +146,14 @@ class WritingAgent(BaseAgent):
             "review": {},
             "completed": False,
             "warnings": [],
-            "progress_callback": progress_callback,
         }
-        final_state = await graph.ainvoke(initial_state)
+        # 中文注释：进度回调走上下文变量，不进图状态（理由见 _SECTION_PROGRESS_CALLBACK
+        # 上面的说明）。用完必须还原，避免影响同一个任务里后面别的调用。
+        token = _SECTION_PROGRESS_CALLBACK.set(progress_callback)
+        try:
+            final_state = await graph.ainvoke(initial_state, _no_checkpoint_config())
+        finally:
+            _SECTION_PROGRESS_CALLBACK.reset(token)
         section_result = {
             "section_id": section_id,
             "task": task,
@@ -208,7 +220,7 @@ class WritingAgent(BaseAgent):
     async def plan_or_write(self, state: SectionLoopState) -> SectionLoopState:
         """让模型决定当前是补资料还是直接写正文。"""
 
-        _notify_section_progress(state, "正在撰写小节正文")
+        _notify_section_progress("正在撰写小节正文")
         if self.context.llm is None:
             draft = _fallback_draft(state)
             return {
@@ -225,7 +237,7 @@ class WritingAgent(BaseAgent):
             temperature=0.2,
             reasoning_effort="medium",
         )
-        _notify_section_usage(state, response)
+        _notify_section_usage(response)
         raw_output = str(getattr(response, "content", "") or "")
         raw_outputs = [*list(state.get("raw_model_outputs") or []), raw_output]
         if not response.ok:
@@ -316,7 +328,7 @@ class WritingAgent(BaseAgent):
     async def review_draft(self, state: SectionLoopState) -> SectionLoopState:
         """审查正文是否逻辑通顺、语言是否足够学术化。"""
 
-        _notify_section_progress(state, "正在审查写作内容")
+        _notify_section_progress("正在审查写作内容")
         draft = str(state.get("draft") or "").strip()
         if self.context.llm is None:
             return {
@@ -336,7 +348,7 @@ class WritingAgent(BaseAgent):
             temperature=0,
             reasoning_effort="medium",
         )
-        _notify_section_usage(state, response)
+        _notify_section_usage(response)
         raw_output = str(getattr(response, "content", "") or "")
         raw_outputs = [*list(state.get("raw_model_outputs") or []), raw_output]
         if not response.ok:
@@ -381,6 +393,28 @@ class WritingAgent(BaseAgent):
         }
 
 
+def _no_checkpoint_config() -> JsonObject:
+    """给内层小节图用的调用配置：明确告诉它不要写检查点。
+
+    中文说明：综述流水线的最外层挂着检查点。这里的小节图是"嵌套在里面"跑的，
+    LangGraph 会把外层的检查点配置一路传下来，于是每一节的内部循环都会往检查点
+    库里写一堆用不上的中间状态——实测能占整个库的四分之三。外层本来就是一节一个
+    检查点，节内部的中间状态没有任何恢复价值（续跑只会从某一节的开头重来），
+    所以这里直接关掉。
+
+    两点说明：
+    - 这个 key 是 LangGraph 的内部常量，不是公开接口。所以用 try/except 导入：
+      万一以后它改名了，就退回"照旧写检查点"——只是白占点空间，不影响功能。
+    - 外层没挂检查点时，多传一个 None 是无害的。
+    """
+
+    try:
+        from langgraph._internal._constants import CONFIG_KEY_CHECKPOINTER
+    except Exception:
+        return {}
+    return {"configurable": {CONFIG_KEY_CHECKPOINTER: None}}
+
+
 def _build_section_loop_graph(agent: WritingAgent):
     """构建单个小节内部的 LangGraph 循环。"""
 
@@ -415,18 +449,18 @@ def _route_after_review_step(state: SectionLoopState) -> str:
     return "end" if state.get("completed") else "plan_or_write"
 
 
-def _notify_section_progress(state: SectionLoopState, message: str) -> None:
+def _notify_section_progress(message: str) -> None:
     """把小节当前阶段交给外层；没有回调时保持原来的静默行为。"""
 
-    callback = state.get("progress_callback")
+    callback = _SECTION_PROGRESS_CALLBACK.get()
     if callable(callback):
         callback(message)
 
 
-def _notify_section_usage(state: SectionLoopState, response: object) -> None:
+def _notify_section_usage(response: object) -> None:
     """把小节内部每一次模型调用的真实用量交给外层小节卡片。"""
 
-    callback = state.get("progress_callback")
+    callback = _SECTION_PROGRESS_CALLBACK.get()
     if callable(callback):
         from src.llm.base import normalize_token_usage
 

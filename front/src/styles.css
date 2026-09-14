@@ -1494,6 +1494,26 @@ a {
   font-size: 0.94rem;
 }
 
+/* 中文注释：事件卡片上的"继续"按钮（综述跑到一半失败或被停止时出现）。
+   卡片本身很窄，所以做得比普通按钮更小——一个图标加两个字，颜色沿用页面既有的蓝色按钮风格。 */
+.runtime-event-resume {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 7px;
+  font-size: 0.72rem;
+  color: #2563eb;
+  background: #dbeafe;
+  border: 1px solid #93c5fd;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.runtime-event-resume:hover {
+  background: #bfdbfe;
+}
+
 .runtime-event-time {
   padding-top: 2px;
   font-family: var(--font-mono);

@@ -4,6 +4,7 @@ import {
   ChevronRight,
   CircleDot,
   LoaderCircle,
+  RotateCw,
   TriangleAlert,
 } from "lucide-vue-next";
 
@@ -18,7 +19,28 @@ defineOptions({
 defineProps<{
   events: UIRuntimeTimelineEvent[];
   depth?: number;
+  /**
+   * 中文注释：卡片上"继续"按钮的处理函数，一路透传给下一层（这个组件会自己渲染
+   * 自己，用函数当属性比一层层往上抛事件省事）。正在运行的时候不传，按钮就不出现。
+   */
+  onResume?: (threadId: string) => void;
 }>();
+
+/**
+ * 中文注释：后端在"流程做到一半失败了"或"用户点了停止"的卡片上会下发一个
+ * resume_thread_id，含义是"这一步留下了可以接着写的地方"，有它就显示"继续"。
+ *
+ * 为什么要限定 workflow_step（具体步骤卡片）：失败时后端会同时更新"具体步骤"
+ * 和它上面那张"汇总"卡片，同一个编号两处都会带上。只认具体步骤那张，卡片树里
+ * 才不会冒出两个一模一样的"继续"。
+ */
+function resumeThreadId(event: UIRuntimeTimelineEvent): string {
+  if (event.type !== "workflow_step") {
+    return "";
+  }
+  const value = event.metadata?.resume_thread_id;
+  return typeof value === "string" ? value.trim() : "";
+}
 
 function statusTone(status: string) {
   if (status === "completed" || status === "success") {
@@ -141,6 +163,15 @@ function hasDetail(event: UIRuntimeTimelineEvent) {
             <span class="runtime-event-title-line">
               <strong><MathText :text="event.title" /></strong>
               <StatusPill :tone="statusTone(event.status)" :label="statusLabel(event.status)" />
+              <button
+                v-if="onResume && resumeThreadId(event)"
+                type="button"
+                class="runtime-event-resume"
+                @click.stop.prevent="onResume?.(resumeThreadId(event))"
+              >
+                <RotateCw :size="12" />
+                <span>继续</span>
+              </button>
             </span>
             <span class="runtime-event-show"><MathText :text="event.showContent" /></span>
           </span>
@@ -159,6 +190,7 @@ function hasDetail(event: UIRuntimeTimelineEvent) {
           class="runtime-event-children"
           :events="event.children"
           :depth="(depth ?? 0) + 1"
+          :on-resume="onResume"
         />
       </details>
 
@@ -175,6 +207,15 @@ function hasDetail(event: UIRuntimeTimelineEvent) {
           <span class="runtime-event-title-line">
             <strong><MathText :text="event.title" /></strong>
             <StatusPill :tone="statusTone(event.status)" :label="statusLabel(event.status)" />
+            <button
+              v-if="onResume && resumeThreadId(event)"
+              type="button"
+              class="runtime-event-resume"
+              @click.stop="onResume?.(resumeThreadId(event))"
+            >
+              <RotateCw :size="12" />
+              <span>继续</span>
+            </button>
           </span>
           <span class="runtime-event-show"><MathText :text="event.showContent" /></span>
           <details v-if="hasDetail(event)" class="runtime-event-detail">

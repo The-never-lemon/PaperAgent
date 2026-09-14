@@ -357,8 +357,13 @@ function retryTurn(turnId: string | null) {
 // 发送 / 流式接收 / 取消
 // ---------------------------------------------------------------------------
 
-/** 提交一条消息（输入框发送、卡片"精读"、抽屉追问都走这里）。 */
-async function submitMessage(presetContent?: string) {
+/** 提交一条消息（输入框发送、卡片"精读"、抽屉追问都走这里）。
+ *
+ * 中文注释：resumeThreadId 有值时表示这次不是普通发言，而是"接着写上次没写完的
+ * 综述"——后端会拿这个编号去读检查点，从最后一个做完的小节往后写。内容还是照常
+ * 发一条用户消息，这样对话记录里能看到用户点了继续。
+ */
+async function submitMessage(presetContent?: string, resumeThreadId?: string) {
   const content = (presetContent ?? draft.value).trim();
   if (!content || sending.value || isRunning.value) {
     return;
@@ -376,6 +381,8 @@ async function submitMessage(presetContent?: string) {
     const accepted = await startSessionRun(sessionKey, {
       content: submittedContent,
       turn_id: turnId,
+      // 中文注释：只在真的续跑时才带上这个字段，普通发言不带，免得后端误判。
+      ...(resumeThreadId ? { resume_review_thread: resumeThreadId } : {}),
     });
     emit("refreshSessions");
     activeRunId.value = accepted.run_id;
@@ -387,6 +394,15 @@ async function submitMessage(presetContent?: string) {
     sending.value = false;
   }
 }
+
+/** 用户点了失败/停止卡片上的"继续"：带着续跑编号重新发一条消息。 */
+function resumeReview(threadId: string) {
+  submitMessage("继续生成上次没写完的综述", threadId);
+}
+
+/** 中文注释：正在跑的时候不能再发起新运行（后端也会 409 拒绝），所以这时候不往下传
+ *  回调，卡片上的"继续"按钮就不会出现，避免点了没反应。 */
+const resumeHandler = computed(() => (isRunning.value ? undefined : resumeReview));
 
 /** 为实时流建立 EventSource 订阅，每条事件交给聚合器整理。 */
 function openStream(sessionKey: string, streamUrl: string) {
@@ -759,6 +775,7 @@ function handleError(error: unknown, title: string) {
             <ToolCallTrace
               :events="turn.events"
               :active="isRunning && turnIndex === flowTurns.length - 1"
+              :on-resume="resumeHandler"
             />
           </section>
         </template>

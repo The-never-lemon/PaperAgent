@@ -6,6 +6,22 @@
 → 参考文献与引用替换 → 终稿 Markdown 存 artifact → 推 review 卡片 → 返回
 {status, word_count, sections, artifact_id}。
 
+流程用 LangGraph 的 StateGraph 编排：每个阶段是流程图上的一个节点，节点与节点
+之间的边界就是"这一步已经做完了"的天然标记。这么做有两个好处——控制流一眼能
+看全（哪一步接哪一步、哪里会绕回去），以及接上检查点以后能从任意一个做完的
+阶段接着往下跑，不用从头重来。
+
+其中最长的"逐节写作"用一条指回自己的条件边表示：写完一节就回到同一个节点写
+下一节，直到大纲里的小节都写完，再去写摘要。
+
+每做完一个阶段，图的状态会被写进会话目录下的 checkpoints.db。所以综述跑到一半
+进程挂了、或者用户点了停止，可以用 resume_review 从最后一个做完的阶段接着写：
+已经写好的小节不用重写，正在写的那一节要重做（它还没做完，没有记下来）。
+
+每个节点都要用的运行期对象（工作区、仓储、事件上报器、模型快照、取消控制）
+都不是能保存下来的普通数据，所以统一用闭包从 ReviewDeps 传进去，图状态里
+只放能存进检查点的普通数据——各种 dict、文本、数字。
+
 整个流程自包含，不依赖 research_tools / researchAgent / deepReadAgent /
 paperQaAgent，也不依赖 src.graph 下任何节点模块。所有从旧节点移植过来的逻辑
 都改成对参数 / 工作区的依赖，避免和 State 耦合。
@@ -17,9 +33,13 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, TypedDict
 
-from src.llm.base import normalize_token_usage
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.errors import NodeCancelledError
+from langgraph.graph import END, START, StateGraph
+
 from src.llm.config import SystemConfig
 from src.models.sessions import utc_now
 from src.utils import get_logger
@@ -124,12 +144,105 @@ class ReviewDeps:
 
 
 # ---------------------------------------------------------------------------
+# 图状态、内部异常与用量累加器
+# ---------------------------------------------------------------------------
+
+
+class ReviewState(TypedDict, total=False):
+    """综述流程图的状态。
+
+    中文说明：这里只放"能存下来"的普通数据（文本、数字、dict、list）。
+    工作区、仓储、事件上报器、模型快照这些对象一律不放——它们没法保存，
+    放进状态里以后接检查点会直接失败。它们改由闭包从 ReviewDeps 传入。
+
+    另外，各个字段都是"全量覆盖"语义（total=False 表示都可以缺省），
+    没有用 LangGraph 那种"自动累加"的写法。原因是节点万一重跑，自动累加
+    会把同一份东西加两遍；而每个节点自己读旧值、算好新值再写回去，重复
+    执行结果一样，是安全的。
+    """
+
+    # ---- 输入：进入图之前就定下来 ----
+    topic: str
+    paper_ids: list[str]
+
+    # ---- prepare 阶段的产出 ----
+    resolved_paper_ids: list[str]
+    analysis_inputs: list[JsonObject]
+    group: JsonObject
+    available_paper_ids: list[str]
+    cache_dir: str
+
+    # ---- 各阶段产物 ----
+    subtopic_analysis: JsonObject
+    overall_analysis: JsonObject
+    analysis_report: JsonObject
+    outline: JsonObject
+    section_tasks: list[JsonObject]
+    written_sections: list[JsonObject]
+    abstract: str
+    abstract_status: str
+    references: list[JsonObject]
+    markdown: str
+    word_count: int
+    sections_view: list[JsonObject]
+    artifact_id: str
+
+    # ---- token 用量累计（整个综述过程所有模型调用的总和）----
+    total_input_tokens: int
+    total_output_tokens: int
+
+
+class _ReviewFailed(Exception):
+    """综述流程里"可以预料"的失败（例如模型没返回能解析的 JSON）。
+
+    中文说明：节点里遇到这类问题就抛这个异常，由最外层的 run_review 统一
+    折成 {status:"failed", reason} 返回。这样每个节点就不用写一套"失败了
+    怎么跳到结尾"的边，图上的边全都保持简单。
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class _UsageCollector:
+    """累计一次节点里所有模型调用的 token 用量。
+
+    中文说明：模型调用完会把用量回调进来，先记在这个小盒子里，等节点返回时
+    再一次性并进状态里的累计值。
+    """
+
+    __slots__ = ("input_tokens", "output_tokens")
+
+    def __init__(self) -> None:
+        self.input_tokens = 0
+        self.output_tokens = 0
+
+    def collect(self, usage: JsonObject | None) -> None:
+        """收到一次模型调用的用量就记一笔。"""
+
+        if not usage:
+            return
+        self.input_tokens += int(usage.get("input_tokens") or 0)
+        self.output_tokens += int(usage.get("output_tokens") or 0)
+
+
+def _usage_update(state: ReviewState, usage: _UsageCollector) -> JsonObject:
+    """把本节点的用量并进状态里的累计值，返回要写回状态的字段。"""
+
+    return {
+        "total_input_tokens": int(state.get("total_input_tokens") or 0) + usage.input_tokens,
+        "total_output_tokens": int(state.get("total_output_tokens") or 0) + usage.output_tokens,
+    }
+
+
+# ---------------------------------------------------------------------------
 # 综述主入口
 # ---------------------------------------------------------------------------
 
 
 async def run_review(*, topic: str, paper_ids: list[str] | None, deps: ReviewDeps) -> JsonObject:
-    """综述主入口。
+    """综述主入口：新开一篇综述。
 
     成功时返回：
         {"status":"ok","word_count":int,
@@ -138,39 +251,134 @@ async def run_review(*, topic: str, paper_ids: list[str] | None, deps: ReviewDep
         {"status":"failed","reason":str}
         —— 内部任何业务异常都折成这个结构，绝不上抛；
           唯一例外 asyncio.CancelledError 原样上抛。
+
+    中文说明：每做完一个阶段都会往检查点库里记一笔。万一进程挂了、或者用户中途
+    点了停止，可以用 resume_review 从最后一个做完的阶段接着写，不用从头重来。
+    """
+
+    return await _run_graph_safely(
+        lambda: _start_review(topic=topic, paper_ids=paper_ids, deps=deps),
+        deps=deps,
+        thread_id=_review_thread_id(deps),
+        failure_prefix="综述过程出现意外错误",
+    )
+
+
+async def resume_review(*, thread_id: str, deps: ReviewDeps) -> JsonObject:
+    """接着写一篇没写完的综述：从检查点里最后一个做完的阶段继续。
+
+    返回的结构和 run_review 完全一样，方便调用方走同一套处理。
+
+    中文说明：thread_id 是这篇综述在检查点库里的编号（形如"回合编号:卡片编号"），
+    可以从上一张失败的综述卡片上原样取回来。
+    """
+
+    return await _run_graph_safely(
+        lambda: _continue_review(thread_id=thread_id, deps=deps),
+        deps=deps,
+        thread_id=thread_id,
+        failure_prefix="继续综述失败",
+    )
+
+
+async def _run_graph_safely(
+    run_graph: Any,
+    *,
+    deps: ReviewDeps,
+    thread_id: str,
+    failure_prefix: str,
+) -> JsonObject:
+    """跑一次图，把所有异常折成统一的 {status, reason} 返回。
+
+    中文说明：新开一篇和接着写一篇这两个入口都走这里，保证它们对"用户取消"和
+    "业务失败"的处理完全一致，不会一个漏了某种情况。
     """
 
     # 用一层 try/except 把所有业务异常都折成结构化返回。
     # asyncio.CancelledError 继承自 BaseException，不会被这里捕获，会原样上抛。
     try:
-        return await _run_review_impl(topic=topic, paper_ids=paper_ids, deps=deps)
+        return await run_graph()
     except asyncio.CancelledError:
+        # 中文注释：用户点了停止。检查点里已经记着做到哪一步了，所以这一刻同样是
+        # "可以接着往下写"的，补一条带编号的进度让前端那张卡片上有"继续"可点。
+        _mark_resumable(deps, thread_id)
         raise
+    except NodeCancelledError as exc:
+        # 中文说明：用户点"停止"时，节点开头的取消检查会抛 asyncio.CancelledError。
+        # LangGraph 会把节点里抛出的这个取消异常换成它自己的 NodeCancelledError，
+        # 而后者是个普通 Exception——不转回来的话，会被下面的 except Exception 当成
+        # "意外错误"，前端看到的就不是"已取消"，而是一句看不懂的报错。这里转回标准
+        # 的取消异常，让取消一路传到最上层。
+        _mark_resumable(deps, thread_id)
+        raise asyncio.CancelledError() from exc
+    except _ReviewFailed as exc:
+        # 流程内部预料之中的失败（比如模型没返回能解析的 JSON），原因已经说清楚了。
+        # 这时候图的检查点还在，所以把编号一起发出去，让前端给用户一个"继续"。
+        return _fail(deps, exc.reason, resume_thread_id=thread_id)
     except Exception as exc:
-        logger.warning(
-            "综述过程出现意外错误",
-            extra={"error": str(exc)[:200]},
-        )
-        return _fail(deps, f"综述过程出现意外错误：{exc}")
+        logger.warning(failure_prefix, extra={"error": str(exc)[:200]})
+        return _fail(deps, f"{failure_prefix}：{exc}", resume_thread_id=thread_id)
 
 
-async def _run_review_impl(*, topic: str, paper_ids: list[str] | None, deps: ReviewDeps) -> JsonObject:
-    """综述主流程实现（由 run_review 包裹异常折叠）。"""
+def _mark_resumable(deps: ReviewDeps, thread_id: str) -> None:
+    """把"这次停下来了，但还能接着写"这件事告诉前端。
 
-    # token 用量累加器：分析 + 大纲 + 写作 + 摘要所有响应的 usage 统一累加。
-    total_input = 0
-    total_output = 0
+    中文说明：用进度事件而不是失败事件，是因为用户点停止不是出错，卡片不该变成
+    红色"失败"。状态写成 cancelled，卡片会显示"已停止"，同时把续跑编号带上，
+    前端看到编号就知道可以在那张卡片上放一个"继续"。
+    """
 
-    def collect_usage(usage: JsonObject) -> None:
-        """把每次模型调用的 token 用量累加到总量里。"""
+    deps.reporter.progress(
+        "已停止，可以接着写",
+        stage=REVIEW_STAGE,
+        event_key=deps.event_key,
+        runtime_status="cancelled",
+        resume_thread_id=thread_id,
+    )
 
-        nonlocal total_input, total_output
-        total_input += int(usage.get("input_tokens") or 0)
-        total_output += int(usage.get("output_tokens") or 0)
 
-    # ------------------------------------------------------------------
-    # 第一步：前置校验——模型、主题、论文数量。
-    # ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 检查点：这篇综述跑到哪一步了、崩了以后从哪接着跑
+# ---------------------------------------------------------------------------
+
+
+def _review_thread_id(deps: ReviewDeps) -> str:
+    """这篇综述在检查点库里的编号。
+
+    中文说明：同一个会话可能生成很多次综述，所以不能只拿会话编号当 key，否则
+    第二次会续到第一次的旧图上去。这里用"回合编号 + 本次工具调用的卡片编号"
+    拼出来——这两个值本来就已经存在数据里了，续跑时才拼得回同一个编号。
+    """
+
+    return f"{deps.turn_id}:{deps.event_key}"
+
+
+def _review_checkpoint_path(deps: ReviewDeps) -> Path:
+    """检查点数据库放在哪：会话自己目录下的 checkpoints.db。
+
+    中文说明：故意放在会话目录里，这样删会话时文件跟着目录一起被删掉，不用另写
+    清理逻辑；也避免和业务库 data/session_store.db 去抢同一把写锁。
+    """
+
+    sessions_dir = getattr(getattr(deps.repo, "backend", None), "sessions_dir", None)
+    return Path(sessions_dir or "data/sessions") / deps.session_key / "checkpoints.db"
+
+
+def _open_review_saver(deps: ReviewDeps):
+    """打开这个会话的检查点数据库。
+
+    中文说明：返回的是一个异步上下文管理器，要用 async with 包起来用，连接才会
+    在用完之后关掉——直接返回一个已经打开的连接容易忘记关。
+    """
+
+    db_path = _review_checkpoint_path(deps)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    return AsyncSqliteSaver.from_conn_string(str(db_path))
+
+
+async def _start_review(*, topic: str, paper_ids: list[str] | None, deps: ReviewDeps) -> JsonObject:
+    """新开一篇综述：先做几项毫秒级检查，然后带着检查点从第一步跑到最后一步。"""
+
     _check_cancellation(deps)
     if deps.llm is None:
         return _fail(deps, "模型未装配，无法生成综述")
@@ -178,10 +386,123 @@ async def _run_review_impl(*, topic: str, paper_ids: list[str] | None, deps: Rev
     if not topic_text:
         return _fail(deps, "缺少综述主题，请先明确研究主题或传入 topic")
 
-    # 筛选论文：paper_ids 非空只取这些（缺失的忽略并计数），否则全部。
-    entries = _collect_paper_entries(deps.workspace, paper_ids)
+    async with _open_review_saver(deps) as saver:
+        compiled = _build_review_graph(deps).compile(checkpointer=saver, name="review_pipeline")
+        final_state = await compiled.ainvoke(
+            {"topic": topic_text, "paper_ids": list(paper_ids or [])},
+            config={"configurable": {"thread_id": _review_thread_id(deps)}},
+        )
+    return _to_result(final_state)
+
+
+async def _continue_review(*, thread_id: str, deps: ReviewDeps) -> JsonObject:
+    """接着写：先确认检查点里确实还有没做完的活，再从那里往下跑。"""
+
+    _check_cancellation(deps)
+    if deps.llm is None:
+        return _fail(deps, "模型未装配，无法生成综述")
+
+    async with _open_review_saver(deps) as saver:
+        compiled = _build_review_graph(deps).compile(checkpointer=saver, name="review_pipeline")
+        config = {"configurable": {"thread_id": thread_id}}
+        snapshot = await compiled.aget_state(config)
+        # 中文注释：编号拼错、或者记录被清掉了，读出来就是空的。这时候如果直接往下
+        # 跑，图会当成全新的一篇从第一步开始，写出来的东西肯定不对，所以宁可明确报错。
+        if not snapshot.values:
+            return _fail(deps, "找不到可以继续的综述记录，可能已经完成或已被清理")
+        if not snapshot.next:
+            return _fail(deps, "这篇综述已经写完了，不需要继续")
+        # 输入传 None 表示"不要从头开始，读检查点接着跑"。
+        final_state = await compiled.ainvoke(None, config)
+    return _to_result(final_state)
+
+
+# ---------------------------------------------------------------------------
+# 图结构：有哪些节点、节点之间怎么连
+# ---------------------------------------------------------------------------
+
+
+def _bind_node(node_fn: Any, deps: ReviewDeps):
+    """把 deps 绑到节点函数上，包出一个只吃 state 的异步函数给图用。
+
+    中文说明：这里不能图省事写 lambda。LangGraph 要靠"函数是不是 async def"
+    来判断返回值到底该当成状态更新、还是当成一个还没跑完的协程；lambda 看不出
+    是不是异步，它会把协程对象直接当成状态更新，然后报 "Expected dict, got
+    coroutine"。所以老老实实定义一个 async def 再传进去。
+    """
+
+    async def runner(state: ReviewState) -> JsonObject:
+        return await node_fn(state, deps)
+
+    # 保留原函数名，出错时日志里看到的就是 prepare / write_section 这种可读名字。
+    runner.__name__ = getattr(node_fn, "__name__", "review_node")
+    return runner
+
+
+def _build_review_graph(deps: ReviewDeps):
+    """把综述的各个阶段拼成一张流程图。"""
+
+    workflow = StateGraph(ReviewState)
+    workflow.add_node("prepare", _bind_node(_node_prepare, deps))
+    workflow.add_node("analyse_subtopic", _bind_node(_node_analyse_subtopic, deps))
+    workflow.add_node("analyse_overall", _bind_node(_node_analyse_overall, deps))
+    workflow.add_node("build_outline", _bind_node(_node_build_outline, deps))
+    workflow.add_node("write_section", _bind_node(_node_write_section, deps))
+    workflow.add_node("write_abstract", _bind_node(_node_write_abstract, deps))
+    workflow.add_node("compile_document", _bind_node(_node_compile_document, deps))
+    workflow.add_node("finalize", _bind_node(_node_finalize, deps))
+
+    workflow.add_edge(START, "prepare")
+    workflow.add_edge("prepare", "analyse_subtopic")
+    workflow.add_edge("analyse_subtopic", "analyse_overall")
+    workflow.add_edge("analyse_overall", "build_outline")
+    workflow.add_edge("build_outline", "write_section")
+    # 写完一节回到自己身上继续写下一节，全部写完就去写摘要。
+    workflow.add_conditional_edges(
+        "write_section",
+        _route_next_section,
+        {"write_section": "write_section", "write_abstract": "write_abstract"},
+    )
+    workflow.add_edge("write_abstract", "compile_document")
+    workflow.add_edge("compile_document", "finalize")
+    workflow.add_edge("finalize", END)
+    # 中文说明：这里只把图的形状拼好，不编译。因为编译时要挂上检查点数据库，
+    # 而检查点连接是有生命周期的（用完要关），由调用方在 async with 里编译更合适。
+    return workflow
+
+
+def _route_next_section(state: ReviewState) -> str:
+    """写完一节以后去哪：还有没写的小节就继续写，都写完了就去写摘要。"""
+
+    written = len(state.get("written_sections") or [])
+    total = len(state.get("section_tasks") or [])
+    return "write_section" if written < total else "write_abstract"
+
+
+def _to_result(state: ReviewState) -> JsonObject:
+    """把图跑完之后的最终状态，折成调用方（工具 handler）要的结果形状。"""
+
+    return {
+        "status": "ok",
+        "word_count": int(state.get("word_count") or 0),
+        "sections": list(state.get("sections_view") or []),
+        "artifact_id": str(state.get("artifact_id") or ""),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 各节点实现（按流程图里的先后顺序排列）
+# ---------------------------------------------------------------------------
+
+
+async def _node_prepare(state: ReviewState, deps: ReviewDeps) -> JsonObject:
+    """准备阶段：把工作区里的论文整理成分析模型需要的结构化摘要。"""
+
+    _check_cancellation(deps)
+    # 筛选论文：调用方指定了编号就只取这些（缺失的忽略并计数），否则取全部。
+    entries = _collect_paper_entries(deps.workspace, list(state.get("paper_ids") or []))
     if not entries:
-        return _fail(deps, "工作区里没有可用于综述的论文，请先检索或加入论文")
+        raise _ReviewFailed("工作区里没有可用于综述的论文，请先检索或加入论文")
 
     deps.reporter.progress(
         f"准备综述 {len(entries)} 篇论文",
@@ -189,154 +510,214 @@ async def _run_review_impl(*, topic: str, paper_ids: list[str] | None, deps: Rev
         event_key=deps.event_key,
     )
 
-    # ------------------------------------------------------------------
-    # 第二步：构造分析输入（形状对齐 analyse_node._paper_analysis_input）。
     # 每篇论文整理成分析模型需要的结构化摘要。
-    # ------------------------------------------------------------------
-    _check_cancellation(deps)
-    analysis_inputs: list[JsonObject] = []
-    for paper_id, entry in entries:
-        analysis_inputs.append(_paper_analysis_input(paper_id, entry))
+    analysis_inputs: list[JsonObject] = [_paper_analysis_input(paper_id, entry) for paper_id, entry in entries]
     # 单组：新架构没有检索子主题元数据，全量一组做横向比较。
     group: JsonObject = {
-        "subtopic": topic_text,
+        "subtopic": str(state.get("topic") or ""),
         "search_keyword": "",
         "papers": analysis_inputs,
         "paper_count": len(analysis_inputs),
     }
+    return {
+        # 论文集合固定在准备阶段。综述跑的时候主 Agent 可能同时在精读别的论文，
+        # 工作区随时会被改；把编号在这里定下来，后面的小节才不会看到不同的论文集。
+        "resolved_paper_ids": [paper_id for paper_id, _entry in entries],
+        "analysis_inputs": analysis_inputs,
+        "group": group,
+        "available_paper_ids": [
+            str(item["paperId"]) for item in analysis_inputs if str(item.get("paperId") or "").strip()
+        ],
+        "cache_dir": SystemConfig.load().read.paper_cache_dir,
+    }
 
-    # ------------------------------------------------------------------
-    # 第三步：分析——子主题分析 → 全局综合。
-    # ------------------------------------------------------------------
+async def _node_analyse_subtopic(state: ReviewState, deps: ReviewDeps) -> JsonObject:
+    """子主题分析：让模型读一遍论文集，产出研究现状、共识、争议、空白等。"""
+
     _check_cancellation(deps)
     deps.reporter.progress("正在分析论文", stage=REVIEW_STAGE, event_key=deps.event_key)
-    analyse_agent = build_analyse_agent(deps.llm)
 
-    # 子主题分析。
+    group = dict(state.get("group") or {})
+    usage = _UsageCollector()
+    analyse_agent = build_analyse_agent(deps.llm)
     subtopic_result = await analyse_agent.async_analyse_subtopic(
-        topic=topic_text, group=group, usage_callback=collect_usage
+        topic=str(state.get("topic") or ""),
+        group=group,
+        usage_callback=usage.collect,
     )
     if subtopic_result.parsed is None:
-        return _fail(deps, f"子主题分析失败：{subtopic_result.reason}")
-    subtopic_analysis = _normalize_subtopic_analysis(subtopic_result.parsed, group)
+        raise _ReviewFailed(f"子主题分析失败：{subtopic_result.reason}")
+    return {
+        "subtopic_analysis": _normalize_subtopic_analysis(subtopic_result.parsed, group),
+        **_usage_update(state, usage),
+    }
 
-    # 全局综合分析：返回非 JSON 时重试 1 次（对齐旧 OVERALL_ANALYSIS_MAX_ATTEMPTS=2）。
+
+async def _node_analyse_overall(state: ReviewState, deps: ReviewDeps) -> JsonObject:
+    """全局综合分析：在子主题分析的基础上，归纳整个研究领域的八个方面。"""
+
     _check_cancellation(deps)
     deps.reporter.progress("正在综合分析", stage=REVIEW_STAGE, event_key=deps.event_key)
+
+    usage = _UsageCollector()
+    analyse_agent = build_analyse_agent(deps.llm)
+    # 返回非 JSON 时重试 1 次（对齐旧 OVERALL_ANALYSIS_MAX_ATTEMPTS=2）。
     overall_analysis = await _analyse_overall_with_retry(
-        topic=topic_text,
-        subtopic_analyses=[subtopic_analysis],
+        topic=str(state.get("topic") or ""),
+        subtopic_analyses=[dict(state.get("subtopic_analysis") or {})],
         agent=analyse_agent,
-        usage_callback=collect_usage,
+        usage_callback=usage.collect,
         deps=deps,
     )
     if overall_analysis is None:
-        return _fail(deps, "全局综合分析未返回合法 JSON，已重试 1 次仍失败")
+        raise _ReviewFailed("全局综合分析未返回合法 JSON，已重试 1 次仍失败")
+    return {
+        "overall_analysis": overall_analysis,
+        **_usage_update(state, usage),
+    }
 
+
+async def _node_build_outline(state: ReviewState, deps: ReviewDeps) -> JsonObject:
+    """先组装分析报告，再据此生成写作大纲，最后把大纲拍平成一个个小节任务。"""
+
+    _check_cancellation(deps)
+    topic_text = str(state.get("topic") or "")
+    subtopic_analysis = dict(state.get("subtopic_analysis") or {})
     # 组装分析报告（参照 analyse_node._build_final_report）。
     analysis_report = _build_analysis_report(
         topic=topic_text,
         subtopic_analyses=[subtopic_analysis],
-        overall_analysis=overall_analysis,
+        overall_analysis=dict(state.get("overall_analysis") or {}),
         model_used=deps.llm.model if deps.llm else "unavailable",
     )
 
-    # ------------------------------------------------------------------
-    # 第四步：大纲。
-    # ------------------------------------------------------------------
-    _check_cancellation(deps)
     deps.reporter.progress("正在生成写作大纲", stage=REVIEW_STAGE, event_key=deps.event_key)
+    usage = _UsageCollector()
     outline_agent = build_writing_outline_agent(deps.llm)
     outline, _raw, reason = await outline_agent.async_generate_outline(
-        topic=topic_text, analysis_report=analysis_report, usage_callback=collect_usage
+        topic=topic_text,
+        analysis_report=analysis_report,
+        usage_callback=usage.collect,
     )
     if outline is None:
-        return _fail(deps, f"写作大纲生成失败：{reason}")
+        raise _ReviewFailed(f"写作大纲生成失败：{reason}")
+    return {
+        "analysis_report": analysis_report,
+        "outline": outline,
+        "section_tasks": _flatten_outline(outline),
+        **_usage_update(state, usage),
+    }
 
-    # ------------------------------------------------------------------
-    # 第五步：逐节写作（顺序，不并发——previous_sections 依赖前文）。
-    # ------------------------------------------------------------------
+async def _node_write_section(state: ReviewState, deps: ReviewDeps) -> JsonObject:
+    """写一个小节。
+
+    中文说明：这个节点每次只写一节，写完由条件边决定是回到这里写下一节，
+    还是去写摘要。之所以不写成 for 循环，是因为"写一节"就是一个步骤，
+    步骤边界清楚，以后接上检查点就能精确知道写到了第几节。
+    """
+
     _check_cancellation(deps)
+    section_tasks = list(state.get("section_tasks") or [])
+    written_sections = list(state.get("written_sections") or [])
+    # 边界保护：大纲里一个小节都没有时，条件边仍会送进来一次，这里直接跳过。
+    if len(written_sections) >= len(section_tasks):
+        return {}
+
+    index = len(written_sections) + 1
+    section_task = section_tasks[index - 1]
+    section_title = str(section_task.get("section_title") or section_task["section_id"])
+    deps.reporter.progress(
+        f"正在写作第 {index}/{len(section_tasks)} 节：{section_title}",
+        stage=REVIEW_STAGE,
+        event_key=deps.event_key,
+    )
+    # 按大纲 evidence-map 指定的字段从全局分析里取出证据。
+    evidence = _resolve_section_evidence(
+        evidence_fields=list(section_task.get("evidence_map") or []),
+        overall_analysis=dict((state.get("analysis_report") or {}).get("overall_analysis") or {}),
+    )
+    # 已写小节作为前文参考（只取 section_id / content / cited_paper_ids）。
+    previous_sections = [
+        {
+            "section_id": s["section_id"],
+            "content": str(s.get("content") or ""),
+            "cited_paper_ids": list(s.get("cited_paper_ids") or []),
+        }
+        for s in written_sections
+    ]
+
+    usage = _UsageCollector()
+
+    def on_section_progress(message: str, section_usage: JsonObject | None = None) -> None:
+        """写作小节内部回调：只收用量，内部进度消息不外发（进度由上面统一发）。"""
+
+        usage.collect(section_usage)
+
     writing_agent = build_writing_agent(deps.llm)
-    # 拍平大纲（移植 writing_node._flatten_outline）。
-    section_tasks = _flatten_outline(outline)
-    cache_dir = SystemConfig.load().read.paper_cache_dir
-    available_paper_ids = [str(item["paperId"]) for item in analysis_inputs if str(item.get("paperId") or "").strip()]
-    written_sections: list[JsonObject] = []
+    section_result = await writing_agent.async_write_section(
+        section_id=str(section_task["section_id"]),
+        task=str(section_task.get("task") or ""),
+        evidence_map=evidence,
+        previous_sections=previous_sections,
+        word_count=int(section_task.get("word_count") or DEFAULT_SECTION_WORD_COUNT),
+        read_results=list(state.get("analysis_inputs") or []),
+        cache_dir=str(state.get("cache_dir") or ""),
+        session_read_results=[],
+        available_paper_ids=list(state.get("available_paper_ids") or []),
+        progress_callback=on_section_progress,
+    )
+    # 补上章节信息，方便后面拼 Markdown 和提取引用。
+    section_result.update(
+        chapter_key=section_task["chapter_key"],
+        section_key=section_task["section_key"],
+        chapter_title=str(section_task.get("chapter_title") or section_task["chapter_key"]),
+        section_title=section_title,
+    )
+    return {
+        "written_sections": [*written_sections, section_result],
+        **_usage_update(state, usage),
+    }
 
-    for index, section_task in enumerate(section_tasks, start=1):
-        _check_cancellation(deps)
-        section_title = str(section_task.get("section_title") or section_task["section_id"])
-        deps.reporter.progress(
-            f"正在写作第 {index}/{len(section_tasks)} 节：{section_title}",
-            stage=REVIEW_STAGE,
-            event_key=deps.event_key,
-        )
-        # 按大纲 evidence-map 指定的字段从全局分析里取出证据。
-        evidence = _resolve_section_evidence(
-            evidence_fields=list(section_task.get("evidence_map") or []),
-            overall_analysis=analysis_report["overall_analysis"],
-        )
-        # 已写小节作为前文参考（只取 section_id / content / cited_paper_ids）。
-        previous_sections = [
-            {
-                "section_id": s["section_id"],
-                "content": str(s.get("content") or ""),
-                "cited_paper_ids": list(s.get("cited_paper_ids") or []),
-            }
-            for s in written_sections
-        ]
-        # 写作单节回调：收集用量，忽略内部进度消息（进度由上面的 progress 统一发）。
-        def section_callback(message: str, usage: JsonObject | None = None) -> None:
-            """写作小节内部回调：只收用量，内部进度消息不外发。"""
 
-            nonlocal total_input, total_output
-            if usage:
-                total_input += int(usage.get("input_tokens") or 0)
-                total_output += int(usage.get("output_tokens") or 0)
+async def _node_write_abstract(state: ReviewState, deps: ReviewDeps) -> JsonObject:
+    """所有小节写完以后，根据正文生成摘要。"""
 
-        section_result = await writing_agent.async_write_section(
-            section_id=str(section_task["section_id"]),
-            task=str(section_task.get("task") or ""),
-            evidence_map=evidence,
-            previous_sections=previous_sections,
-            word_count=int(section_task.get("word_count") or DEFAULT_SECTION_WORD_COUNT),
-            read_results=analysis_inputs,
-            cache_dir=cache_dir,
-            session_read_results=[],
-            available_paper_ids=available_paper_ids,
-            progress_callback=section_callback,
-        )
-        # 补上章节信息，方便后面拼 Markdown 和提取引用。
-        section_result.update(
-            chapter_key=section_task["chapter_key"],
-            section_key=section_task["section_key"],
-            chapter_title=str(section_task.get("chapter_title") or section_task["chapter_key"]),
-            section_title=section_title,
-        )
-        written_sections.append(section_result)
-
-    # ------------------------------------------------------------------
-    # 第六步：摘要。
-    # ------------------------------------------------------------------
     _check_cancellation(deps)
     deps.reporter.progress("正在生成摘要", stage=REVIEW_STAGE, event_key=deps.event_key)
-    abstract, abstract_status = await writing_agent.async_write_abstract(
-        topic=topic_text,
-        sections=written_sections,
-        word_count=ABSTRACT_WORD_COUNT,
-        usage_callback=collect_usage,
-    )
 
-    # ------------------------------------------------------------------
-    # 第七步：参考文献与引用替换（移植 writing_node 的引用整理逻辑）。
-    # ------------------------------------------------------------------
+    usage = _UsageCollector()
+    writing_agent = build_writing_agent(deps.llm)
+    abstract, abstract_status = await writing_agent.async_write_abstract(
+        topic=str(state.get("topic") or ""),
+        sections=list(state.get("written_sections") or []),
+        word_count=ABSTRACT_WORD_COUNT,
+        usage_callback=usage.collect,
+    )
+    return {
+        "abstract": abstract,
+        "abstract_status": abstract_status,
+        **_usage_update(state, usage),
+    }
+
+
+async def _node_compile_document(state: ReviewState, deps: ReviewDeps) -> JsonObject:
+    """整理参考文献、把正文里的 [paperId] 换成序号，并拼出终稿 Markdown。"""
+
     _check_cancellation(deps)
     deps.reporter.progress("正在整理参考文献", stage=REVIEW_STAGE, event_key=deps.event_key)
+
+    written_sections = list(state.get("written_sections") or [])
+    abstract = str(state.get("abstract") or "")
+    topic_text = str(state.get("topic") or "")
+
     # 引用顺序以正文里 paperId 第一次出现的位置为准。
     candidate_paper_ids = _extract_paper_ids_from_sections(written_sections)
-    # metadata_by_id 从工作区 entry.paper 构造。
-    metadata_by_id = _build_workspace_metadata(deps.workspace, entries)
+    # 中文注释：这里按准备阶段定下来的编号重新去工作区读一次论文资料。论文集合不变，
+    # 但能拿到最新的题名等信息——综述跑的期间，别的工具可能刚好把元数据补全了。
+    metadata_by_id = _build_workspace_metadata(
+        deps.workspace,
+        _collect_paper_entries(deps.workspace, list(state.get("resolved_paper_ids") or [])),
+    )
     # 找出没有真实论文资料（缺题名）的引用，从正文和摘要里删掉。
     valid_keys = {
         paper_id
@@ -375,16 +756,13 @@ async def _run_review_impl(*, topic: str, paper_ids: list[str] | None, deps: Rev
     written_sections = _replace_section_citations(written_sections, citation_index_by_paper_id)
     abstract = _replace_citation_numbers(abstract, citation_index_by_paper_id)
 
-    # ------------------------------------------------------------------
-    # 第八步：终稿 Markdown（移植 reply_node._build_final_markdown 的结构）。
-    # ------------------------------------------------------------------
+    # 终稿 Markdown（移植 reply_node._build_final_markdown 的结构）。
     markdown = _build_final_markdown(
         topic=topic_text,
         sections=written_sections,
         abstract=abstract,
         references=references,
     )
-
     # 字数 = 摘要字数 + 各节正文字数。
     word_count = len(abstract) + sum(len(str(s.get("content") or "")) for s in written_sections)
     # 给前端用的章节列表：只取 section_id 和标题。
@@ -395,18 +773,39 @@ async def _run_review_impl(*, topic: str, paper_ids: list[str] | None, deps: Rev
         }
         for s in written_sections
     ]
+    return {
+        "written_sections": written_sections,
+        "abstract": abstract,
+        "references": references,
+        "markdown": markdown,
+        "word_count": word_count,
+        "sections_view": sections_view,
+    }
 
-    # ------------------------------------------------------------------
-    # 第九步：存 artifact（一律走 repo.write_artifact，禁止直接写文件）。
-    # ------------------------------------------------------------------
+
+async def _node_finalize(state: ReviewState, deps: ReviewDeps) -> JsonObject:
+    """收尾：保存产物、推 review 卡片、报出整个综述的 token 用量。
+
+    中文说明：这三件事放在同一个节点里是有意的——只存了产物但没推卡片，前端
+    就永远看不到这份综述；只推了卡片但没存产物，点下载会拿到空气。它们必须
+    一起成功，或者一起失败。
+    """
+
     _check_cancellation(deps)
+    topic_text = str(state.get("topic") or "")
+    written_sections = list(state.get("written_sections") or [])
+    references = list(state.get("references") or [])
+    sections_view = list(state.get("sections_view") or [])
+    word_count = int(state.get("word_count") or 0)
+
+    # 存 artifact（一律走 repo.write_artifact，禁止直接写文件）。
     deps.reporter.progress("正在保存综述产物", stage=REVIEW_STAGE, event_key=deps.event_key)
     record = await asyncio.to_thread(
         deps.repo.write_artifact,
         deps.session_key,
         ARTIFACT_TYPE_REVIEW,
         "literature_review.md",
-        markdown,
+        str(state.get("markdown") or ""),
         relative_path=f"artifacts/review/{deps.turn_id}/literature_review.md",
         metadata={
             "topic": topic_text,
@@ -414,14 +813,12 @@ async def _run_review_impl(*, topic: str, paper_ids: list[str] | None, deps: Rev
             "section_count": len(written_sections),
             "reference_count": len(references),
             "word_count": word_count,
-            "abstract_status": abstract_status,
+            "abstract_status": str(state.get("abstract_status") or ""),
         },
     )
     artifact_id = str(record.get("id") or "")
 
-    # ------------------------------------------------------------------
-    # 第十步：推 review 卡片（role 用 system，不干扰助手消息缓冲区）。
-    # ------------------------------------------------------------------
+    # 推 review 卡片（role 用 system，不干扰助手消息缓冲区）。
     deps.reporter.message(
         role="system",
         content=f"综述《{topic_text[:TOPIC_PREVIEW_CHARS]}》已生成（{word_count} 字，{len(sections_view)} 节）",
@@ -434,9 +831,9 @@ async def _run_review_impl(*, topic: str, paper_ids: list[str] | None, deps: Rev
         },
     )
 
-    # ------------------------------------------------------------------
-    # 第十一步：token 用量聚合，推一条带用量的完成进度事件。
-    # ------------------------------------------------------------------
+    # token 用量聚合，推一条带用量的完成进度事件。
+    total_input = int(state.get("total_input_tokens") or 0)
+    total_output = int(state.get("total_output_tokens") or 0)
     deps.reporter.progress(
         "综述完成",
         stage=REVIEW_STAGE,
@@ -455,13 +852,7 @@ async def _run_review_impl(*, topic: str, paper_ids: list[str] | None, deps: Rev
             "output_tokens": total_output,
         },
     )
-
-    return {
-        "status": "ok",
-        "word_count": word_count,
-        "sections": sections_view,
-        "artifact_id": artifact_id,
-    }
+    return {"artifact_id": artifact_id}
 
 
 # ---------------------------------------------------------------------------
@@ -1191,10 +1582,16 @@ def _check_cancellation(deps: ReviewDeps) -> None:
         deps.cancellation.raise_if_requested()
 
 
-def _fail(deps: ReviewDeps, reason: str) -> JsonObject:
-    """统一处理综述失败：推 failed 卡片并返回结构化失败结果。"""
+def _fail(deps: ReviewDeps, reason: str, *, resume_thread_id: str = "") -> JsonObject:
+    """统一处理综述失败：推 failed 卡片并返回结构化失败结果。
 
-    deps.reporter.failed(reason, stage=REVIEW_STAGE, event_key=deps.event_key)
+    中文说明：resume_thread_id 不为空，说明这次失败是在流程中间发生的——检查点里
+    还留着"做到哪一步"的记录，前端可以据此在失败卡片上放一个"继续"按钮。开跑之前
+    的检查没过（比如主题为空）就报失败的话，这里留空，因为确实没什么可继续的。
+    """
+
+    extra: JsonObject = {"resume_thread_id": resume_thread_id} if resume_thread_id else {}
+    deps.reporter.failed(reason, stage=REVIEW_STAGE, event_key=deps.event_key, **extra)
     logger.info("综述失败", extra={"reason": reason[:200]})
     return {"status": "failed", "reason": reason}
 
