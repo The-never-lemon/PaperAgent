@@ -1,16 +1,29 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from src.llm import ModelConfig, ProviderSnapshot, SystemConfig, make_provider
+from src.utils import get_logger
+from src.utils.llm_json import parse_llm_json
 
 from .base import AgentContext, AgentSpec, BaseAgent
 from .contracts import JsonObject
 from .Prompts import ANALYSE_OVERALL_SYSTEM_PROMPT, ANALYSE_SUBTOPIC_SYSTEM_PROMPT
+
+
+logger = get_logger(__name__)
+
+
+# 分析模型一次要产出六到八个字段、每个字段都是一整段论述，输出很容易撞上字数上限。
+# 这里最多试 3 次：第一次用档位配的上限，之后每次翻倍，给被截断的输出留够空间。
+ANALYSE_MAX_ATTEMPTS = 3
+
+# 重试时 max_tokens 翻倍的上限。设这个天花板，是为了避免模型反复不守格式时，
+# 上限被一路翻倍到离谱的数字（既浪费额度，也拖长一次综述的等待时间）。
+ANALYSE_MAX_TOKENS_CEILING = 32768
 
 
 @dataclass(slots=True)
@@ -18,8 +31,8 @@ class AnalyseModelResult:
     """保存一次分析模型调用的结果。
 
     中文说明：
-    parsed 是已经解析出来的 JSON；如果为 None，说明模型不可用、调用失败或格式不对。
-    reason 用简单中文说明失败原因，供分析节点决定当前阶段是保守处理还是直接中止。
+    parsed 是已经解析出来的 JSON；如果为 None，说明模型不可用、调用失败、被截断
+    或格式不对。reason 用简单中文说明失败原因，供分析节点决定是保守处理还是中止。
     """
 
     parsed: JsonObject | None = None
@@ -57,36 +70,108 @@ class AnalyseAgent(BaseAgent):
         raise NotImplementedError("AnalyseAgent 请使用 async_analyse_subtopic 或 async_analyse_overall")
 
     async def async_analyse_subtopic(self, *, topic: str, group: JsonObject, usage_callback: Any | None = None) -> AnalyseModelResult:
-        """分析一个子主题，并返回解析后的 JSON。"""
+        """分析一个子主题，并返回解析后的 JSON。
+
+        中文说明：这个阶段是整个综述里输入最长的一次模型调用——它要把几十篇
+        论文的摘要一次性读完，再写出一段段带引用的分析。输入越厚，模型的思考
+        就越长，而思考也要从同一个输出上限里扣。所以这里最容易撞上"话说到一半
+        额度就没了"的情况：请求本身是成功的，但 JSON 被从中间截断，解析自然失败。
+        这类失败原样重发还是同样结果，所以下面用升级输出上限的方式重试
+        （见 _async_chat_json_with_retry）。
+        """
 
         if self.context.llm is None:
             return AnalyseModelResult(reason="未配置可用分析模型")
-        try:
-            response = await self.context.llm.provider.chat(
-                _subtopic_messages(topic=topic, group=group),
-                temperature=0.2,
-                reasoning_effort="medium",
-            )
-        except Exception as exc:
-            return AnalyseModelResult(reason=f"分析模型调用失败：{exc}")
-        self.report_usage(response, usage_callback)
-        return _parse_response(response)
+        return await self._async_chat_json_with_retry(
+            messages=_subtopic_messages(topic=topic, group=group),
+            temperature=0.2,
+            reasoning_effort="medium",
+            usage_callback=usage_callback,
+            stage="子主题分析",
+        )
 
     async def async_analyse_overall(self, *, topic: str, subtopic_analyses: list[JsonObject], usage_callback: Any | None = None) -> AnalyseModelResult:
-        """综合所有子主题分析，并返回解析后的 JSON。"""
+        """综合所有子主题分析，并返回解析后的 JSON。
+
+        中文说明：这个阶段要产出八个字段、每个字段都是一整段论述，输出量比子
+        主题分析更大，同样容易在中途把上限用光，所以也走同一套"额度不够就加码
+        重试"的逻辑。
+        """
 
         if self.context.llm is None:
             return AnalyseModelResult(reason="未配置可用分析模型")
-        try:
-            response = await self.context.llm.provider.chat(
-                _overall_messages(topic=topic, subtopic_analyses=subtopic_analyses),
-                temperature=0.2,
-                reasoning_effort="medium",
+        return await self._async_chat_json_with_retry(
+            messages=_overall_messages(topic=topic, subtopic_analyses=subtopic_analyses),
+            temperature=0.2,
+            reasoning_effort="medium",
+            usage_callback=usage_callback,
+            stage="全局综合分析",
+        )
+
+    async def _async_chat_json_with_retry(
+        self,
+        *,
+        messages: list[JsonObject],
+        temperature: float,
+        reasoning_effort: str,
+        usage_callback: Any | None,
+        stage: str,
+    ) -> AnalyseModelResult:
+        """要模型返回一段 JSON，失败时最多重试 ANALYSE_MAX_ATTEMPTS 次。
+
+        中文说明：这里区分两种失败，因为它们的处理方式完全不同。
+
+        第一种是"输出的额度先用完了"（结束原因是达到字数上限）。模型不是不听话，
+        是话说到一半没额度了——重发一次同样的请求，结果还是被同一个上限卡住。
+        唯一的出路是把上限调高，所以重试时把 max_tokens 加倍。
+
+        第二种是"正常说完但没按格式给 JSON"。这种情况把上一次的坏输出和具体
+        解析错误一起还给模型，让它在看得见错误的前提下重写一遍，比原样重发有效。
+
+        两种都失败到底时，把原始输出和最后一次的原因交回去，由上层决定怎么处理。
+        """
+
+        attempts = ANALYSE_MAX_ATTEMPTS
+        # 第一次用当前档位配的 max_tokens；后面每次重试都翻倍，给被截断的输出留出空间。
+        # 同时设一个天花板，避免模型反复不守格式时限，上限被一路顶到离谱的数字。
+        # 档位里没配上限时（base 为 None），全程交给 provider 自己决定。
+        configured_max_tokens = _resolve_max_tokens(self.context.llm)
+        last_raw = ""
+        last_reason = "模型没有返回可解析的 JSON"
+        for attempt in range(1, attempts + 1):
+            max_tokens = _attempt_max_tokens(configured_max_tokens, attempt)
+            try:
+                response = await self.context.llm.provider.chat(
+                    _attempt_messages(messages, last_raw, last_reason, attempt),
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    reasoning_effort=reasoning_effort,
+                )
+            except Exception as exc:
+                last_reason = f"分析模型调用失败：{exc}"
+                logger.warning(
+                    "分析模型调用异常，准备重试",
+                    extra={"stage": stage, "attempt": attempt, "error": str(exc)[:200]},
+                )
+                continue
+            self.report_usage(response, usage_callback)
+            last_raw = str(getattr(response, "content", "") or "")
+            outcome = await _parse_response(response, max_tokens=max_tokens)
+            if outcome.parsed is not None:
+                return outcome
+            last_reason = outcome.reason
+            logger.warning(
+                "分析模型没有返回可解析的 JSON，准备重试",
+                extra={
+                    "stage": stage,
+                    "attempt": attempt,
+                    "max_tokens": max_tokens,
+                    "finish_reason": str(getattr(response, "finish_reason", "") or ""),
+                    "output_chars": len(last_raw),
+                    "reason": last_reason[:200],
+                },
             )
-        except Exception as exc:
-            return AnalyseModelResult(reason=f"分析模型调用失败：{exc}")
-        self.report_usage(response, usage_callback)
-        return _parse_response(response)
+        return AnalyseModelResult(raw_model_output=last_raw, reason=last_reason)
 
 
 def load_analyse_agent_llm(
@@ -121,8 +206,81 @@ def build_analyse_agent(llm: ProviderSnapshot | None | str = "auto", usage_callb
     return AnalyseAgent(context)
 
 
-def _parse_response(response: Any) -> AnalyseModelResult:
-    """把模型响应解析为 JSON。"""
+def _resolve_max_tokens(llm: ProviderSnapshot | None) -> int | None:
+    """读出当前模型档位配置的输出上限；没配就返回 None（交给 provider 默认值）。
+
+    中文说明：这个值就是"第一次请求"用的上限，后面的重试在它基础上翻倍。
+    如果档位里没写，就返回 None，让 provider 用它自己的默认值（Anthropic 协议
+    默认 4096，OpenAI 协议默认不发这个字段）。
+    """
+
+    generation = getattr(getattr(llm, "provider", None), "generation", None)
+    value = getattr(generation, "max_tokens", None)
+    try:
+        resolved = int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+    # 上限必须是正数，写 0 或负数等于让模型没法说话。
+    return resolved if resolved and resolved > 0 else None
+
+
+def _attempt_max_tokens(configured_max_tokens: int | None, attempt: int) -> int | None:
+    """算出这一次请求该用多大的输出上限。
+
+    中文说明：
+    第一次（attempt=1）就用配置里的值。第二次开始翻倍：被截断说明"这个上限不够"，
+    那就要真的抬高它，否则重试多少次结果都一样。翻倍不是无限制的——设了天花板
+    ANALYSE_MAX_TOKENS_CEILING，万一模型是"格式不守"而不是"被截断"，也不至于
+    把上限一路顶到离谱的数字。
+
+    配置里根本没写上限时返回 None，表示这次请求不带这个参数，交给 provider 的
+    默认值（Anthropic 协议默认 4096）。
+    """
+
+    if configured_max_tokens is None:
+        return None
+    return min(configured_max_tokens * (2 ** (attempt - 1)), ANALYSE_MAX_TOKENS_CEILING)
+
+
+def _attempt_messages(
+    messages: list[JsonObject],
+    last_raw: str,
+    last_reason: str,
+    attempt: int,
+) -> list[JsonObject]:
+    """准备这次要发出去的消息。
+
+    中文说明：
+    第一次原样发出去。第二次以后，把上一次的坏输出和具体错在哪一起附上——
+    模型看不见自己上次写坏在哪，只会照着同样的毛病再写一遍。附带方式是：
+    把上次的输出当成"模型自己的回答"放进对话里（assistant 那条），紧接着补一条
+    用户消息指出问题并要求重写。这样既符合对话接口的格式要求，也让模型有据可依。
+    """
+
+    if attempt == 1 or not last_raw.strip():
+        return list(messages)
+    return [
+        *messages,
+        {"role": "assistant", "content": last_raw},
+        {
+            "role": "user",
+            "content": (
+                f"你上一次的输出无法被解析成要求的 JSON：{last_reason}。\n"
+                "请严格按前面的输出规则重新只输出一个合法的 JSON 对象，"
+                "不要包含解释文字、不要使用 Markdown 代码块、不要添加或删除任何字段。"
+            ),
+        },
+    ]
+
+
+async def _parse_response(response: Any, *, max_tokens: int | None = None) -> AnalyseModelResult:
+    """把模型响应解析为 JSON。
+
+    中文说明：
+    先看这次请求本身成不成功（网络、鉴权、限流这些），再看内容是不是能用的 JSON。
+    两者分开判，是为了让上层拿到的失败原因能指明到底卡在哪一步——是"请求没发出去"
+    还是"发出去但内容不合格"。
+    """
 
     raw_model_output = str(getattr(response, "content", "") or "")
     if not getattr(response, "ok", False):
@@ -130,10 +288,44 @@ def _parse_response(response: Any) -> AnalyseModelResult:
             raw_model_output=raw_model_output,
             reason=raw_model_output or str(getattr(response, "error_kind", "") or "分析模型调用失败"),
         )
-    parsed = _extract_json_object(raw_model_output)
+    parsed = await _parse_analysis_json(raw_model_output)
     if parsed is None:
-        return AnalyseModelResult(raw_model_output=raw_model_output, reason="模型没有返回可解析的 JSON")
+        return AnalyseModelResult(
+            raw_model_output=raw_model_output,
+            reason=_describe_unparsable(response, raw_model_output, max_tokens),
+        )
     return AnalyseModelResult(parsed=parsed, raw_model_output=raw_model_output)
+
+
+async def _parse_analysis_json(text: str) -> JsonObject | None:
+    """把模型输出解析成 JSON 对象，解析不动就返回 None。
+
+    中文说明：统一走项目里的 parse_llm_json（工程规范要求所有 Agent 共用同一套
+    JSON 解析，不允许各写一份正则）。
+    """
+
+    payload = await parse_llm_json(text, fallback={})
+    return None if "parse_error" in payload else payload
+
+
+def _describe_unparsable(response: Any, raw_model_output: str, max_tokens: int | None) -> str:
+    """说清楚"这段输出为什么不能用"，供上层写进失败原因和日志。
+
+    中文说明：以前不管是哪种原因，一律只报"模型没有返回可解析的 JSON"。
+    但最需要看清楚的那句——"输出写到一半被字数上限掐断了"——恰恰是被这句话
+    盖住的。所以这里在结尾把真正的原因补上。
+
+    另外，"额度用完"还有一种更彻底的表现：模型把额度全花在思考上，一个字正文
+    都没来得及写，此时输出是空的。空输出加上额度用满，同样按这种情况报出来。
+    """
+
+    finish_reason = str(getattr(response, "finish_reason", "") or "")
+    if finish_reason in {"max_tokens", "length"}:
+        used = f"（输出上限 {max_tokens} tokens）" if max_tokens else ""
+        return f"模型在达到输出上限{used}时停止，没有写出完整的 JSON"
+    if not raw_model_output.strip() and finish_reason == "end_turn":
+        return "模型只输出了思考过程，没有输出任何正文内容"
+    return "模型没有返回可解析的 JSON"
 
 
 def _subtopic_messages(*, topic: str, group: JsonObject) -> list[JsonObject]:
@@ -231,24 +423,3 @@ def _overall_analysis_schema_hint() -> JsonObject:
         "各子主题横向差异对比分析": f"{citation_rule}；比较各子主题的成熟度、共识统一度、争议集中度、研究缺口体量、技术应用深度和研究丰富度，区分强弱板块",
         "领域整体总结与研究展望": f"{citation_rule}；总结核心结论、整体价值和约束边界，给出通用实践启示及与研究空白对应的可落地未来方向",
     }
-
-
-def _extract_json_object(text: str) -> JsonObject | None:
-    """从模型输出里用正则提取 JSON 对象。"""
-
-    candidates: list[str] = []
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.IGNORECASE | re.DOTALL)
-    if fenced:
-        candidates.append(fenced.group(1))
-    loose = re.search(r"(\{.*\})", text, flags=re.DOTALL)
-    if loose:
-        candidates.append(loose.group(1))
-    candidates.append(text)
-    for candidate in candidates:
-        try:
-            value = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            return value
-    return None

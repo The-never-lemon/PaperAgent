@@ -67,10 +67,6 @@ logger = get_logger(__name__)
 # 综述分析报告版本号（从 analyse_node 移植，保持一致）。
 ANALYSIS_VERSION = "3.0"
 
-# 全局综合分析"返回非 JSON"时的最大尝试次数（含首次），对齐旧
-# OVERALL_ANALYSIS_MAX_ATTEMPTS=2：第一次失败后只重试 1 次。
-OVERALL_ANALYSIS_MAX_ATTEMPTS = 2
-
 # 综述进度事件的 stage 名，对应 runtime.py 里 ("tool","generate_review") 映射。
 REVIEW_STAGE = "generate_review"
 
@@ -561,18 +557,22 @@ async def _node_analyse_overall(state: ReviewState, deps: ReviewDeps) -> JsonObj
 
     usage = _UsageCollector()
     analyse_agent = build_analyse_agent(deps.llm)
-    # 返回非 JSON 时重试 1 次（对齐旧 OVERALL_ANALYSIS_MAX_ATTEMPTS=2）。
-    overall_analysis = await _analyse_overall_with_retry(
+    # 中文说明：模型调用本身的重试（网络抖动、限流、输出被截断）已经在 AnalyseAgent
+    # 内部处理过了，这里不再套一层重试循环——套了就是同一件事做两遍。走到这一步还
+    # 是没解析出来，说明真的写不动了，直接把模型自己给的原因报上去，别再用一句
+    # 笼统的"未返回合法 JSON"盖住具体原因。
+    overall_result = await analyse_agent.async_analyse_overall(
         topic=str(state.get("topic") or ""),
         subtopic_analyses=[dict(state.get("subtopic_analysis") or {})],
-        agent=analyse_agent,
         usage_callback=usage.collect,
-        deps=deps,
     )
-    if overall_analysis is None:
-        raise _ReviewFailed("全局综合分析未返回合法 JSON，已重试 1 次仍失败")
+    if overall_result.parsed is None:
+        raise _ReviewFailed(f"全局综合分析失败：{overall_result.reason}")
     return {
-        "overall_analysis": overall_analysis,
+        "overall_analysis": _normalize_overall_analysis(
+            overall_result.parsed,
+            [dict(state.get("subtopic_analysis") or {})],
+        ),
         **_usage_update(state, usage),
     }
 
@@ -950,45 +950,6 @@ def _paper_analysis_input(paper_id: str, entry: "WorkspacePaperEntry") -> JsonOb
 # ---------------------------------------------------------------------------
 # 分析归一化与报告组装（移植自 analyse_node）
 # ---------------------------------------------------------------------------
-
-
-def _analyse_overall_with_retry(
-    *,
-    topic: str,
-    subtopic_analyses: list[JsonObject],
-    agent: Any,
-    usage_callback: Any | None,
-    deps: ReviewDeps,
-) -> JsonObject | None:
-    """全局综合分析：返回非 JSON 时重试 1 次（对齐旧 OVERALL_ANALYSIS_MAX_ATTEMPTS=2）。
-
-    模型调用本身已经由 provider 负责网络重试；这里的重试只针对"请求成功但返回
-    内容不是 JSON"这一业务层问题。两次都失败返回 None，由调用方决定报失败。
-    """
-
-    async def _run() -> JsonObject | None:
-        last_reason = "模型没有返回可解析的 JSON"
-        for attempt in range(1, OVERALL_ANALYSIS_MAX_ATTEMPTS + 1):
-            _check_cancellation(deps)
-            result = await agent.async_analyse_overall(
-                topic=topic,
-                subtopic_analyses=subtopic_analyses,
-                usage_callback=usage_callback,
-            )
-            if result.parsed is not None:
-                return _normalize_overall_analysis(result.parsed, subtopic_analyses)
-            last_reason = str(result.reason or "").strip() or "模型没有返回可解析的 JSON"
-            if attempt < OVERALL_ANALYSIS_MAX_ATTEMPTS:
-                deps.reporter.progress(
-                    "全局分析结果不可解析，正在重试",
-                    stage=REVIEW_STAGE,
-                    event_key=deps.event_key,
-                )
-                continue
-        logger.warning("全局综合分析未返回合法 JSON", extra={"reason": last_reason[:200]})
-        return None
-
-    return _run()
 
 
 def _normalize_subtopic_analysis(parsed: JsonObject, group: JsonObject) -> JsonObject:
