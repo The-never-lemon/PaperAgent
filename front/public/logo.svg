@@ -1,32 +1,40 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="PaperAgent">
   <!--
-    PaperAgent 品牌标志：蓝紫渐变圆角方块 + 白色描边的「折角纸张 + 放大镜」。
-    设计说明：
-    1. 纸张代表论文，放大镜代表检索调研，线条风格与界面里的 lucide 图标一致；
-    2. 渐变使用 gradientUnits="userSpaceOnUse"，让放大镜镜片内部填充的渐变
-       和背景渐变完全同一套坐标，镜片压住纸张的地方看起来就像真的"挖空"了一块；
-    3. 线条加粗到 16px 大小时依然清晰，所以同一个文件可以直接当浏览器标签页图标。
+    PaperAgent 标志：墨蓝封面、象牙纸页、金色书签、放大镜。
+    中文说明：
+    1. 底色用印刷品封面那种深蓝，不用常见的蓝紫渐变，看起来更像一本期刊，而不是普通软件图标；
+    2. 金色书签从顶边垂下来，16 像素的小图标里也能认出这一条亮色；
+    3. 两张错开的纸代表一叠文献；右下角放大镜表示检索，镜片填回封面同色，看起来像在纸上开了一个观察孔；
+    4. 线条保持粗一点，浏览器标签那么小也能看清。
   -->
   <defs>
-    <linearGradient id="pa-bg" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#3b4d7a"/>
-      <stop offset="1" stop-color="#1a2440"/>
+    <linearGradient id="pa-cover" x1="20" y1="0" x2="48" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#243556"/>
+      <stop offset="1" stop-color="#12192b"/>
     </linearGradient>
   </defs>
 
-  <!-- 圆角方块底 -->
-  <rect width="64" height="64" rx="16" fill="url(#pa-bg)"/>
+  <!-- 期刊封面 -->
+  <rect width="64" height="64" rx="14" fill="url(#pa-cover)"/>
+  <!-- 内侧一圈淡光，让小尺寸时边缘不发闷 -->
+  <rect x="0.75" y="0.75" width="62.5" height="62.5" rx="13.25" fill="none" stroke="#ffffff" stroke-opacity="0.14"/>
 
+  <!-- 金色书签：顶部切入，下沿剪一个三角缺口 -->
+  <path d="M23 0h10v19l-5-4.2L23 19Z" fill="#e2aa3a"/>
+
+  <!-- 后面那一页，略偏右下，显出“一叠纸” -->
+  <rect x="18" y="20" width="29" height="32" rx="2.2" fill="#6d7c98"/>
+
+  <!-- 正面纸页：象牙色，像印刷用纸 -->
+  <path fill="#f4f0e6" d="M12.5 16.5h21.2L42 25.2V46.2c0 1.4-1.1 2.5-2.5 2.5h-27c-1.4 0-2.5-1.1-2.5-2.5v-27c0-1.4 1.1-2.5 2.5-2.5Z"/>
+  <!-- 右上角折页 -->
+  <path fill="#d9d1c2" d="M33.7 16.5 42 25.2h-6.1c-1.2 0-2.2-1-2.2-2.2Z"/>
+  <!-- 纸上两道横线，远看像摘要文字；缩到 favicon 时仍是清楚的色块 -->
+  <path fill="none" stroke="#c9c1b3" stroke-linecap="round" stroke-width="1.8" d="M17 30.5h16.5M17 35.5h12"/>
+
+  <!-- 放大镜：镜片填封面同色，压在纸页上像挖空了一块 -->
   <g fill="none" stroke="#ffffff" stroke-linecap="round" stroke-linejoin="round">
-    <!-- 折角纸张：右上角折一个三角 -->
-    <g transform="translate(11 12) scale(1.4)">
-      <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" stroke-width="3.4"/>
-      <path d="M14 2v4a2 2 0 0 0 2 2h4" stroke-width="3.4"/>
-    </g>
-    <!-- 放大镜：镜片填充与背景相同的渐变，压在纸张右下角 -->
-    <g transform="translate(29.3 30.3) scale(1.15)">
-      <circle cx="11" cy="11" r="8" fill="url(#pa-bg)" stroke-width="4.1"/>
-      <path d="m21 21-4.35-4.35" stroke-width="4.1"/>
-    </g>
+    <circle cx="41" cy="42.5" r="9.2" fill="url(#pa-cover)" stroke-width="3.2"/>
+    <path d="m47.8 49.4 7.2 7.2" stroke-width="3.4"/>
   </g>
 </svg>

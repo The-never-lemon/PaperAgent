@@ -5,6 +5,7 @@ import inspect
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from src.models.deep_read import slim_deep_read_card_metadata
 from src.models.sessions import SessionError
 from src.repositories.sessions.base import SessionRepository
 
@@ -67,9 +68,33 @@ def list_sessions(repo: SessionRepository) -> JsonObject:
 
 
 def fetch_thread(repo: SessionRepository, key: str) -> JsonObject:
-    """返回指定会话的完整线程快照。"""
+    """返回指定会话的完整线程快照。
 
-    return repo.get(key).thread()
+    中文说明：
+    发给前端之前，把精读卡片事件里可能带着的整份报告收成预览字段。
+    完整报告已经在工作区里，点卡片再单独去取，打开旧会话才不会一次搬太多字。
+    """
+
+    payload = repo.get(key).thread()
+    events = payload.get("events")
+    if isinstance(events, list):
+        for event in events:
+            _compact_thread_event(event)
+    return payload
+
+
+def _compact_thread_event(event: JsonObject) -> None:
+    """把单条历史事件里过重的精读报告字段收掉。"""
+
+    if str(event.get("event_type") or "") != "message":
+        return
+    metadata = event.get("metadata")
+    if not isinstance(metadata, dict):
+        return
+    inner = metadata.get("metadata")
+    if not isinstance(inner, dict) or inner.get("kind") != "deep_read_report":
+        return
+    metadata["metadata"] = slim_deep_read_card_metadata(inner)
 
 
 def create_session(repo: SessionRepository, body: JsonObject | None = None) -> JsonObject:

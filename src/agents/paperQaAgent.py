@@ -165,7 +165,7 @@ async def _run_paper_qa_impl(*, paper_id: str, question: str, deps: PaperQaDeps)
         # 有全文产物：读全文文本，并尝试加载它的切片目录。
         fulltext = await _load_fulltext(deps, str(report["fulltext_artifact_id"]))
         if fulltext:
-            chunks = await _load_chunks_from_cache(deps, paper_id)
+            chunks = await _load_chunks_from_cache(deps, paper_id, entry.paper)
             if chunks is None:
                 # 中文注释：全文在但切片缓存没了（paper_cache 被清理、换机器等）。
                 # 不学旧版把全文白白丢掉——把全文截断后直接放进提示词，
@@ -375,58 +375,35 @@ async def _load_fulltext(deps: PaperQaDeps, artifact_id: str) -> str:
     return ""
 
 
-async def _load_chunks_from_cache(deps: PaperQaDeps, paper_id: str) -> "list[TextChunk] | None":
+async def _load_chunks_from_cache(
+    deps: PaperQaDeps, paper_id: str, paper: JsonObject | None = None
+) -> "list[TextChunk] | None":
     """从论文缓存目录加载 chunk.json 切片，成功返回 TextChunk 列表。
 
-    中文注释：精读时 PageChunker 切好的切片就躺在 data/paper_cache 的论文
-    缓存目录里（chunk.json）。问答直接复用这份切片，不需要重新切分。
-    缓存目录可能带日期后缀等五花八门的名字，按写作 Agent 的同款策略
-    （metadata.json 里的 paperId 反查）兜底定位。
+    中文注释：精读时切好的切片躺在 data/paper_cache 里。问答直接复用，
+    不需要重新切分。目录名可能和当前工作区编号不一样（换过数据源），
+    所以先按长期记忆里记下的目录找，找不到再按当前编号起名。
     """
 
     try:
-        # 中文注释：用 SystemConfig.load()（会读 config/system.yaml）取缓存目录，
-        # 不能用 SystemConfig()——直接构造不会读配置文件，用户改过的
-        # paper_cache_dir 就不生效了。
         cache_dir = SystemConfig.load().read.paper_cache_dir
         from pathlib import Path
+
+        from src.services.paper_memory import resolve_paper_cache_dir
 
         root = Path(cache_dir)
         if not root.exists():
             return None
-        # 第一选择：safe_cache_name(paper_id) 直名目录；找不到就遍历目录
-        # 用 metadata.json 里的 paperId 反查。
-        from src.utils.read_utils.cache import safe_cache_name
-
-        candidates: "list[Path]" = []
-        direct = root / safe_cache_name(paper_id)
-        if direct.exists():
-            candidates.append(direct)
-        for directory in root.iterdir():
-            if not directory.is_dir() or directory in candidates:
-                continue
-            metadata_path = directory / "metadata.json"
-            try:
-                payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            paper = dict(payload.get("paper") or {})
-            if paper_id in {
-                str(payload.get("paperId") or ""),
-                str(paper.get("paperId") or ""),
-                str(paper.get("id") or ""),
-            }:
-                candidates.append(directory)
-        for directory in candidates:
-            chunks_path = directory / "chunk.json"
-            if chunks_path.exists():
-                chunks = await asyncio.to_thread(load_chunks_file, chunks_path)
-                if chunks:
-                    logger.info(
-                        "问答加载到全文切片",
-                        extra={"session_key": deps.session_key, "paper_id": paper_id, "chunks": len(chunks)},
-                    )
-                    return chunks
+        directory = resolve_paper_cache_dir(root, paper or paper_id)
+        chunks_path = directory / "chunk.json"
+        if chunks_path.exists():
+            chunks = await asyncio.to_thread(load_chunks_file, chunks_path)
+            if chunks:
+                logger.info(
+                    "问答加载到全文切片",
+                    extra={"session_key": deps.session_key, "paper_id": paper_id, "chunks": len(chunks)},
+                )
+                return chunks
     except Exception as exc:
         logger.warning(
             "定位问答切片缓存失败，回退摘要模式",

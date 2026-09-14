@@ -13,7 +13,7 @@
  * 取消/竞态保护完全复用原工作台的成熟模式，聚合逻辑在 SessionStreamAggregator。
  * props/emits 契约与原 SessionWorkspaceView 保持一致，App.vue 无需改动。
  */
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { Library, LoaderCircle } from "lucide-vue-next";
 
 import {
@@ -81,8 +81,14 @@ const cancelling = ref(false);
 const activeRunId = ref<string | null>(null);
 const streamSource = ref<EventSource | null>(null);
 const manualClose = ref(false);
-const timelineSnapshot = ref<SessionTimelineSnapshot | null>(null);
+const timelineSnapshot = shallowRef<SessionTimelineSnapshot | null>(null);
 const scrollElement = ref<HTMLElement | null>(null);
+// 中文说明：旧会话可能有十几轮对话、上百张论文卡。打开时先只挂最近几轮，
+// 上面藏起来的轮数记在 hiddenTurnCount 里；要点「加载更早的对话」才会把更早的挂上来。
+const INITIAL_VISIBLE_TURNS = 3;
+const OLDER_TURN_BATCH = 4;
+const hiddenTurnCount = ref(0);
+let loadingOlderTurns = false;
 // 中文注释：用户是否手动向上滚动过（离开底部）。流式输出时如果用户向上滚了，
 // 就不自动滚到底部，直到用户点击「回到底部」按钮。
 const userScrolledUp = ref(false);
@@ -241,6 +247,12 @@ const flowTurns = computed<FlowTurn[]>(() => {
   return turns;
 });
 
+/** 真正挂到页面上的回合：跳过开头藏起来的那些更早对话。 */
+const visibleFlowTurns = computed(() => flowTurns.value.slice(hiddenTurnCount.value));
+
+/** 上面是否还有更早的对话可以加载。 */
+const hasOlderTurns = computed(() => hiddenTurnCount.value > 0);
+
 /** 卡片载荷的类型收窄辅助（模板里按 kind 分发后做一次性断言）。 */
 function asPaperList(message: UISessionMessage): PaperListPayload | null {
   return (message.card as PaperListPayload | null) ?? null;
@@ -287,6 +299,11 @@ async function selectSession(sessionKey: string) {
   drawerReport.value = null;
   selectedSessionKey.value = sessionKey;
   threadLoading.value = true;
+  // 中文说明：先把上一份对话从页面上卸掉，切到很长的旧会话时就不会两份历史叠在一起画。
+  timelineSnapshot.value = null;
+  hiddenTurnCount.value = 0;
+  userScrolledUp.value = false;
+  showScrollToBottom.value = false;
   try {
     const thread = await fetchSessionThread(sessionKey);
     // 中文注释：用户连续点击多个历史会话时，旧请求可能比新请求更晚返回；直接丢掉旧结果。
@@ -309,6 +326,11 @@ async function selectSession(sessionKey: string) {
       threadLoading.value = false;
     }
   }
+  // 中文说明：等「正在恢复」提示关掉、回合真正画到页面上之后，再决定露出几轮。
+  // 否则量高度时还夹着加载提示，容易把该藏起来的旧对话一次全补出来。
+  if (selectedSessionKey.value === sessionKey && timelineSnapshot.value) {
+    resetTurnWindow();
+  }
 }
 
 /** 没有任何会话时回到初始欢迎态。 */
@@ -321,6 +343,9 @@ function resetToBlankWorkspace() {
   cancelling.value = false;
   activeRunId.value = null;
   threadLoading.value = false;
+  hiddenTurnCount.value = 0;
+  userScrolledUp.value = false;
+  showScrollToBottom.value = false;
   drawerVisible.value = false;
   drawerReport.value = null;
   readablePaperIds.value = new Set();
@@ -440,6 +465,51 @@ function handleScroll() {
   showScrollToBottom.value = !nearBottom;
 }
 
+/** 打开会话时只露出最近几轮；如果还撑不满一屏，就再补几轮，避免短对话被藏在上面点不到。 */
+function resetTurnWindow() {
+  hiddenTurnCount.value = Math.max(0, flowTurns.value.length - INITIAL_VISIBLE_TURNS);
+  nextTick(() => fillViewportWithTurns());
+}
+
+/** 如果当前画出的回合还不够一屏高，继续把更早的对话补上来。 */
+function fillViewportWithTurns() {
+  const element = scrollElement.value;
+  if (!element) {
+    return;
+  }
+  // 中文说明：对话区还没量出高度时不要往上补回合，否则会把全部历史一次挂上去。
+  if (element.clientHeight < 8) {
+    scrollToBottom();
+    return;
+  }
+  if (hiddenTurnCount.value <= 0 || element.scrollHeight > element.clientHeight + 24) {
+    scrollToBottom();
+    return;
+  }
+  hiddenTurnCount.value = Math.max(0, hiddenTurnCount.value - OLDER_TURN_BATCH);
+  nextTick(fillViewportWithTurns);
+}
+
+/** 再挂一批更早的回合，并停在这批新内容的开头，方便接着往前读。 */
+function loadOlderTurns() {
+  if (hiddenTurnCount.value <= 0 || loadingOlderTurns) {
+    return;
+  }
+  loadingOlderTurns = true;
+  hiddenTurnCount.value = Math.max(0, hiddenTurnCount.value - OLDER_TURN_BATCH);
+  // 中文说明：用户是来看更早的对话的，不要把滚动条补回刚才的位置，
+  // 更不要弹回最底下。停在新挂上的那几轮开头，才能接着往前读。
+  userScrolledUp.value = true;
+  showScrollToBottom.value = true;
+  nextTick(() => {
+    const element = scrollElement.value;
+    if (element) {
+      element.scrollTop = 0;
+    }
+    loadingOlderTurns = false;
+  });
+}
+
 /** 手动点击「回到底部」按钮。 */
 function scrollToBottomManual() {
   scrollToBottom();
@@ -528,6 +598,7 @@ function openStream(sessionKey: string, streamUrl: string) {
       const cardKind = typeof event.metadata?.kind === "string" ? event.metadata.kind : "";
       if (event.event === "message" && cardKind === "paper_list") {
         void libraryPanelRef.value?.refresh();
+        void refreshWorkspacePapers();
       }
       if (event.event === "turn_end") {
         await handleRunFinished(sessionKey, event);
@@ -687,7 +758,9 @@ function emptyThreadFromSummary(summary: SessionSummary): SessionThread {
 
 /** 卡片上的"精读"按钮：把精读请求作为一条普通消息发给主 Agent。 */
 function requestDeepRead(paper: ChatPaperCard) {
-  submitMessage(`请精读论文 [${paper.paper_id}]《${paper.title}》`);
+  const already = paper.status === "deep_read" || readablePaperIds.value.has(paper.paper_id);
+  const verb = already ? "请重新精读论文" : "请精读论文";
+  submitMessage(`${verb} [${paper.paper_id}]《${paper.title}》`);
 }
 
 /** 卡片上的"报告"按钮：从工作区 REST 端点拉最新报告并打开抽屉。 */
@@ -704,10 +777,9 @@ async function openReportForPaper(paper: ChatPaperCard) {
   }
 }
 
-/** 对话流里的精读报告卡片：直接用卡片携带的报告打开抽屉。 */
+/** 对话流里的精读报告卡片：完整报告不在卡片里，向工作区再取一份再打开抽屉。 */
 function openReportFromCard(payload: DeepReadCardPayload) {
-  drawerReport.value = payload.report;
-  drawerVisible.value = true;
+  void openReportById(payload.paper_id);
 }
 
 /** 抽屉里的追问：把问题发回对话流（主 Agent 会调用 ask_paper 基于全文回答）。 */
@@ -723,7 +795,8 @@ function closeDrawer() {
 
 /** 面板里的「精读」按钮：按 paper_id 发起精读（不依赖卡片对象）。 */
 function requestDeepReadById(paperId: string) {
-  submitMessage(`请精读论文 ${paperId}`);
+  const already = readablePaperIds.value.has(paperId);
+  submitMessage(already ? `请重新精读论文 ${paperId}` : `请精读论文 ${paperId}`);
 }
 
 /** 面板里的「报告」按钮：按 paper_id 打开精读报告抽屉。 */
@@ -821,20 +894,30 @@ function handleError(error: unknown, title: string) {
       :data-resizing="resizing"
     >
       <div class="chat-column">
+        <!-- 中文说明：这条按钮放在滚动区外面，看最新回复时也能直接点。
+             点完停在新加载的更早内容上，不用先滚回底部再往上抠。 -->
+        <button
+          v-if="hasOlderTurns && !threadLoading && !showWelcome"
+          type="button"
+          class="chat-load-older"
+          @click="loadOlderTurns"
+        >
+          加载更早的对话（还有 {{ hiddenTurnCount }} 轮）
+        </button>
         <div ref="scrollElement" class="chat-flow" :data-welcome="showWelcome" @scroll="handleScroll">
           <div v-if="showWelcome" class="chat-welcome">
             <ChatComposer
               v-model="draft"
               variant="welcome"
               heading="今天想调研什么方向？"
-              helper-text="直接用一句话描述你的调研需求，助手会检索论文、给出卡片，并陪你逐步筛选、精读和追问。"
+              helper-text="用一句话写下你想搞清楚的问题。助手会去检索论文、做成卡片，再陪你筛选、精读和追问。"
               placeholder="例如：帮我调研 LLM 推理优化的最新论文"
-              :rows="3"
+              :rows="2"
               :running="isRunning"
               :sending="sending || props.creatingSession"
               :cancellable="Boolean(activeRunId)"
               :cancelling="cancelling"
-              :status-text="statusText"
+              :status-text="sending || isRunning || cancelling ? statusText : ''"
               @submit="submitMessage()"
               @cancel="cancelActiveRun"
             />
@@ -846,7 +929,7 @@ function handleError(error: unknown, title: string) {
               <span>正在恢复对话…</span>
             </div>
 
-            <section v-for="(turn, turnIndex) in flowTurns" :key="turn.turnId ?? `turn-${turnIndex}`" class="chat-turn">
+            <section v-for="(turn, turnIndex) in visibleFlowTurns" :key="turn.turnId ?? `turn-${turnIndex + hiddenTurnCount}`" class="chat-turn">
               <template v-for="message in turn.messages" :key="message.id">
                 <UserBubble
                   v-if="message.role === 'user'"
@@ -898,7 +981,7 @@ function handleError(error: unknown, title: string) {
 
               <ToolCallTrace
                 :events="turn.events"
-                :active="isRunning && turnIndex === flowTurns.length - 1"
+                :active="isRunning && turnIndex === visibleFlowTurns.length - 1"
                 :on-resume="resumeHandler"
               />
             </section>

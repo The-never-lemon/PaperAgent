@@ -432,6 +432,15 @@ function statusLabel(status: string): string {
               <BookOpenCheck :size="13" /> 精读
             </button>
             <button
+              v-else
+              type="button"
+              class="paper-action"
+              :disabled="busy"
+              @click="requestDeepRead(paper.paper_id)"
+            >
+              <BookOpenCheck :size="13" /> 重新精读
+            </button>
+            <button
               v-if="paper.has_report"
               type="button"
               class="paper-action"

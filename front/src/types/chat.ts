@@ -5,7 +5,7 @@
  * 后端在阶段 1 冻结了 SSE message 事件的 metadata.kind 协议：
  * - kind = "text"             助手正文（气泡）
  * - kind = "paper_list"       论文卡片组（检索/评价后推送）
- * - kind = "deep_read_report" 精读报告卡片
+ * - kind = "deep_read_report" 精读报告卡片（只带标题、总结和分数；完整报告走工作区接口）
  * - kind = "review"           综述产物卡片
  * 这个文件是协议的前端唯一权威定义：后端协议任何变更都必须同步到这里，
  * 并在提交信息里标注 [protocol]。
@@ -30,6 +30,8 @@ export interface ChatPaperCard {
   score?: number | null;
   /** 论文处理状态：new / evaluated / deep_read（仅评价后的卡片携带）。 */
   status?: string;
+  /** 这篇论文是从本机以前的全文精读里召回来的。 */
+  recalled?: boolean;
 }
 
 /** metadata.kind = "paper_list" 的载荷（检索与评价共用，action 区分）。 */
@@ -40,6 +42,8 @@ export interface PaperListPayload {
   added?: number;
   /** 检索场景：重复跳过数量。 */
   duplicated?: number;
+  /** 检索场景：从本机历史精读里召回的篇数。 */
+  recalled?: number;
   /** 检索场景：本次检索式。 */
   query?: string;
   /** 评价场景固定为 "evaluate"。 */
@@ -80,7 +84,8 @@ export interface DeepReadReportPayload {
   fulltext_artifact_id: string;
 }
 
-/** metadata.kind = "deep_read_report" 的载荷。 */
+/** metadata.kind = "deep_read_report" 的载荷。
+ *  卡片只带预览：标题、一句话总结和分数。完整报告点开后再向工作区要。 */
 export interface DeepReadCardPayload {
   kind: "deep_read_report";
   paper_id: string;
@@ -90,7 +95,13 @@ export interface DeepReadCardPayload {
   fulltext_available?: boolean;
   /** 没拿到全文时的原因，例如"该论文未提供开放获取的全文链接""下载全文超时"。 */
   fulltext_failure_reason?: string;
-  report: DeepReadReportPayload;
+  title: string;
+  short_summary: string;
+  overall_score: number;
+  relevance: number;
+  novelty: number;
+  rigor: number;
+  clarity: number;
 }
 
 /** 综述产物里的章节条目。 */

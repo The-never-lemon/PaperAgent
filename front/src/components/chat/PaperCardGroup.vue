@@ -9,8 +9,8 @@
  * 1. "精读"——把请求发回聊天输入流（由主 Agent 调 deep_read_paper 工具）；
  * 2. "报告"——已精读的论文直接打开精读报告抽屉。
  */
-import { computed } from "vue";
-import { BookOpenCheck, ExternalLink, FileText } from "lucide-vue-next";
+import { computed, ref } from "vue";
+import { BookOpenCheck, ChevronDown, ExternalLink, FileText } from "lucide-vue-next";
 
 import { pickPaperLink } from "../../lib/paper-link";
 import type { ChatPaperCard, PaperListPayload } from "../../types/chat";
@@ -39,7 +39,11 @@ const headerText = computed(() => {
   }
   const added = props.payload.added ?? 0;
   const duplicated = props.payload.duplicated ?? 0;
-  return `检索完成：新增 ${added} 篇${duplicated ? `，重复跳过 ${duplicated} 篇` : ""}`;
+  const recalled = props.payload.recalled ?? 0;
+  let text = `检索完成：新增 ${added} 篇`;
+  if (duplicated) text += `，重复跳过 ${duplicated} 篇`;
+  if (recalled) text += `，召回历史精读 ${recalled} 篇`;
+  return text;
 });
 
 /** 分数对应的徽章色调：高分绿、中分黄、低分灰。 */
@@ -54,6 +58,21 @@ function statusLabel(status?: string) {
   if (status === "deep_read") return "已精读";
   if (status === "evaluated") return "已评价";
   return "未评价";
+}
+
+// 中文说明：哪几篇的摘要被用户点开了。默认只显示收起的纯文本，
+// 点开以后才做公式排版，打开旧会话时就不会一次排几十段摘要。
+const expandedAbstracts = ref<Record<string, boolean>>({});
+
+function isAbstractExpanded(paperId: string) {
+  return Boolean(expandedAbstracts.value[paperId]);
+}
+
+function toggleAbstract(paperId: string) {
+  expandedAbstracts.value = {
+    ...expandedAbstracts.value,
+    [paperId]: !expandedAbstracts.value[paperId],
+  };
 }
 </script>
 
@@ -73,13 +92,27 @@ function statusLabel(status?: string) {
             </span>
           </header>
           <p class="paper-card-meta">
-            <span v-if="paper.authors.length"><MathText :text="paper.authors.slice(0, 3).join(', ')" />{{ paper.authors.length > 3 ? " 等" : "" }}</span>
+            <span v-if="paper.authors.length">{{ paper.authors.slice(0, 3).join(", ") }}{{ paper.authors.length > 3 ? " 等" : "" }}</span>
             <span v-if="paper.year">{{ paper.year }}</span>
-            <span v-if="paper.venue"><MathText :text="paper.venue" /></span>
+            <span v-if="paper.venue">{{ paper.venue }}</span>
             <span class="paper-source-badge">{{ paper.source || "未知来源" }}</span>
+            <span v-if="paper.recalled" class="paper-memory-badge">历史精读</span>
             <span class="paper-status-badge">{{ statusLabel(paper.status) }}</span>
           </p>
-          <p v-if="paper.abstract" class="paper-card-abstract"><MathText :text="paper.abstract" /></p>
+          <p v-if="paper.abstract && isAbstractExpanded(paper.paper_id)" class="paper-card-abstract is-expanded">
+            <MathText :text="paper.abstract" />
+          </p>
+          <p v-else-if="paper.abstract" class="paper-card-abstract">{{ paper.abstract }}</p>
+          <button
+            v-if="paper.abstract"
+            type="button"
+            class="paper-card-abstract-toggle"
+            :aria-expanded="isAbstractExpanded(paper.paper_id)"
+            @click="toggleAbstract(paper.paper_id)"
+          >
+            <ChevronDown :size="12" :class="{ expanded: isAbstractExpanded(paper.paper_id) }" />
+            <span>{{ isAbstractExpanded(paper.paper_id) ? "收起摘要" : "展开摘要" }}</span>
+          </button>
           <footer class="paper-card-actions">
             <button
               type="button"
@@ -87,7 +120,8 @@ function statusLabel(status?: string) {
               :disabled="busy"
               @click="emit('deepRead', paper)"
             >
-              <BookOpenCheck :size="14" /> 精读
+              <BookOpenCheck :size="14" />
+              {{ paper.status === "deep_read" || readablePaperIds?.has(paper.paper_id) ? "重新精读" : "精读" }}
             </button>
             <button
               v-if="paper.status === 'deep_read' || readablePaperIds?.has(paper.paper_id)"

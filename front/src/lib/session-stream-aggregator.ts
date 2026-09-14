@@ -1,4 +1,4 @@
-import type { ChatCardKind, ChatCardPayload } from "../types/chat";
+import type { ChatCardKind, ChatCardPayload, DeepReadCardPayload } from "../types/chat";
 import type {
   RuntimeDetailContent,
   SessionArtifact,
@@ -72,6 +72,9 @@ export class SessionStreamAggregator {
   private status = "created";
   private activeAssistantId: string | null = null;
   private activeNodeKey: string | null = null;
+  // 中文注释：重放历史事件时先不要每条都把整棵执行树加一遍 token，
+  // 等全部事件走完再加一次。打开很长的旧会话时能少做很多重复计算。
+  private skipTokenTotals = false;
 
   /** 用线程快照重建时间线状态，保证历史回放和实时展示走同一条路。 */
   hydrate(thread: SessionThread) {
@@ -88,8 +91,14 @@ export class SessionStreamAggregator {
     this.activeNodeKey = null;
 
     if (thread.events.length > 0) {
-      for (const storedEvent of thread.events) {
-        this.apply(this.normalizeStoredEvent(storedEvent));
+      this.skipTokenTotals = true;
+      try {
+        for (const storedEvent of thread.events) {
+          this.apply(this.normalizeStoredEvent(storedEvent));
+        }
+      } finally {
+        this.skipTokenTotals = false;
+        this.recalculateTokenTotals();
       }
     }
 
@@ -206,13 +215,13 @@ export class SessionStreamAggregator {
     }
   }
 
-  /** 返回当前时间线快照。 */
+  /** 返回当前时间线快照。只浅拷贝顶层数组，不再把执行树整棵复制一遍。 */
   snapshot(): SessionTimelineSnapshot {
     return {
-      messages: [...this.messages],
-      runtimeEvents: this.runtimeEvents.map((event) => this.cloneRuntimeEvent(event)),
+      messages: this.messages.slice(),
+      runtimeEvents: this.runtimeEvents.slice(),
       activeNodeKey: this.activeNodeKey,
-      artifacts: [...this.artifacts],
+      artifacts: this.artifacts.slice(),
       isStreaming: this.isStreaming,
       runStartedAt: this.runStartedAt,
       streamError: this.streamError,
@@ -264,7 +273,7 @@ export class SessionStreamAggregator {
           role: "system",
           kind: contentKind,
           content: event.content ?? "",
-          card: metadata as unknown as ChatCardPayload,
+          card: slimCardPayload(contentKind, metadata),
           turnId: event.turn_id ?? null,
           createdAt: event.timestamp ?? new Date().toISOString(),
         }),
@@ -345,7 +354,10 @@ export class SessionStreamAggregator {
       this.attachRoot(item);
     }
     // 每次子卡片变化后都重新汇总，父卡片始终等于所有子卡片之和。
-    this.recalculateTokenTotals();
+    // 重放历史时跳过，等全部事件走完再加一次。
+    if (!this.skipTokenTotals) {
+      this.recalculateTokenTotals();
+    }
 
     if (item.status === "failed") {
       this.status = "failed";
@@ -560,17 +572,51 @@ export class SessionStreamAggregator {
     const nodeKey = item.metadata.node_key;
     return typeof nodeKey === "string" ? nodeKey : null;
   }
+}
 
-  /** 复制执行事件树，避免 Vue 组件意外修改聚合器内部状态。 */
-  private cloneRuntimeEvent(event: UIRuntimeTimelineEvent): UIRuntimeTimelineEvent {
-    return {
-      ...event,
-      metadata: { ...event.metadata },
-      inputTokens: event.inputTokens,
-      outputTokens: event.outputTokens,
-      children: event.children.map((child) => this.cloneRuntimeEvent(child)),
-    };
+/** 把卡片事件收成界面真正要用的那一小份数据。精读卡片丢掉整份报告。 */
+function slimCardPayload(kind: ChatCardKind, metadata: Record<string, unknown>): ChatCardPayload {
+  if (kind === "deep_read_report") {
+    return slimDeepReadCard(metadata);
   }
+  return metadata as ChatCardPayload;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function scoreFrom(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  const record = asRecord(value);
+  if (typeof record.score === "number" && Number.isFinite(record.score)) {
+    return record.score;
+  }
+  return 0;
+}
+
+/** 精读卡片只留下标题、总结和四个分数，完整报告不进聊天快照。 */
+function slimDeepReadCard(metadata: Record<string, unknown>): DeepReadCardPayload {
+  const report = asRecord(metadata.report);
+  return {
+    kind: "deep_read_report",
+    paper_id: String(metadata.paper_id ?? report.paper_id ?? ""),
+    source: String(metadata.source ?? report.source ?? ""),
+    artifact_id: String(metadata.artifact_id ?? report.artifact_id ?? ""),
+    fulltext_available: Boolean(metadata.fulltext_available),
+    fulltext_failure_reason: String(metadata.fulltext_failure_reason ?? ""),
+    title: String(metadata.title ?? report.title ?? ""),
+    short_summary: String(metadata.short_summary ?? report.short_summary ?? ""),
+    overall_score: scoreFrom(metadata.overall_score ?? report.overall_score),
+    relevance: scoreFrom(metadata.relevance ?? report.relevance),
+    novelty: scoreFrom(metadata.novelty ?? report.novelty),
+    rigor: scoreFrom(metadata.rigor ?? report.rigor),
+    clarity: scoreFrom(metadata.clarity ?? report.clarity),
+  };
 }
 
 function normalizeDetailContent(value: RuntimeDetailContent | undefined): RuntimeDetailContent {

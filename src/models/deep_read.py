@@ -214,6 +214,38 @@ class DeepReadReport:
         # 结尾补一个换行，让文件以空行收尾（和综述 Markdown 产物的习惯保持一致）。
         return "\n\n".join(blocks).strip() + "\n"
 
+    def to_card_payload(
+        self,
+        *,
+        source: str,
+        fulltext_available: bool,
+        fulltext_failure_reason: str | None,
+        artifact_id: str,
+    ) -> JsonObject:
+        """拼一张对话流里的精读卡片，只带标题、一句话总结和分数。
+
+        中文说明：
+        完整报告已经写进工作区和产物文件了。卡片事件如果再塞一整份报告，
+        每次打开旧会话都要把这些大段文字搬到网页里，页面会卡。
+        卡片只需要让人认出是哪篇、分数多少；点「查看完整报告」再去工作区取全文。
+        """
+
+        return {
+            "kind": "deep_read_report",
+            "paper_id": self.paper_id,
+            "source": source,
+            "artifact_id": artifact_id or self.artifact_id,
+            "fulltext_available": fulltext_available,
+            "fulltext_failure_reason": fulltext_failure_reason or "",
+            "title": self.title,
+            "short_summary": self.short_summary,
+            "overall_score": self.overall_score,
+            "relevance": self.relevance.score,
+            "novelty": self.novelty.score,
+            "rigor": self.rigor.score,
+            "clarity": self.clarity.score,
+        }
+
     @classmethod
     def from_dict(cls, data: Any) -> "DeepReadReport":
         """从普通字典还原一份精读报告。
@@ -254,6 +286,40 @@ class DeepReadReport:
             artifact_id=str(payload.get("artifact_id") or ""),
             fulltext_artifact_id=str(payload.get("fulltext_artifact_id") or ""),
         )
+
+
+def slim_deep_read_card_metadata(inner: JsonObject) -> JsonObject:
+    """把历史卡片事件里可能带着的整份报告，收成卡片真正要展示的那几项。
+
+    中文说明：
+    以前的会话把完整报告写进了事件表。打开旧会话时，在发给前端之前
+    先收成预览字段，旧数据就不必再把整份报告送到网页里。
+    """
+
+    report = inner.get("report") if isinstance(inner.get("report"), dict) else {}
+    return {
+        "kind": "deep_read_report",
+        "paper_id": str(inner.get("paper_id") or report.get("paper_id") or ""),
+        "source": str(inner.get("source") or report.get("source") or ""),
+        "artifact_id": str(inner.get("artifact_id") or report.get("artifact_id") or ""),
+        "fulltext_available": bool(inner.get("fulltext_available")),
+        "fulltext_failure_reason": str(inner.get("fulltext_failure_reason") or ""),
+        "title": str(inner.get("title") or report.get("title") or ""),
+        "short_summary": str(inner.get("short_summary") or report.get("short_summary") or ""),
+        "overall_score": _clamp_score(inner.get("overall_score", report.get("overall_score"))),
+        "relevance": _dimension_score_value(inner.get("relevance", report.get("relevance"))),
+        "novelty": _dimension_score_value(inner.get("novelty", report.get("novelty"))),
+        "rigor": _dimension_score_value(inner.get("rigor", report.get("rigor"))),
+        "clarity": _dimension_score_value(inner.get("clarity", report.get("clarity"))),
+    }
+
+
+def _dimension_score_value(value: Any) -> int:
+    """从「整数」或「带 score 的字典」里取出 0-100 的分数。"""
+
+    if isinstance(value, dict):
+        return _clamp_score(value.get("score"))
+    return _clamp_score(value)
 
 
 def _render_section(heading: str, content: str | list[str]) -> str:

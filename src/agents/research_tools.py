@@ -28,9 +28,10 @@ from src.models.workspace import PaperEvaluation, SearchHistoryEntry, SessionWor
 from src.paper_retrieval.download import _find_fulltext_url, async_download_paper_fulltext
 from src.paper_retrieval.models import PaperDocument
 from src.paper_retrieval.service import PaperSearchService
+from src.services.paper_memory import import_memory_into_session
 from src.utils import get_logger
 
-from .deepReadAgent import DeepReadDeps, run_deep_read
+from .deepReadAgent import DeepReadDeps, REPORT_SUMMARY_CHARS, run_deep_read
 from .paperQaAgent import PaperQaDeps, run_paper_qa
 from .readAgent import evaluate_paper_relevance
 from .reviewPipeline import ReviewDeps, run_review
@@ -198,10 +199,13 @@ class ResearchToolContext:
 SEARCH_PAPERS_SPEC = ToolSpec(
     name="search_papers",
     description=(
-        "按结构化概念组搜索学术论文，结果自动去重后存入当前调研工作区，"
-        "并立即在前端展示论文卡片。概念组之间是 AND（必须同时命中），"
-        "组内是同义/近义写法的 OR（命中任一即可）。"
-        "适合用户提出新的调研方向、更换关键词或补充检索时使用。"
+        "搜索学术论文，结果自动去重后存入当前调研工作区，并立即在前端展示论文卡片。"
+        "按研究主题检索时填 concept_groups（组之间 AND，组内同义词 OR）。"
+        "用户要找已经知道标题的某一篇时，由你自己判断并把完整标题原样填进 title，"
+        "不要把标题拆成概念组，也不要询问用户要不要按标题搜。"
+        "title 和 concept_groups 至少填一个。"
+        "如果某篇论文以前已经全文精读过，结果里会带 recalled=true 和报告摘要，"
+        "不要再对它调用 deep_read_paper，除非用户明确要求重新精读。"
     ),
     parameters_schema={
         "type": "object",
@@ -209,6 +213,14 @@ SEARCH_PAPERS_SPEC = ToolSpec(
             "topic": {
                 "type": "string",
                 "description": "用一句中文描述当前研究主题（作为整体语境，不参与检索语法）",
+            },
+            "title": {
+                "type": "string",
+                "description": (
+                    "论文的完整标题。你判断用户是在找某一篇已知论文时填写，"
+                    "必须整段原样放入，不要拆词、不要翻译成关键词。"
+                    "填了 title 就不要再填 concept_groups。"
+                ),
             },
             "concept_groups": {
                 "type": "array",
@@ -226,7 +238,7 @@ SEARCH_PAPERS_SPEC = ToolSpec(
                     "必须同时命中 LLM 相关 AND kv cache 相关。"
                     "每组第一项应是规范写法，后续项放缩写、全称展开、连字符/去连字符变体。"
                     "不要放词形变化（如 quantize/quantized，检索引擎会自动做词干化）。"
-                    "所有词必须是英文。"
+                    "所有词必须是英文。用户给的是完整论文标题时不要用这个参数。"
                 ),
             },
             "sources": {
@@ -248,7 +260,7 @@ SEARCH_PAPERS_SPEC = ToolSpec(
                 "description": "排除词列表：标题或摘要命中这些词的论文会被过滤掉",
             },
         },
-        "required": ["concept_groups"],
+        "required": [],
     },
 )
 
@@ -383,13 +395,19 @@ DEEP_READ_PAPER_SPEC = ToolSpec(
     description=(
         "委派精读子 Agent 对一篇论文做全文精读：下载全文（拿不到全文时退回摘要）、"
         "分段阅读、汇总生成结构化精读报告并存为会话产物，前端会展示报告卡片。"
-        "已经精读过的论文会直接返回已有报告，不会重复精读。"
+        "已经精读过的论文默认直接返回已有报告。"
+        "用户明确要求重新精读、再读一遍时，把 force 设为 true："
+        "会清掉旧报告，用本地已经切好的正文片段重新读，不必先从工作区删掉这篇论文。"
     ),
     parameters_schema={
         "type": "object",
         "properties": {
             "paper_id": {"type": "string", "description": "论文编号，必须是工作区里已存在的编号"},
             "focus": {"type": "string", "description": "用户特别关心的角度，例如'重点看实验设置'；可不传"},
+            "force": {
+                "type": "boolean",
+                "description": "为 true 时丢掉已有报告并用本地正文片段重新精读；默认 false",
+            },
         },
         "required": ["paper_id"],
     },
@@ -524,6 +542,7 @@ async def _handle_search_papers(
     context: ResearchToolContext,
     *,
     topic: Any = "",
+    title: Any = "",
     concept_groups: Any = None,
     sources: Any = None,
     limit: Any = SEARCH_LIMIT_DEFAULT,
@@ -535,23 +554,26 @@ async def _handle_search_papers(
     """执行一次论文检索，把结果去重后存入工作区，并立即推送论文卡片。
 
     中文说明：
-    新版用结构化概念组表达检索意图，每个 connector 把它渲染成自己源的原生语法。
-    handler 在这里做程序化校验：拒绝中日韩字符（让主 Agent 自己翻译成英文）、
-    拒绝空概念组、截断单组同义词 ≤12 个、截断总组数 ≤4。
-
-    自动放宽策略（D4）：
-    第一次检索后结果少于 3 篇时，逐次丢掉列表末尾（最不重要）的概念组再重试，
-    直到只剩一个组或放宽次数用完。最多放宽 2 次，也就是最多检索 3 次。
-    放宽信息回灌给主 Agent，让它能跟用户解释。
+    按主题检索时用结构化概念组；用户要找已知标题的某一篇时，主 Agent 应把完整
+    标题放进 title。如果主 Agent 误把整段标题塞进了概念组，这里也会识别出来，
+    改走按标题检索，不再拆成布尔式。按标题检索不做自动放宽。
     """
 
     # 中文说明：清洗 topic。
     cleaned_topic = str(topic or "").strip()
 
-    # 中文说明：清洗并校验 concept_groups。
-    cleaned_groups = _normalize_concept_groups(concept_groups)
-    if not cleaned_groups:
-        return {"error": "concept_groups 不能为空，请至少给出一个概念组（每个概念组是一组同义词）"}
+    # 中文说明：主 Agent 自己判断后填的 title 优先；没填时看概念组是不是一整段标题。
+    cleaned_title = str(title or "").strip() or _infer_title_query(concept_groups)
+    cleaned_groups: list[list[str]] = []
+    if not cleaned_title:
+        cleaned_groups = _normalize_concept_groups(concept_groups)
+        if not cleaned_groups:
+            return {
+                "error": (
+                    "请提供检索意图：找某一篇已知论文时填写完整 title；"
+                    "按主题检索时填写 concept_groups（每个概念组是一组同义词）"
+                )
+            }
 
     cleaned_limit = _clamp_int(limit, SEARCH_LIMIT_MIN, SEARCH_LIMIT_MAX, SEARCH_LIMIT_DEFAULT)
     cleaned_sources = _normalize_sources(sources)
@@ -562,27 +584,23 @@ async def _handle_search_papers(
         extra={
             "session_key": context.session_key,
             "topic": cleaned_topic[:120],
+            "title": cleaned_title[:160],
             "group_count": len(cleaned_groups),
             "limit": cleaned_limit,
             "sources": cleaned_sources or "all",
         },
     )
 
-    # 中文说明：核心检索 + 自动放宽循环。
-    # 每轮用当前的概念组检索一次；结果少于 3 篇且还有多个组时，
-    # 丢掉列表末尾（最不重要）的那个组再来一轮，直到只剩一个组或放宽次数用完。
-    # 最多放宽 2 次，也就是最多检索 3 次。
     service = PaperSearchService()
-    current_groups = cleaned_groups
     relaxation_applied = False
     relaxation_description = ""
-    relaxations = 0
-    response = None
 
-    for attempt in range(MAX_RELAXATIONS + 1):
+    if cleaned_title:
+        # 中文说明：按标题检索只搜一次，不要把标题拆开再放宽。
         response = await service.async_search(
             topic=cleaned_topic,
-            concept_groups=current_groups,
+            title=cleaned_title,
+            concept_groups=None,
             sources=cleaned_sources or None,
             limit=cleaned_limit,
             year_from=_optional_int(year_from),
@@ -590,77 +608,117 @@ async def _handle_search_papers(
             excluded_terms=cleaned_excluded,
             runtime_resources=context.resources,
         )
+    else:
+        # 中文说明：核心检索 + 自动放宽循环。
+        # 每轮用当前的概念组检索一次；结果少于 3 篇且还有多个组时，
+        # 丢掉列表末尾（最不重要）的那个组再来一轮，直到只剩一个组或放宽次数用完。
+        # 最多放宽 2 次，也就是最多检索 3 次。
+        current_groups = cleaned_groups
+        relaxations = 0
+        response = None
 
-        # 中文说明：结果够多（≥3 篇）或已不能再放宽（只剩 1 个组），退出循环。
-        if len(response.papers) >= 3 or len(current_groups) <= 1:
-            break
-        # 中文说明：放宽次数用完了就停。这一步不能省：概念组最多有 4 个，
-        # 若只按上面的条件退，会出现"这轮已经丢掉一个组、描述也写好了，
-        # 但循环正好用完、那一轮根本没检索"的假描述。
-        if relaxations >= MAX_RELAXATIONS:
-            break
+        for attempt in range(MAX_RELAXATIONS + 1):
+            response = await service.async_search(
+                topic=cleaned_topic,
+                concept_groups=current_groups,
+                sources=cleaned_sources or None,
+                limit=cleaned_limit,
+                year_from=_optional_int(year_from),
+                year_to=_optional_int(year_to),
+                excluded_terms=cleaned_excluded,
+                runtime_resources=context.resources,
+            )
 
-        # 中文说明：放宽——丢掉最后一个（也是最不重要的）概念组。
-        relaxations += 1
-        relaxation_applied = True
-        dropped = [current_groups[-1][0]]
-        current_groups = current_groups[:-1]
-        relaxation_description = (
-            f"第 {attempt + 1} 次检索只得到 {len(response.papers)} 篇，"
-            f"已放弃概念组 {dropped}，"
-            f"当前使用 {[g[0] for g in current_groups]}"
-        )
-        logger.info(
-            "search_papers 自动放宽",
-            extra={
-                "session_key": context.session_key,
-                "attempt": attempt + 1,
-                "previous_count": len(response.papers),
-                "relaxation_description": relaxation_description,
-            },
-        )
+            # 中文说明：结果够多（≥3 篇）或已不能再放宽（只剩 1 个组），退出循环。
+            if len(response.papers) >= 3 or len(current_groups) <= 1:
+                break
+            # 中文说明：放宽次数用完了就停。这一步不能省：概念组最多有 4 个，
+            # 若只按上面的条件退，会出现"这轮已经丢掉一个组、描述也写好了，
+            # 但循环正好用完、那一轮根本没检索"的假描述。
+            if relaxations >= MAX_RELAXATIONS:
+                break
+
+            # 中文说明：放宽——丢掉最后一个（也是最不重要的）概念组。
+            relaxations += 1
+            relaxation_applied = True
+            dropped = [current_groups[-1][0]]
+            current_groups = current_groups[:-1]
+            relaxation_description = (
+                f"第 {attempt + 1} 次检索只得到 {len(response.papers)} 篇，"
+                f"已放弃概念组 {dropped}，"
+                f"当前使用 {[g[0] for g in current_groups]}"
+            )
+            logger.info(
+                "search_papers 自动放宽",
+                extra={
+                    "session_key": context.session_key,
+                    "attempt": attempt + 1,
+                    "previous_count": len(response.papers),
+                    "relaxation_description": relaxation_description,
+                },
+            )
 
     if response is None:
         return {"error": "检索未执行"}
 
     # 中文说明：把工作区落盘（同步文件 IO）放进线程，避免卡住事件循环。
     # 并行执行时多个工具可能同时写工作区，用 workspace_lock 互斥。
+    # 紧接着按本机长期记忆召回已经精读过的同一篇论文，也在这把锁里做，
+    # 避免召回写报告时和别的工具互相覆盖。
     async with context.workspace_lock:
         outcomes = await asyncio.to_thread(
             context.workspace.upsert_papers,
             [paper.to_dict() for paper in response.papers],
         )
+        memory_by_id = await _recall_papers_memory(context, outcomes, response.papers)
 
     # 中文说明：组装论文卡片。卡片同时服务前端展示（完整字段）和模型阅读（精简字段）。
     added = sum(1 for _, is_new in outcomes if is_new)
     duplicated = sum(1 for paper_id, is_new in outcomes if paper_id and not is_new)
+    recalled = sum(1 for item in memory_by_id.values() if item.get("recalled"))
     cards: list[JsonObject] = []
     llm_view: list[JsonObject] = []
     for (paper_id, is_new), paper in zip(outcomes, response.papers):
         if not paper_id:
             continue
         payload = paper.to_dict()
-        cards.append(_paper_card(payload, paper_id))
-        llm_view.append(_paper_llm_view(payload, paper_id))
+        memory = memory_by_id.get(paper_id) or {}
+        card = _paper_card(payload, paper_id)
+        workspace_entry = context.workspace.get_paper(paper_id)
+        card["status"] = workspace_entry.status() if workspace_entry else "new"
+        if memory.get("recalled"):
+            card["recalled"] = True
+        cards.append(card)
+        view = _merge_memory_into_view(_paper_llm_view(payload, paper_id), memory)
+        llm_view.append(view)
 
     # 中文说明：立即推送 paper_list 卡片（协议：message 事件 metadata.kind="paper_list"）。
     # role 用 system 是为了不干扰 run 服务里"助手消息缓冲区"对最终回复的聚合。
     if cards:
+        content = f"检索完成：新增 {added} 篇，重复 {duplicated} 篇"
+        if recalled:
+            content += f"，召回历史精读 {recalled} 篇"
         context.reporter.message(
             role="system",
-            content=f"检索完成：新增 {added} 篇，重复 {duplicated} 篇",
+            content=content,
             metadata={
                 "kind": "paper_list",
                 "papers": cards,
                 "added": added,
                 "duplicated": duplicated,
+                "recalled": recalled,
                 "topic": cleaned_topic,
+                "title": cleaned_title,
                 "concept_groups": cleaned_groups,
             },
         )
 
     # 中文说明：给主 Agent 返回精简结果；个别数据源出错时如实告知，方便它换路重试。
     result: JsonObject = {"added": added, "duplicated": duplicated, "papers": llm_view}
+    if recalled:
+        result["recalled"] = recalled
+    if cleaned_title:
+        result["matched_by_title"] = cleaned_title
     if response.errors:
         result["source_errors"] = dict(response.errors)
     # 中文说明：放宽信息回灌给主 Agent，让它能跟用户解释。
@@ -671,7 +729,7 @@ async def _handle_search_papers(
     # 中文说明：记录检索历史（D5），注入主 Agent 系统提示词防止重复检索。
     # 每组取第一个同义词作代表，拼成简短摘要。
     try:
-        summary = ", ".join(g[0] for g in (cleaned_groups or []) if g)
+        summary = cleaned_title or ", ".join(g[0] for g in (cleaned_groups or []) if g)
         history_entry = SearchHistoryEntry(
             topic=cleaned_topic,
             concept_groups_summary=summary[:200],
@@ -690,6 +748,53 @@ async def _handle_search_papers(
         extra={"session_key": context.session_key, "added": added, "duplicated": duplicated},
     )
     return result
+
+
+def _infer_title_query(raw: Any) -> str:
+    """主 Agent 如果把整段标题塞进了概念组，这里当成按标题检索，不再拆布尔。
+
+    中文说明：这是程序侧的兜底。正常情况主 Agent 应自己判断并填写 title。
+    但模型有时仍会把完整标题放进一个只有一项的概念组。出现下面任一情况就认成标题：
+    - 只有一组、只有一个词，且里面有中日韩文字（概念组本来不允许中文，说明这是标题）；
+    - 只有一组、只有一个词，且至少有 4 个英文单词（短关键词不算标题）。
+    多个概念组、或一组里有多个同义词，仍按主题检索处理。
+    """
+
+    phrases: list[str] = []
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text:
+            phrases = [text]
+    elif isinstance(raw, list) and raw:
+        if all(isinstance(item, str) for item in raw):
+            phrases = [str(item).strip() for item in raw if str(item).strip()]
+        elif len(raw) == 1 and isinstance(raw[0], list):
+            phrases = [str(item).strip() for item in raw[0] if str(item).strip()]
+    if len(phrases) != 1:
+        return ""
+    phrase = phrases[0]
+    if re.search(r"[一-鿿぀-ゟ゠-ヿ가-힣]", phrase):
+        # 中文说明：短中文更像研究主题，概念组本来就要求译成英文。只有足够长、
+        # 或带了书名号，才更像一篇论文的完整标题。
+        if "《" in phrase or "》" in phrase or len(phrase) >= 15:
+            return phrase
+        return ""
+    if len(phrase.split()) >= 4:
+        return phrase
+    return ""
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    """把模型传来的 force 一类参数收成真正的真假值。"""
+
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "y"}:
+        return True
+    if text in {"0", "false", "no", "n", ""}:
+        return False
+    return default
 
 
 def _normalize_concept_groups(raw: Any) -> list[list[str]]:
@@ -733,6 +838,63 @@ def _normalize_concept_groups(raw: Any) -> list[list[str]]:
             cleaned.append(group_terms)
 
     return cleaned
+
+
+async def _recall_papers_memory(
+    context: ResearchToolContext,
+    outcomes: list[tuple[str, bool]],
+    papers: list[PaperDocument],
+) -> dict[str, JsonObject]:
+    """对刚写入工作区的论文，按本机长期记忆召回已经全文精读过的报告。
+
+    中文说明：
+    同一篇论文以前在别的会话里精读过，这次检索编号字符串可能不一样。
+    这里按 DOI / arXiv / 标题去对，对上了就把报告和全文拷进当前会话。
+    返回值按工作区编号索引，后面组装卡片和给模型看的摘要都从这里取。
+    """
+
+    recalled: dict[str, JsonObject] = {}
+    for (paper_id, _is_new), paper in zip(outcomes, papers):
+        if not paper_id:
+            continue
+        payload = paper.to_dict()
+        try:
+            result = await asyncio.to_thread(
+                import_memory_into_session,
+                paper_id=paper_id,
+                paper=payload,
+                workspace=context.workspace,
+                repo=context.repo,
+                session_key=context.session_key,
+            )
+        except Exception as exc:
+            logger.warning(
+                "召回论文长期记忆失败，按普通检索结果继续",
+                extra={"paper_id": paper_id, "error": str(exc)[:200]},
+            )
+            recalled[paper_id] = {"recalled": False, "has_chunks": False, "has_report": False}
+            continue
+        item: JsonObject = {
+            "recalled": bool(result.recalled),
+            "has_chunks": bool(result.has_chunks),
+            "has_report": result.report is not None,
+        }
+        if result.report is not None:
+            item["source"] = result.report.source
+            summary = (result.report.short_summary or "")[:REPORT_SUMMARY_CHARS]
+            if summary:
+                item["report_summary"] = _UNTRUSTED_SUBAGENT_NOTE + summary
+        recalled[paper_id] = item
+    return recalled
+
+
+def _merge_memory_into_view(view: JsonObject, memory: JsonObject) -> JsonObject:
+    """把召回结果贴到给模型看的论文摘要上。"""
+
+    for key in ("recalled", "has_chunks", "has_report", "source", "report_summary"):
+        if key in memory:
+            view[key] = memory[key]
+    return view
 
 
 def _paper_card(paper: JsonObject, paper_id: str) -> JsonObject:
@@ -836,41 +998,49 @@ async def _handle_expand_by_citations(
         logger.exception("引文图扩展检索失败", extra={"paper_id": paper_id, "direction": direction})
         return {"error": f"引用扩展检索失败：{exc}"}
 
-    # 第四步：去重后并入工作区。
+    # 第四步：去重后并入工作区，并按本机长期记忆召回已经精读过的同一篇。
     async with context.workspace_lock:
         outcomes = await asyncio.to_thread(
             context.workspace.upsert_papers,
             [paper.to_dict() for paper in response.papers],
         )
+        memory_by_id = await _recall_papers_memory(context, outcomes, response.papers)
     added = sum(1 for _, is_new in outcomes if is_new)
     duplicated = sum(1 for pid, is_new in outcomes if pid and not is_new)
+    recalled = sum(1 for item in memory_by_id.values() if item.get("recalled"))
 
     # 第五步：组装卡片推给前端。
-    # 中文注释：response.papers 里是 PaperDocument 对象，要先 to_dict() 转成字典
-    # 再传给 _paper_card / _paper_llm_view，和 _handle_search_papers 保持一致。
+    # 中文注释：必须用 upsert 返回的工作区编号，不能用检索结果里当时的 paperId——
+    # 同一篇论文以前用另一个编号进过工作区时，现在要对上原来那条，编号才对得上。
     cards: list[JsonObject] = []
     llm_view: list[JsonObject] = []
-    for paper in response.papers:
-        payload = paper.to_dict()
-        pid = str(payload.get("paperId") or payload.get("id") or "")
+    for (pid, is_new), paper in zip(outcomes, response.papers):
         if not pid:
             continue
+        payload = paper.to_dict()
+        memory = memory_by_id.get(pid) or {}
         card = _paper_card(payload, pid)
-        # 刚 upsert 进工作区的论文一定存在，用局部变量避免重复查找
-        entry = context.workspace.get_paper(pid)
-        card["status"] = entry.status() if entry else "new"
+        workspace_entry = context.workspace.get_paper(pid)
+        card["status"] = workspace_entry.status() if workspace_entry else "new"
+        if memory.get("recalled"):
+            card["recalled"] = True
         cards.append(card)
-        llm_view.append(_paper_llm_view(payload, pid))
+        view = _merge_memory_into_view(_paper_llm_view(payload, pid), memory)
+        llm_view.append(view)
 
     if cards:
+        content = f"引文扩展：{direction} 方向找到 {len(cards)} 篇论文"
+        if recalled:
+            content += f"，其中召回历史精读 {recalled} 篇"
         context.reporter.message(
             role="assistant",
-            content=f"引文扩展：{direction} 方向找到 {len(cards)} 篇论文",
+            content=content,
             metadata={
                 "kind": "paper_list",
                 "papers": cards,
                 "added": added,
                 "duplicated": duplicated,
+                "recalled": recalled,
                 "action": "expand",
                 "direction": direction,
                 "seed_paper_id": paper_id,
@@ -883,6 +1053,7 @@ async def _handle_expand_by_citations(
         "external_ref": external_ref,
         "added": added,
         "duplicated": duplicated,
+        "recalled": recalled,
         "papers": llm_view,
         "source_errors": dict(response.errors),
     }
@@ -1368,11 +1539,12 @@ async def _handle_deep_read_paper(
     *,
     paper_id: str = "",
     focus: str = "",
+    force: Any = False,
     **_ignored: Any,
 ) -> JsonObject:
     """委派精读子 Agent 对一篇论文做全文精读，生成结构化精读报告。
 
-    已经精读过的论文会直接返回已有报告（缓存命中），不会重复精读。
+    已经精读过的论文默认直接返回已有报告；force=true 时清掉旧报告并用本地片段重读。
     """
 
     # 第一步：按编号取出论文，工作区里没有就直接告诉主 Agent 找不到。
@@ -1401,7 +1573,12 @@ async def _handle_deep_read_paper(
     )
 
     # 第四步：委派精读子 Agent 执行完整精读流程。
-    result = await run_deep_read(paper_id=cleaned, focus=str(focus or "").strip(), deps=deps)
+    result = await run_deep_read(
+        paper_id=cleaned,
+        focus=str(focus or "").strip(),
+        force=_coerce_bool(force),
+        deps=deps,
+    )
 
     # 第五步：给回流给主 Agent 的报告摘要加"不可信数据"框定。
     # 中文注释：report_summary 是子节点读了外部论文原文后写出来的，恶意论文

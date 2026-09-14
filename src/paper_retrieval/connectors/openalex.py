@@ -92,8 +92,12 @@ class OpenAlexPaperConnector(PaperSearchConnector):
         跟研究主题无关的高分热门论文。
         """
 
-        # 中文说明：先渲染概念组。渲染不出东西就直接返回 None，让调用方跳过本次请求。
-        concept_filter = self._render_concept_groups(request)
+        # 中文说明：先渲染检索条件。没有标题、概念组也为空时返回 None，让调用方跳过本次请求。
+        title = request.normalized_title()
+        if title:
+            concept_filter = f'display_name.search:"{title}"'
+        else:
+            concept_filter = self._render_concept_groups(request)
         if not concept_filter:
             return None
 
@@ -114,9 +118,11 @@ class OpenAlexPaperConnector(PaperSearchConnector):
         if request.year_to is not None:
             filters.append(f"to_publication_date:{request.year_to}-12-31")
 
-        # 中文说明：过滤掉非文章类型（社论、书信等），且要求有摘要（便于后续评分）。
+        # 中文说明：过滤掉非文章类型（社论、书信等）。按标题找某一篇时不再要求必须有摘要，
+        # 避免那篇论文刚好没摘要就被滤掉。按主题用概念组检索时仍要求有摘要，方便后续评分。
         filters.append("type:article|review|preprint")
-        filters.append("has_abstract:true")
+        if not title:
+            filters.append("has_abstract:true")
 
         params: dict[str, str | int] = {
             # 中文说明：filter 形式检索时，顶层 search= 不再需要（传空或不传）。

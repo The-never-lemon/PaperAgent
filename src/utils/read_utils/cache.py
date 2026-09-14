@@ -28,6 +28,8 @@ def paper_cache_dir(base_dir: str | Path, paper: PaperDocument) -> Path:
 
     中文注释：需求里希望用 paperId 作为目录名。Windows 文件名不能包含斜杠、
     冒号这类字符，所以这里只做很薄的一层清理，不再用哈希隐藏原始编号。
+    同一篇论文后来换了编号时，请用 src.services.paper_memory.resolve_paper_cache_dir
+    先查长期记忆里记下的目录，再退回这个按当前编号起名的结果。
     """
 
     paper_id = str(paper.paperId or paper.id or paper.doi or paper.title).strip()

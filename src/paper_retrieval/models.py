@@ -106,18 +106,32 @@ class SearchRequest:
       必须同时命中 LLM 相关 AND kv cache 相关。每个 connector 把它渲染成自己源的原生语法。
     - topic：用一句自然语言描述当前研究主题。它**不参与检索语法**，也不参与排序，
       只用于日志和调试时说明"这次查询想找什么"。
+    - title：已经知道论文完整标题时使用。有 title 时各检索源按标题字段检索，
+      不再把标题拆成概念组。title 由主 Agent 自己判断后填写，不是用户选的模式。
 
     这样就把"模型怎么表达意图"与"每个源怎么执行检索"彻底隔离了。
     """
 
     topic: str = ""
     concept_groups: list[list[str]] = field(default_factory=list)
+    # 中文说明：用户要找「已经知道标题的那一篇」时，主 Agent 把完整标题放这里。
+    # 有标题时各检索源按标题字段搜，不再把标题拆成概念组去做布尔匹配。
+    title: str = ""
     source: str | None = None
     sources: list[str] = field(default_factory=list)
     limit: int = 10
     year_from: int | None = None
     year_to: int | None = None
     excluded_terms: list[str] = field(default_factory=list)
+
+    def normalized_title(self) -> str:
+        """整理按标题检索用的字符串：去掉首尾空白，并把标题里的双引号换成空格。
+
+        中文说明：三个检索源都用引号把标题当成一整句去搜。标题本身再带双引号，
+        查询串会被提前截断。这里只做这一处清理，不改大小写、也不拆词。
+        """
+
+        return " ".join(str(self.title or "").replace('"', " ").split())
 
 
 @dataclass(slots=True)

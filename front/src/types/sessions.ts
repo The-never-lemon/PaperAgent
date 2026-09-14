@@ -157,8 +157,8 @@ export interface UISessionMessage {
   artifactRefs: Array<Record<string, unknown>>;
   turnId: string | null;
   createdAt: string | null;
-  // 中文注释：卡片消息（paper_list / deep_read_report / review）的完整载荷，
-  // 来自 message 事件的 metadata；普通文本消息为 null。
+  // 中文注释：卡片消息（paper_list / deep_read_report / review）的预览载荷，
+  // 来自 message 事件的 metadata；精读卡片不含完整报告。普通文本消息为 null。
   card?: ChatCardPayload | null;
 }
 

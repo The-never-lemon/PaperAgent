@@ -32,9 +32,11 @@ class SemanticScholarPaperConnector(PaperSearchConnector):
     #                         没有相关度排序（sort=relevance:desc → HTTP 400），但匿名配额宽松且稳定，
     #                         支持服务端过滤（year / minCitationCount / fieldsOfStudy / openAccessPdf）
     #                         和按 citationCount 排序，作为高精确度检索的主端点最合适。
-    # - /paper/search/match   单条标题精确匹配，不适合批量检索。
-    # 因此这里切到 bulk 端点；缺失的相关度排序由 service 层的 RRF 融合和引用数排序弥补。
+    # - /paper/search/match   按标题找最接近的一篇，适合用户已经知道论文标题的场景。
+    # 主题检索走 bulk 端点；缺失的相关度排序由 service 层的 RRF 融合和引用数排序弥补。
+    # 按标题检索优先走 match 端点，找不到再退回 bulk 把整段标题当短语搜。
     _endpoint = "https://api.semanticscholar.org/graph/v1/paper/search/bulk"
+    _match_endpoint = "https://api.semanticscholar.org/graph/v1/paper/search/match"
     # 中文说明：bulk 端点请求的字段清单。相比旧版新增了 5 个关键字段：
     # - citationCount / influentialCitationCount / referenceCount：引用相关数据，
     #   既是重排打分的重要信号（"高引论文优先"），也是服务端 minCitationCount 下推的前提。
@@ -108,7 +110,13 @@ class SemanticScholarPaperConnector(PaperSearchConnector):
     def search(self, request: SearchRequest) -> list[PaperDocument]:
         """执行 Semantic Scholar 检索，并在 connector 内完成查询拼装。"""
 
-        # 中文说明：先拼参数。没有检索意图（概念组为空）就直接返回，
+        # 中文说明：用户要找已知标题的那一篇时，先走标题匹配接口；
+        # 匹配不到再退回 bulk，把整段标题当短语搜。
+        if request.normalized_title():
+            matched = self._title_match_sync(request)
+            if matched:
+                return matched
+        # 中文说明：先拼参数。没有检索意图（没有标题、概念组也为空）就直接返回，
         # 连下面那道 1 秒限速门都不用等。
         params = self._params(request)
         if params is None:
@@ -132,7 +140,12 @@ class SemanticScholarPaperConnector(PaperSearchConnector):
         本阶段只取第一页（bulk 默认返回 1000 条，对于 limit ≤ 15 的场景已经完全够用）。
         """
 
-        # 中文说明：先拼参数。没有检索意图（概念组为空）就直接返回，
+        # 中文说明：按标题检索时先走匹配接口，找不到再退回 bulk。
+        if request.normalized_title():
+            matched = await self._title_match_async(request, client=client)
+            if matched:
+                return matched
+        # 中文说明：先拼参数。没有检索意图（没有标题、概念组也为空）就直接返回，
         # 连下面那道 1 秒限速门都不用等。
         params = self._params(request)
         if params is None:
@@ -167,12 +180,12 @@ class SemanticScholarPaperConnector(PaperSearchConnector):
         - year：服务端下推年份过滤（连字符区间，如 2020-2024）。
         - limit：bulk 端点会完全忽略这个参数（实测传 limit=5 仍返回 1000 条），所以不发送。
 
-        返回 None 表示"这次没有可执行的检索意图"（概念组为空）。bulk 端点收到空 query
+        返回 None 表示"这次没有可执行的检索意图"（没有标题、概念组也为空）。bulk 端点收到空 query
         不会报错，但返回的是一批与主题无关的论文，所以必须提前拦住。
         """
 
-        # 中文说明：先渲染查询串。渲染不出东西就直接返回 None，让调用方跳过本次请求。
-        query = self._render_concept_groups(request)
+        # 中文说明：先渲染查询串。有完整标题时把标题当一句短语；否则走概念组布尔式。
+        query = self._render_query(request)
         if not query:
             return None
 
@@ -323,6 +336,105 @@ class SemanticScholarPaperConnector(PaperSearchConnector):
         # 中文说明：无法识别的形式，返回空串让调用方短路返回 []。
         return ""
 
+
+    def _render_query(self, request: SearchRequest) -> str:
+        """生成 bulk 端点的 query：有标题用整句短语，否则走概念组。"""
+
+        title = request.normalized_title()
+        if title:
+            return self._render_title_query(request, title)
+        return self._render_concept_groups(request)
+
+    def _render_title_query(self, request: SearchRequest, title: str) -> str:
+        """把完整标题写成 bulk 端点能认的一句短语。
+
+        中文说明：这是标题匹配接口找不到时的退路。整段标题加双引号，不拆成 AND/OR。
+        """
+
+        query = f'"{title}"'
+        if request.excluded_terms:
+            for term in request.excluded_terms:
+                term = str(term).strip()
+                if term:
+                    query = f"{query} -{term}"
+        return query
+
+    def _title_match_sync(self, request: SearchRequest) -> list[PaperDocument]:
+        """同步调用 Semantic Scholar 的标题匹配接口。"""
+
+        title = request.normalized_title()
+        if not title:
+            return []
+        self._enforce_sync_spacing()
+        try:
+            response = self.client.get(
+                self._match_endpoint,
+                params={"query": title, "fields": self._fields},
+            )
+        except Exception:
+            return []
+        if response.status_code != 200:
+            return []
+        return self._parse_match_payload(response.json(), request)
+
+    async def _title_match_async(
+        self,
+        request: SearchRequest,
+        *,
+        client: httpx.AsyncClient | None = None,
+    ) -> list[PaperDocument]:
+        """异步调用 Semantic Scholar 的标题匹配接口。"""
+
+        title = request.normalized_title()
+        if not title:
+            return []
+        await self._enforce_async_spacing()
+        resolved_client = client or httpx.AsyncClient(timeout=self._timeout_seconds)
+        owns_client = client is None
+        try:
+            try:
+                response = await resolved_client.get(
+                    self._match_endpoint,
+                    params={"query": title, "fields": self._fields},
+                    headers=self.headers,
+                    timeout=self._timeout_seconds,
+                )
+            except Exception:
+                return []
+            if response.status_code != 200:
+                return []
+            return self._parse_match_payload(response.json(), request)
+        finally:
+            if owns_client:
+                await resolved_client.aclose()
+
+    def _parse_match_payload(self, payload: object, request: SearchRequest) -> list[PaperDocument]:
+        """把标题匹配接口的响应收成论文列表。
+
+        中文说明：这个接口有时给 {data: [论文]}，有时 data 里只有一篇对象，
+        有时直接就是那篇论文。三种形状都认，认不出就当没找到。
+        """
+
+        items: list[object] = []
+        if isinstance(payload, dict):
+            data = payload.get("data", payload)
+            if isinstance(data, list):
+                items = list(data)
+            elif isinstance(data, dict):
+                items = [data]
+        elif isinstance(payload, list):
+            items = list(payload)
+        papers: list[PaperDocument] = []
+        for item in items:
+            paper = self.normalize_paper(item)
+            if paper is None:
+                continue
+            if not self._within_year_range(paper, request):
+                continue
+            if self._contains_excluded_terms(paper, request.excluded_terms):
+                continue
+            papers.append(paper)
+        return papers[: request.limit]
 
     def _render_concept_groups(self, request: SearchRequest) -> str:
         """把结构化概念组渲染成 Semantic Scholar bulk 端点的 query 串。

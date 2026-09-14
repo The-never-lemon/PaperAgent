@@ -21,10 +21,10 @@ from src.utils import get_logger
 from src.utils.read_utils.cache import (
     CACHED_FULLTEXT_NAMES,
     PRIMARY_PDF_NAME,
-    paper_cache_dir,
     read_cached_source_url,
     write_metadata,
 )
+from src.services.paper_memory import resolve_paper_cache_dir
 
 
 # 中文注释：模块级日志器，本文件里所有下载相关的日志都通过它输出。
@@ -78,7 +78,7 @@ async def async_download_paper_fulltext(
 ) -> DownloadedPaper:
     """异步下载论文全文，并优先复用当前 run 的下载资源。"""
 
-    paper_dir = paper_cache_dir(cache_dir, paper)
+    paper_dir = resolve_paper_cache_dir(cache_dir, paper)
     cached = _find_cached_file(paper_dir)
     if cached is not None:
         return DownloadedPaper(

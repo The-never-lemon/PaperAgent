@@ -11,6 +11,7 @@ from typing import Any
 from src.models.deep_read import DeepReadReport
 from src.models.read_models import MATCH_LEVEL_FIELDS, calculate_relevance_score, normalize_match_levels
 from src.models.sessions import utc_now
+from src.paper_retrieval.identity import papers_match
 from src.utils import get_logger
 
 
@@ -424,9 +425,10 @@ class SessionWorkspace:
     def upsert_papers(self, papers: list[JsonObject]) -> list[tuple[str, bool]]:
         """把一批检索到的论文放进工作区，最后只落盘一次。
 
-        去重规则和检索服务保持一致：优先用 paperId，其次 id、doi，
-        最后用标题兜底。已经存在的论文不会重复添加，只会用新拿到的
-        元数据补齐原来缺失的字段（已有的评分和精读报告不动）。
+        去重规则和检索服务保持一致：DOI、arXiv 编号、整理过的标题对上了，
+        就当成同一篇。已经在工作区里的论文不会新开一条，只会把原来空着的
+        元数据补上（评分和精读报告不动）。工作区里的论文编号保持第一次
+        收录时的值，聊天记录里的 [paper_id] 引用才不会断。
 
         Returns:
             与输入顺序一致的列表，每项是 (论文编号, 是否是新增论文)；
@@ -441,8 +443,9 @@ class SessionWorkspace:
                 # 连标题都没有的数据没法建档，直接丢弃，避免产生空壳条目。
                 outcomes.append(("", False))
                 continue
-            existing = self.papers.get(paper_id)
-            if existing is not None:
+            existing_id = self._find_existing_paper_id(paper)
+            if existing_id:
+                existing = self.papers[existing_id]
                 # 已存在：只把原来为空的元数据字段补上，评分/精读等状态保持原样。
                 merged = dict(existing.paper)
                 for key, value in paper.items():
@@ -451,7 +454,7 @@ class SessionWorkspace:
                 if merged != existing.paper:
                     existing.paper = merged
                     changed = True
-                outcomes.append((paper_id, False))
+                outcomes.append((existing_id, False))
                 continue
             self.papers[paper_id] = WorkspacePaperEntry(paper=dict(paper))
             changed = True
@@ -460,6 +463,23 @@ class SessionWorkspace:
         if changed:
             self.save()
         return outcomes
+
+    def _find_existing_paper_id(self, paper: JsonObject) -> str:
+        """在当前工作区里找是不是已经收过同一篇论文，找到就返回原来的编号。
+
+        中文说明：
+        先按工作区主键（第一次收录时的 paperId）精确查找，这是最快的路径。
+        找不到再拿 DOI / arXiv / 标题去对现有条目——同一篇论文这次从别的
+        数据源回来、编号字符串不一样时，靠这一步才能认出是旧的那篇。
+        """
+
+        direct_id = paper_identity(paper)
+        if direct_id and direct_id in self.papers:
+            return direct_id
+        for existing_id, entry in self.papers.items():
+            if papers_match(entry.paper, paper):
+                return existing_id
+        return ""
 
     def get_paper(self, paper_id: str) -> WorkspacePaperEntry | None:
         """按论文编号读取工作区里的论文状态，不存在时返回 None。"""
@@ -535,6 +555,21 @@ class SessionWorkspace:
         if entry is None:
             return False
         entry.deep_read = report
+        self.save()
+        return True
+
+    def clear_deep_read(self, paper_id: str) -> bool:
+        """去掉一篇论文的精读报告，论文本身留在工作区。
+
+        中文注释：用户要「再精读一遍」时，不能把论文从工作区删掉再重新检索。
+        这里只把旧报告清掉，评价、加星、本地全文缓存都不动。清掉之后这篇
+        论文的状态会从「已精读」回到「已评价」或「未评价」。
+        """
+
+        entry = self.get_paper(paper_id)
+        if entry is None or entry.deep_read is None:
+            return False
+        entry.deep_read = None
         self.save()
         return True
 
@@ -654,9 +689,13 @@ class SessionWorkspace:
 
 
 def paper_identity(paper: JsonObject) -> str:
-    """从论文元数据字典里取出稳定的论文编号。
+    """从论文元数据字典里取出工作区主键。
 
-    优先级和检索服务的去重键一致：paperId > id > doi > 标题。
+    中文说明：
+    工作区字典的键必须稳定，聊天记录里的 [paper_id] 引用靠它。
+    这里仍按第一次见到的原始编号取值（paperId > id > doi > 标题），
+    不去做成归一后的 doi: / arxiv: 形式。同一篇论文换编号进来时，
+    由 upsert_papers 按别名合并到已有条目，不会改掉这个主键。
     编号会去掉首尾空白；什么都没有时返回空字符串。
     """
 

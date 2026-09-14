@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, fields
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
@@ -29,9 +30,15 @@ from src.models.sessions import utc_now
 from src.models.workspace import sanitize_for_filename
 from src.paper_retrieval.download import async_download_paper_fulltext
 from src.paper_retrieval.models import PaperDocument
+from src.services.paper_memory import record_fulltext_deep_read, resolve_paper_cache_dir
 from src.utils import get_logger
 from src.utils.llm_json import parse_llm_json
-from src.utils.read_utils.chunkers import async_build_chunks_file
+from src.utils.read_utils.chunkers import (
+    CHUNKER_VERSION,
+    PageChunker,
+    async_build_chunks_file,
+    load_chunks_file,
+)
 from src.utils.read_utils.figure_reader import collect_paper_figures, read_figure_notes
 from src.utils.read_utils.read_fulltext import async_convert_fulltext_to_markdown
 
@@ -44,8 +51,6 @@ from .Prompts import (
 
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from src.graph.runtime import WorkflowCancellation, WorkflowNodeReporter
     from src.graph.runtime_resources import WorkflowRuntimeResources
     from src.llm import ProviderSnapshot
@@ -136,7 +141,7 @@ class DeepReadDeps:
 # ---------------------------------------------------------------------------
 
 
-async def run_deep_read(*, paper_id: str, focus: str = "", deps: DeepReadDeps) -> JsonObject:
+async def run_deep_read(*, paper_id: str, focus: str = "", force: bool = False, deps: DeepReadDeps) -> JsonObject:
     """精读主入口。
 
     成功时返回：
@@ -146,12 +151,15 @@ async def run_deep_read(*, paper_id: str, focus: str = "", deps: DeepReadDeps) -
         {"status": "failed", "reason": str}
         —— 内部任何业务异常都折叠成这个结构，绝不上抛；
           唯一例外 asyncio.CancelledError 原样上抛。
+
+    force=True 时会清掉已有报告，用本地已经切好的正文片段重新读一遍，
+    不再要求用户先从工作区删掉这篇论文。
     """
 
     # 中文注释：用一层 try/except 把所有业务异常都折成结构化返回。
     # asyncio.CancelledError 继承自 BaseException，不会被这里捕获，会原样上抛。
     try:
-        return await _run_deep_read_impl(paper_id=paper_id, focus=focus, deps=deps)
+        return await _run_deep_read_impl(paper_id=paper_id, focus=focus, force=force, deps=deps)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -162,7 +170,7 @@ async def run_deep_read(*, paper_id: str, focus: str = "", deps: DeepReadDeps) -
         return _fail(deps, f"精读过程出现意外错误：{exc}")
 
 
-async def _run_deep_read_impl(*, paper_id: str, focus: str, deps: DeepReadDeps) -> JsonObject:
+async def _run_deep_read_impl(*, paper_id: str, focus: str, force: bool, deps: DeepReadDeps) -> JsonObject:
     """精读主流程实现（由 run_deep_read 包裹异常折叠）。"""
 
     # 第一步：按编号取出论文，工作区里没有就直接报失败。
@@ -171,8 +179,8 @@ async def _run_deep_read_impl(*, paper_id: str, focus: str, deps: DeepReadDeps) 
     if entry is None:
         return _fail(deps, f"工作区里没有这篇论文：{paper_id}")
 
-    # 第二步：已有精读报告就直接返回缓存，不调模型、不推卡片。
-    if entry.deep_read is not None:
+    # 第二步：已有精读报告时，普通精读直接返回；强制重读则只清掉旧报告，论文留在工作区。
+    if entry.deep_read is not None and not force:
         deps.reporter.progress(
             "命中已有精读报告，直接返回",
             stage=DEEP_READ_STAGE,
@@ -189,6 +197,13 @@ async def _run_deep_read_impl(*, paper_id: str, focus: str, deps: DeepReadDeps) 
             "artifact_id": entry.deep_read.artifact_id,
             "cached": True,
         }
+    if force and entry.deep_read is not None:
+        await asyncio.to_thread(deps.workspace.clear_deep_read, paper_id)
+        deps.reporter.progress(
+            "已去掉旧报告，准备重新精读",
+            stage=DEEP_READ_STAGE,
+            event_key=deps.event_key,
+        )
 
     # 第三步：模型没装配就没法精读。
     if deps.llm is None:
@@ -196,20 +211,7 @@ async def _run_deep_read_impl(*, paper_id: str, focus: str, deps: DeepReadDeps) 
 
     # 第四步：把工作区里的论文元数据字典还原成 PaperDocument 对象。
     doc = _paper_document(entry.paper)
-
-    # 第五步：下载全文。下载失败就记下原因，后面走摘要降级路径。
-    _check_cancellation(deps)
-    deps.reporter.progress("正在下载论文全文", stage=DEEP_READ_STAGE, event_key=deps.event_key)
-    logger.info("精读开始下载全文", extra={"session_key": deps.session_key, "paper_id": paper_id})
     read_cfg = SystemConfig.load().read
-    downloaded = await async_download_paper_fulltext(
-        doc,
-        cache_dir=read_cfg.paper_cache_dir,
-        connect_timeout_seconds=read_cfg.connect_timeout_seconds,
-        download_timeout_seconds=read_cfg.download_timeout_seconds,
-        max_file_size_mb=read_cfg.max_file_size_mb,
-        runtime_resources=deps.resources,
-    )
 
     # token 用量累加器：map + reduce（或降级）所有响应的 usage 统一累加。
     total_input = 0
@@ -218,113 +220,140 @@ async def _run_deep_read_impl(*, paper_id: str, focus: str, deps: DeepReadDeps) 
     # 不能让用户以为报告是读了全文写出来的。
     fulltext_failure_reason = ""
 
-    # 尝试全文路径：下载成功 → 转换 → 分块 → map → reduce。
+    # 尝试全文路径：能复用本地切片就跳过下载和再切分；否则下载 → 转换 → 分块。
     # 任何一步失败就降级到摘要精读。map/reduce 失败属于硬失败，直接返回 failed。
     source = DEEP_READ_SOURCE_ABSTRACT
     markdown_text: str | None = None
     payload: JsonObject | None = None
+    chunks: list[Any] | None = None
+    assets_dir: Path | None = None
 
-    if downloaded.status == "downloaded":
-        # 第六步：转 Markdown + 分块。
+    reused = await asyncio.to_thread(_load_existing_slices, doc, read_cfg.paper_cache_dir)
+    if reused is not None:
+        markdown_text, chunks, assets_dir = reused
+        deps.reporter.progress(
+            "正在读取已切好的正文片段",
+            stage=DEEP_READ_STAGE,
+            event_key=deps.event_key,
+        )
+        logger.info(
+            "精读复用本地已切好的正文片段",
+            extra={"session_key": deps.session_key, "paper_id": paper_id, "chunk_count": len(chunks)},
+        )
+    else:
+        # 第五步：本地没有可用切片，才去下载全文。
         _check_cancellation(deps)
-        deps.reporter.progress("正在转换全文为 Markdown", stage=DEEP_READ_STAGE, event_key=deps.event_key)
-        conversion = await async_convert_fulltext_to_markdown(
+        deps.reporter.progress("正在下载论文全文", stage=DEEP_READ_STAGE, event_key=deps.event_key)
+        logger.info("精读开始下载全文", extra={"session_key": deps.session_key, "paper_id": paper_id})
+        downloaded = await async_download_paper_fulltext(
             doc,
-            source_path=downloaded.file_path,
-            source_url=downloaded.source_url,
-            # 中文注释：把精读用的模型交给转换那一层，让它把公式截图转成 LaTeX。
-            # 不传也能跑，只是公式会退回原来的展平写法。
+            cache_dir=read_cfg.paper_cache_dir,
+            connect_timeout_seconds=read_cfg.connect_timeout_seconds,
+            download_timeout_seconds=read_cfg.download_timeout_seconds,
+            max_file_size_mb=read_cfg.max_file_size_mb,
+            runtime_resources=deps.resources,
+        )
+
+        if downloaded.status == "downloaded":
+            # 第六步：转 Markdown + 分块。
+            _check_cancellation(deps)
+            deps.reporter.progress("正在转换全文为 Markdown", stage=DEEP_READ_STAGE, event_key=deps.event_key)
+            conversion = await async_convert_fulltext_to_markdown(
+                doc,
+                source_path=downloaded.file_path,
+                source_url=downloaded.source_url,
+                # 中文注释：把精读用的模型交给转换那一层，让它把公式截图转成 LaTeX。
+                # 不传也能跑，只是公式会退回原来的展平写法。
+                llm=deps.llm,
+                on_progress=lambda message: deps.reporter.progress(
+                    message, stage=DEEP_READ_STAGE, event_key=deps.event_key
+                ),
+                raise_if_cancelled=deps.cancellation.raise_if_requested if deps.cancellation else None,
+            )
+            # 中文注释：公式转写也是真金白银的模型调用，用掉的 token 要并进整篇精读的
+            # 用量里一起上报，否则后台看到的用量会比实际花的少一截。
+            total_input += conversion.input_tokens
+            total_output += conversion.output_tokens
+            if conversion.markdown_path is not None:
+                _check_cancellation(deps)
+                deps.reporter.progress("正在切分全文", stage=DEEP_READ_STAGE, event_key=deps.event_key)
+                chunk_result = await async_build_chunks_file(doc, markdown_path=conversion.markdown_path)
+                if chunk_result.chunks:
+                    markdown_text = await asyncio.to_thread(
+                        conversion.markdown_path.read_text, encoding="utf-8"
+                    )
+                    chunks = chunk_result.chunks
+                    assets_dir = conversion.assets_dir
+                else:
+                    # 分块为空，降级摘要。
+                    fulltext_failure_reason = "全文分块为空"
+                    deps.reporter.progress(
+                        "全文分块为空，改用摘要精读",
+                        stage=DEEP_READ_STAGE,
+                        event_key=deps.event_key,
+                    )
+            else:
+                # 转换失败，降级摘要。
+                fulltext_failure_reason = "全文转换失败"
+                deps.reporter.progress(
+                    "全文转换失败，改用摘要精读",
+                    stage=DEEP_READ_STAGE,
+                    event_key=deps.event_key,
+                )
+        else:
+            # 下载失败，降级摘要。
+            # 中文注释：这里的原因来自下载层（比如"未提供开放获取链接""下载全文超时"），
+            # 会原样带给用户，让用户知道到底是没链接还是链接打不开。
+            fulltext_failure_reason = downloaded.reason or "未能获取全文"
+            deps.reporter.progress(
+                f"全文获取失败（{downloaded.reason}），改用摘要精读",
+                stage=DEEP_READ_STAGE,
+                event_key=deps.event_key,
+            )
+
+    if chunks and markdown_text is not None:
+        # 第七步：让模型把论文插图读一遍。
+        # 中文注释：这一步和分段阅读是两条独立的线——插图不走切分片段，而是自己
+        # 成批发给模型，读出来的笔记最后并在汇总阶段。这样图片内容既不受片段大小
+        # 限制，也不会被"每段笔记最多 500 字"那条上限压掉。
+        _check_cancellation(deps)
+        figure_notes, figure_input, figure_output = await read_figure_notes(
+            figures=collect_paper_figures(markdown_text, assets_dir),
+            focus=focus,
             llm=deps.llm,
             on_progress=lambda message: deps.reporter.progress(
                 message, stage=DEEP_READ_STAGE, event_key=deps.event_key
             ),
             raise_if_cancelled=deps.cancellation.raise_if_requested if deps.cancellation else None,
         )
-        # 中文注释：公式转写也是真金白银的模型调用，用掉的 token 要并进整篇精读的
-        # 用量里一起上报，否则后台看到的用量会比实际花的少一截。
-        total_input += conversion.input_tokens
-        total_output += conversion.output_tokens
-        if conversion.markdown_path is not None:
-            _check_cancellation(deps)
-            deps.reporter.progress("正在切分全文", stage=DEEP_READ_STAGE, event_key=deps.event_key)
-            chunk_result = await async_build_chunks_file(doc, markdown_path=conversion.markdown_path)
-            if chunk_result.chunks:
-                # 中文注释：全文 Markdown 后面要用来写产物，插图清单也要从里面挑，
-                # 所以在这一步就读出来。读文件是重活，放线程里跑。
-                markdown_text = await asyncio.to_thread(
-                    conversion.markdown_path.read_text, encoding="utf-8"
-                )
+        total_input += figure_input
+        total_output += figure_output
 
-                # 第七步：让模型把论文插图读一遍。
-                # 中文注释：这一步和分段阅读是两条独立的线——插图不走切分片段，而是自己
-                # 成批发给模型，读出来的笔记最后并在汇总阶段。这样图片内容既不受片段大小
-                # 限制，也不会被"每段笔记最多 500 字"那条上限压掉。
-                _check_cancellation(deps)
-                figure_notes, figure_input, figure_output = await read_figure_notes(
-                    figures=collect_paper_figures(markdown_text, conversion.assets_dir),
-                    focus=focus,
-                    llm=deps.llm,
-                    on_progress=lambda message: deps.reporter.progress(
-                        message, stage=DEEP_READ_STAGE, event_key=deps.event_key
-                    ),
-                    raise_if_cancelled=deps.cancellation.raise_if_requested if deps.cancellation else None,
-                )
-                total_input += figure_input
-                total_output += figure_output
+        # 第八步：map 逐块精读。
+        _check_cancellation(deps)
+        notes, map_input, map_output = await _map_chunks(deps, doc, chunks, focus)
+        total_input += map_input
+        total_output += map_output
+        # 全部片段都精读失败 → 硬失败，不降级。
+        if not any(notes):
+            return _fail(deps, "全部正文片段精读失败，无法汇总报告")
 
-                # 第八步：map 逐块精读。
-                _check_cancellation(deps)
-                notes, map_input, map_output = await _map_chunks(
-                    deps, doc, chunk_result.chunks, focus
-                )
-                total_input += map_input
-                total_output += map_output
-                # 全部片段都精读失败 → 硬失败，不降级。
-                if not any(notes):
-                    return _fail(deps, "全部正文片段精读失败，无法汇总报告")
-
-                # 第九步：reduce 汇总。
-                _check_cancellation(deps)
-                deps.reporter.progress(
-                    "正在汇总精读报告",
-                    stage=DEEP_READ_STAGE,
-                    event_key=deps.event_key,
-                )
-                reduce_content = _build_reduce_user_content(doc, notes, chunk_result.chunks, figure_notes)
-                payload, reduce_input, reduce_output = await _run_reduce(deps, reduce_content)
-                total_input += reduce_input
-                total_output += reduce_output
-                # reduce 解析失败 → 硬失败，不降级。
-                if payload is None:
-                    return _fail(deps, "精读报告解析失败，无法生成报告")
-
-                source = DEEP_READ_SOURCE_FULLTEXT
-            else:
-                # 分块为空，降级摘要。
-                fulltext_failure_reason = "全文分块为空"
-                deps.reporter.progress(
-                    "全文分块为空，改用摘要精读",
-                    stage=DEEP_READ_STAGE,
-                    event_key=deps.event_key,
-                )
-        else:
-            # 转换失败，降级摘要。
-            fulltext_failure_reason = "全文转换失败"
-            deps.reporter.progress(
-                "全文转换失败，改用摘要精读",
-                stage=DEEP_READ_STAGE,
-                event_key=deps.event_key,
-            )
-    else:
-        # 下载失败，降级摘要。
-        # 中文注释：这里的原因来自下载层（比如"未提供开放获取链接""下载全文超时"），
-        # 会原样带给用户，让用户知道到底是没链接还是链接打不开。
-        fulltext_failure_reason = downloaded.reason or "未能获取全文"
+        # 第九步：reduce 汇总。
+        _check_cancellation(deps)
         deps.reporter.progress(
-            f"全文获取失败（{downloaded.reason}），改用摘要精读",
+            "正在汇总精读报告",
             stage=DEEP_READ_STAGE,
             event_key=deps.event_key,
         )
+        reduce_content = _build_reduce_user_content(doc, notes, chunks, figure_notes)
+        payload, reduce_input, reduce_output = await _run_reduce(deps, reduce_content)
+        total_input += reduce_input
+        total_output += reduce_output
+        # reduce 解析失败 → 硬失败，不降级。
+        if payload is None:
+            return _fail(deps, "精读报告解析失败，无法生成报告")
+
+        source = DEEP_READ_SOURCE_FULLTEXT
 
     # 第十四步（摘要降级路径）：全文路径没走通时，仅凭标题+摘要生成报告。
     if payload is None:
@@ -354,7 +383,7 @@ async def _run_deep_read_impl(*, paper_id: str, focus: str, deps: DeepReadDeps) 
         # 躺在论文缓存目录里。产物只存 Markdown 文本，图片不跟着走，相对地址就会指向一个
         # 不存在的目录，用户打开产物看到满屏裂图。所以这里先把配图也存成产物，并把引用
         # 换成能打开的接口地址，再写全文产物。
-        markdown_text = await _write_figure_artifacts(deps, paper_id, conversion.assets_dir, markdown_text)
+        markdown_text = await _write_figure_artifacts(deps, paper_id, assets_dir, markdown_text)
         fulltext_record = await asyncio.to_thread(
             deps.repo.write_artifact,
             deps.session_key,
@@ -381,6 +410,9 @@ async def _run_deep_read_impl(*, paper_id: str, focus: str, deps: DeepReadDeps) 
     await asyncio.to_thread(deps.workspace.set_deep_read, paper_id, report)
     if source == DEEP_READ_SOURCE_FULLTEXT:
         await asyncio.to_thread(deps.workspace.set_fulltext_cached, paper_id, True)
+        # 中文注释：全文精读成功后记入本机长期记忆。之后任意会话再检索到
+        # 同一篇论文，就能把这份报告和已经切好的分片召回来，不必再精读一遍。
+        await asyncio.to_thread(record_fulltext_deep_read, doc, report)
 
     # 第十二步：推 deep_read_report 卡片（role 用 system，不干扰助手消息缓冲区）。
     title_preview = (doc.title or "")[:CARD_TITLE_CHARS]
@@ -394,15 +426,12 @@ async def _run_deep_read_impl(*, paper_id: str, focus: str, deps: DeepReadDeps) 
     deps.reporter.message(
         role="system",
         content=card_title,
-        metadata={
-            "kind": "deep_read_report",
-            "paper_id": paper_id,
-            "source": source,
-            "fulltext_available": fulltext_available,
-            "fulltext_failure_reason": fulltext_failure_reason,
-            "artifact_id": report.artifact_id,
-            "report": report.to_dict(),
-        },
+        metadata=report.to_card_payload(
+            source=source,
+            fulltext_available=fulltext_available,
+            fulltext_failure_reason=fulltext_failure_reason,
+            artifact_id=report.artifact_id,
+        ),
     )
 
     # 第十三步：token 用量聚合，推一条带用量的完成进度事件。
@@ -805,6 +834,44 @@ def _fail(deps: DeepReadDeps, reason: str) -> JsonObject:
     deps.reporter.failed(reason, stage=DEEP_READ_STAGE, event_key=deps.event_key)
     logger.info("精读失败", extra={"reason": reason[:200]})
     return {"status": "failed", "reason": reason}
+
+
+def _load_existing_slices(
+    doc: PaperDocument,
+    cache_base: str | Path,
+) -> tuple[str, list[Any], Path | None] | None:
+    """如果本地已经有切好的正文片段，就直接读出来，不必再下载、再转换、再切片。
+
+    中文注释：重新精读时用户要的是「旧报告丢掉、正文片段还在、再读一遍」。
+    磁盘上同时有 paper.md 和 chunk.json、并且切片规则版本还对得上，才算能复用。
+    缺任何一个，返回空，让主流程走原来的下载和切分。
+    """
+
+    cache_dir = resolve_paper_cache_dir(cache_base, doc)
+    markdown_path = cache_dir / "paper.md"
+    chunks_path = cache_dir / "chunk.json"
+    if not markdown_path.is_file() or not chunks_path.is_file():
+        return None
+    try:
+        payload = json.loads(chunks_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("version") != CHUNKER_VERSION:
+        return None
+    chunks = load_chunks_file(chunks_path)
+    if not chunks:
+        return None
+    if any(len(chunk.content) > PageChunker.max_atomic_characters for chunk in chunks):
+        return None
+    try:
+        markdown_text = markdown_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if not markdown_text.strip():
+        return None
+    assets = cache_dir / "assets"
+    assets_dir = assets if assets.is_dir() else None
+    return markdown_text, chunks, assets_dir
 
 
 def _fulltext_notice(fulltext_available: bool, reason: str) -> str:

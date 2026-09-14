@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Noto+Serif+SC:wght@600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap");
 
 /* ==========================================================================
    设计令牌（全站唯一的颜色 / 字号 / 间距 / 圆角 / 阴影来源）
@@ -15,6 +15,8 @@
 
   /* ---- 字体 ---- */
   --font-sans: "Manrope", "PingFang SC", "Microsoft YaHei", sans-serif;
+  /* 中文说明：欢迎页大标题用衬线体，更像期刊封面，和正文的无衬线体分开。 */
+  --font-display: "Noto Serif SC", "Songti SC", "STSong", "SimSun", serif;
   --font-mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
 
   /* ---- 墨色五档：越靠上越深，用来分信息层级 ---- */
@@ -3741,13 +3743,17 @@ a {
 
 .chat-flow[data-welcome="true"] {
   justify-content: center;
+  /* 中文说明：中间铺一层很淡的白光，像书桌上的台灯，让欢迎页比周围的灰底更像一张稿纸。
+     上少下多，整块内容会略高于几何中心，更像摊开的书页而不是悬浮在正中间。 */
+  padding-top: 4vh;
+  padding-bottom: 10vh;
+  background: radial-gradient(ellipse 80% 64% at 50% 38%, rgba(255, 255, 255, 0.78), transparent 70%);
 }
 
-/* 中文说明：这一层只是把欢迎页占满对话区的宽度，本身不限定宽窄。
-   真正决定「多宽」的是里头的 .chat-composer（最宽 900px 居中），
-   标题、引导语、推荐调研方向卡片、输入框都在它里面，所以跟着一起收在同一个宽度上。 */
+/* 中文说明：欢迎页本身铺满对话区。真正的宽窄由里头的输入组件决定。 */
 .chat-welcome {
   width: 100%;
+  padding-bottom: 6vh;
 }
 
 .chat-loading {
@@ -3758,6 +3764,27 @@ a {
   padding: 14px;
   color: var(--ink-3);
   font-size: var(--fs-meta);
+}
+
+.chat-load-older {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 100%;
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px dashed var(--line-2);
+  border-radius: var(--r-flat);
+  background: var(--paper);
+  color: var(--ink-3);
+  font-size: var(--fs-meta);
+  cursor: pointer;
+}
+
+.chat-load-older:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 /* 中文说明：一轮对话铺满整个对话区，不再收在一个窄列里居中。
@@ -4009,6 +4036,14 @@ a {
   color: var(--ink-2);
 }
 
+.paper-memory-badge {
+  padding: 1px 7px;
+  border-radius: var(--r-flat);
+  background: var(--accent-tint);
+  color: var(--accent-ink);
+  font-size: var(--fs-micro);
+}
+
 .paper-card-abstract {
   margin: 0;
   font-size: var(--fs-small);
@@ -4018,6 +4053,38 @@ a {
   -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.paper-card-abstract.is-expanded {
+  display: block;
+  -webkit-line-clamp: unset;
+  overflow: visible;
+}
+
+.paper-card-abstract-toggle {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  font-size: var(--fs-micro);
+  cursor: pointer;
+}
+
+.paper-card-abstract-toggle:hover {
+  color: var(--accent);
+}
+
+.paper-card-abstract-toggle svg {
+  transition: transform var(--dur-fast) var(--ease);
+}
+
+.paper-card-abstract-toggle svg.expanded {
+  transform: rotate(180deg);
 }
 
 .paper-card-actions {
@@ -4358,10 +4425,8 @@ a {
 
 /* ---- 输入框 ---- */
 
-/* 中文说明：输入框最宽 900px 并左右居中，欢迎页和进入对话后的底部输入框
-   用的是同一条规则，所以两者宽度始终一样，发第一条消息时不会突然变宽。
-   为什么要收窄：铺满整宽时，新建对话页的标题、推荐调研方向卡片、输入框会被
-   拉成一整页那么宽，看着像被撑开的。900px 是用户选的比例。
+/* 中文说明：普通对话的输入框最宽 900px 并左右居中；欢迎页则再收窄到 860px。
+   新建对话时，标题、推荐调研方向卡片、输入框都处于同一条中轴线上，不会被拉成整页宽。
    margin 用 auto 居中而不是写 left/right 偏移，是因为这块东西在两种布局里：
    欢迎页里它是普通块级元素；进入对话后它是 .chat-column 这个纵向 flex 的子项，
    此时 auto 外边距会盖过 align-items 默认的 stretch，同样能居中。
@@ -4373,29 +4438,179 @@ a {
   margin: 0 auto;
 }
 
-.chat-composer-welcome-copy {
-  text-align: center;
-  margin-bottom: 14px;
+/* 中文说明：欢迎页从上往下排。刊名和提问在上面，输入框贴在下面，共用同一列宽度。 */
+.chat-composer[data-variant="welcome"] {
+  max-width: 920px;
+  animation: chat-welcome-in 480ms var(--ease);
 }
 
-/* 中文说明：欢迎页首屏的品牌 logo，居中放在大标题上方。 */
+@keyframes chat-welcome-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.chat-welcome-masthead {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 18px;
+  color: var(--ink-1);
+  font-size: var(--fs-small);
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
 .welcome-logo {
   display: block;
-  width: 52px;
-  height: 52px;
-  margin: 0 auto 12px;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
 }
 
-.chat-composer-welcome-copy h2 {
-  margin: 0 0 6px;
-  font-size: var(--fs-display);
-  font-weight: 800;
+.chat-welcome-spread {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
 }
 
-.chat-composer-welcome-copy p {
+.chat-welcome-copy {
+  text-align: center;
+}
+
+/* 中文说明：标题单独占一行，引导语排在它下面一行，两行都居中。
+   （之前是并排：标题在左、引导语在右。） */
+.chat-welcome-lead {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.chat-welcome-copy h2 {
   margin: 0;
-  font-size: var(--fs-meta);
+  color: var(--ink-0);
+  font-family: var(--font-display);
+  font-size: clamp(1.35rem, 1.6vw, 1.7rem);
+  font-weight: 700;
+  line-height: 1.4;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.chat-welcome-copy p {
+  margin: 0;
   color: var(--ink-3);
+  font-size: var(--fs-small);
+  line-height: 1.6;
+  text-align: center;
+}
+
+.chat-welcome-desk {
+  min-width: 0;
+}
+
+.chat-composer[data-variant="welcome"] .chat-composer-box {
+  gap: 10px;
+  padding: 14px 16px 10px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-box);
+  background: var(--paper);
+}
+
+.chat-composer[data-variant="welcome"] .chat-composer-box:focus-within {
+  border-color: var(--accent-edge);
+}
+
+.chat-composer[data-variant="welcome"] .chat-composer-input {
+  min-height: 52px;
+  font-size: var(--fs-read);
+  line-height: 1.7;
+}
+
+.chat-composer[data-variant="welcome"] .chat-composer-input::placeholder {
+  color: var(--ink-3);
+}
+
+.chat-composer[data-variant="welcome"] .chat-composer-actions {
+  align-items: center;
+  width: 100%;
+}
+
+.chat-welcome-keyhint,
+.chat-composer[data-variant="welcome"] .chat-composer-status {
+  margin-right: auto;
+  padding: 0;
+}
+
+.chat-welcome-keyhint {
+  color: var(--ink-4);
+  font-size: var(--fs-micro);
+}
+
+.chat-welcome-toc {
+  margin-top: 22px;
+}
+
+.chat-welcome-toc-label {
+  margin: 0 0 4px;
+  color: var(--ink-3);
+  font-size: var(--fs-meta);
+}
+
+.chat-welcome-toc-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  padding: 12px 0;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  text-align: left;
+  transition: color var(--dur-fast) var(--ease);
+}
+
+.chat-welcome-toc-title {
+  color: var(--ink-1);
+  font-size: var(--fs-small);
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.chat-welcome-toc-hint {
+  flex-shrink: 0;
+  color: var(--ink-4);
+  font-size: var(--fs-meta);
+}
+
+.chat-welcome-toc-item:hover:not(:disabled) .chat-welcome-toc-title,
+.chat-welcome-toc-item:hover:not(:disabled) .chat-welcome-toc-hint {
+  color: var(--accent-ink);
+}
+
+.chat-welcome-toc-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.chat-welcome-toc-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-composer[data-variant="welcome"] {
+    animation: none;
+  }
 }
 
 .chat-composer-box {
@@ -4441,6 +4656,10 @@ a {
 .chat-composer-submit {
   background: var(--accent);
   color: var(--paper);
+}
+
+.chat-composer-submit:hover:not(:disabled) {
+  filter: brightness(1.06);
 }
 
 .chat-composer-submit:disabled {
@@ -4832,44 +5051,6 @@ h6.chat-md-heading { font-size: var(--fs-small); }
   text-decoration: underline;
   text-underline-offset: 2px;
 }
-
-/* ---- 欢迎态快速开始按钮 ---- */
-
-/* 中文说明：欢迎页的「快速开始」排成两列小格子，不再横着挤成一长条。
-   横排的时候每个按钮宽度都不一样，看着很乱；格子对齐之后一眼能扫完。 */
-.chat-quick-starts {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--sp-2);
-  margin-top: var(--sp-6);
-}
-
-.chat-quick-start {
-  padding: var(--sp-2) var(--sp-3);
-  border: 1px solid var(--line-2);
-  border-radius: var(--r-inline);
-  background: var(--paper);
-  color: var(--ink-2);
-  font-size: var(--fs-small);
-  line-height: 1.5;
-  text-align: left;
-  /* 中文说明：只让颜色变化，不做上下位移。按钮一多，一个个往上跳很闹；
-     而且列表项 hover 位移会让人扫读时视线被拽走。 */
-  transition: border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease),
-    background-color var(--dur-fast) var(--ease);
-}
-
-.chat-quick-start:hover:not(:disabled) {
-  border-color: var(--accent-edge);
-  background: var(--accent-tint);
-  color: var(--accent-ink);
-}
-
-.chat-quick-start:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
 
 /* 包 1 · F3：ChatComposer 里的运行状态文案。 */
 .chat-composer-status {
@@ -5481,8 +5662,17 @@ body[data-resizing="true"] {
     grid-template-columns: 1fr;
   }
 
-  /* 中文说明：屏幕太窄时，快速开始的两列格子改成一列，否则按钮里的字会被挤成两三行。 */
-  .chat-quick-starts {
-    grid-template-columns: 1fr;
+  .chat-welcome-masthead {
+    margin-bottom: 20px;
+  }
+
+  .chat-welcome-copy h2 {
+    font-size: 1.35rem;
+    white-space: normal;
+  }
+
+  .chat-welcome-toc-item {
+    flex-wrap: wrap;
+    gap: 4px 12px;
   }
 }

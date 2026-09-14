@@ -72,9 +72,9 @@ class ArxivPaperConnector(PaperSearchConnector):
     def search(self, request: SearchRequest) -> list[PaperDocument]:
         """执行 arXiv 检索，并在 connector 内完成查询拼装。"""
 
-        # 中文说明：先渲染查询串。没有可执行的检索意图（概念组为空）就直接返回空列表，
+        # 中文说明：先渲染查询串。没有标题、概念组也为空时直接返回空列表，
         # 连下面那道 3 秒限速门都不用等。
-        query = self._render_concept_groups(request)
+        query = self._render_query(request)
         if not query:
             return []
         # 中文说明：强制 3 秒串行门（arXiv ToU）。
@@ -102,9 +102,9 @@ class ArxivPaperConnector(PaperSearchConnector):
     ) -> list[PaperDocument]:
         """异步执行 arXiv 检索，避免在异步编排里阻塞事件循环。"""
 
-        # 中文说明：先渲染查询串。没有可执行的检索意图（概念组为空）就直接返回空列表，
+        # 中文说明：先渲染查询串。没有标题、概念组也为空时直接返回空列表，
         # 连下面那道 3 秒限速门都不用等。
-        query = self._render_concept_groups(request)
+        query = self._render_query(request)
         if not query:
             return []
         # 中文说明：强制 3 秒串行门（arXiv ToU）。
@@ -148,6 +148,32 @@ class ArxivPaperConnector(PaperSearchConnector):
                 continue
             papers.append(paper)
         return papers[: request.limit]
+
+    def _render_query(self, request: SearchRequest) -> str:
+        """生成发给 arXiv 的查询串：有完整标题就按标题搜，否则走概念组。"""
+
+        title = request.normalized_title()
+        if title:
+            return self._render_title_query(request, title)
+        return self._render_concept_groups(request)
+
+    def _render_title_query(self, request: SearchRequest, title: str) -> str:
+        """按论文标题字段检索，整段标题加引号，不拆成布尔词。
+
+        中文说明：arXiv 的 ti: 只搜标题。空格是隐式 OR，所以标题必须加双引号，
+        否则 "Attention Is All You Need" 会被拆成四个词的或关系。
+        """
+
+        query = f'ti:"{title}"'
+        if request.excluded_terms:
+            exclusions = " OR ".join(f'all:"{t}"' for t in request.excluded_terms if str(t).strip())
+            if exclusions:
+                query = f"{query} ANDNOT ({exclusions})"
+        if request.year_from is not None or request.year_to is not None:
+            year_from = request.year_from or 1990
+            year_to = request.year_to or datetime.now().year
+            query = f"{query} AND submittedDate:[{year_from:04d}01010000 TO {year_to:04d}12312359]"
+        return query
 
     def _render_concept_groups(self, request: SearchRequest) -> str:
         """把结构化概念组渲染成 arXiv API 的查询串。

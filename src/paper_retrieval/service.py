@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import random
-import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING
@@ -13,7 +12,7 @@ from src.llm.config import SystemConfig
 from src.utils import get_logger, logging_context
 
 from .connectors import ArxivPaperConnector, OpenAlexPaperConnector, PaperSearchConnector, SemanticScholarPaperConnector
-from .download import _ARXIV_DOI_PREFIX
+from .identity import paper_key
 from .models import PaperDocument, SearchRequest, SearchResponse
 
 if TYPE_CHECKING:
@@ -127,6 +126,7 @@ class PaperSearchService:
         *,
         topic: str = "",
         concept_groups: list[list[str]] | None = None,
+        title: str = "",
         source: str | None = None,
         sources: list[str] | None = None,
         limit: int = 10,
@@ -139,8 +139,9 @@ class PaperSearchService:
 
         中文说明：
         新版用结构化概念组表达检索意图（组间 AND、组内 OR 同义词），每个 connector
-        把它渲染成自己源的原生语法。limit 是用户期望的数量，内部会乘以 OVER_FETCH_FACTOR
-        超量拉取，合并后截断到用户期望的数量。
+        把它渲染成自己源的原生语法。用户要找已知标题的某一篇时，改传 title，
+        各源按标题字段检索，不再拆成布尔概念组。limit 是用户期望的数量，内部会
+        乘以 OVER_FETCH_FACTOR 超量拉取，合并后截断到用户期望的数量。
         """
 
         # 中文说明：超量拉取，保证过滤后仍能拿到用户期望的数量。
@@ -148,6 +149,7 @@ class PaperSearchService:
         request = SearchRequest(
             topic=topic,
             concept_groups=[list(g) for g in (concept_groups or [])],
+            title=str(title or "").strip(),
             source=source,
             sources=list(sources or []),
             limit=effective_limit,
@@ -249,6 +251,7 @@ class PaperSearchService:
         *,
         topic: str = "",
         concept_groups: list[list[str]] | None = None,
+        title: str = "",
         source: str | None = None,
         sources: list[str] | None = None,
         limit: int = 10,
@@ -265,6 +268,7 @@ class PaperSearchService:
         request = SearchRequest(
             topic=topic,
             concept_groups=[list(g) for g in (concept_groups or [])],
+            title=str(title or "").strip(),
             source=source,
             sources=list(sources or []),
             limit=effective_limit,
@@ -714,44 +718,10 @@ class PaperSearchService:
 
         return sorted(papers, key=_score, reverse=True)
 
-    # 中文说明：arXiv id 的标准格式（2007 年后的论文）：
-    # 形如 "2401.12345" 或 "2401.12345v3"（4 位年份点号 + 4~5 位序号 + 可选 v + 版本号）。
-    # 用这个正则识别 arXiv id，比旧版 "arxiv" in paperId 可靠得多：
-    # arXiv connector 写入的 paperId 是裸 id（如 "2401.12345v3"），不含 "arxiv" 字样，
-    # 旧版判据永不成立，导致 preprint 与期刊版跨源合并只能靠标题精确归一，经常漏掉。
-    _ARXIV_ID_PATTERN = re.compile(r"^\d{4}\.\d{4,5}(?:v\d+)?$")
-
     def _paper_key(self, paper: PaperDocument) -> str:
-        """生成稳定的去重键。
+        """生成稳定的去重键，规则与全仓共用的 paper_key 完全一致。"""
 
-        中文说明：
-        按优先级：DOI 归一 > arXiv id 去版本号 > 标题归一。
-        arXiv 自己注册的 DOI（10.48550/arxiv.*）不当普通 DOI 看，而是按 arXiv 编号处理——
-        这样"带 arXiv-DOI 的记录"和"带裸编号的记录"才会合并成同一条。
-        """
-
-        # 优先用 DOI（归一化：去前缀、小写）。
-        doi = (paper.doi or "").strip()
-        if doi:
-            doi = doi.removeprefix("https://doi.org/").removeprefix("http://doi.org/").lower()
-            # 中文说明：arXiv 给论文注册的 DOI 形如 10.48550/arxiv.2401.12345，而 arXiv 源
-            # 自己返回的是裸编号（2401.12345）——这两条记录其实是同一篇论文。若按 DOI 和按
-            # 编号各算各的键，它们永远合不到一起，同一篇论文就会在结果里出现两次
-            # （实测那篇 RAG 综述正是这样重复的）。所以这种 DOI 一律归到 arxiv 键，
-            # 并且和下面的裸编号分支一样去掉版本号。
-            if doi.startswith(_ARXIV_DOI_PREFIX):
-                return f"arxiv:{re.sub(r'v\d+$', '', doi[len(_ARXIV_DOI_PREFIX):])}"
-            return f"doi:{doi}"
-        # 中文说明：用正则判据识别 arXiv id，并去掉版本号（2401.12345v3 → 2401.12345）。
-        # 这样 preprint 和正式发表版会被视为同一篇论文，避免跨源合并时漏掉。
-        paper_id = (paper.paperId or "").strip()
-        if paper_id and self._ARXIV_ID_PATTERN.match(paper_id):
-            base_id = re.sub(r"v\d+$", "", paper_id)
-            return f"arxiv:{base_id}"
-        # 退而用标题归一（小写、去标点、折叠空白）。
-        title = re.sub(r"[^\w\s]", "", paper.title.lower())
-        title = re.sub(r"\s+", " ", title).strip()
-        return f"title:{title}"
+        return paper_key(paper)
 
     def _request_summary(self, request: SearchRequest) -> str:
         """把结构化请求压缩成调试用摘要。
@@ -764,7 +734,9 @@ class PaperSearchService:
         parts: list[str] = []
         if request.topic.strip():
             parts.append(request.topic.strip())
-        if request.concept_groups:
+        if request.normalized_title():
+            parts.append(f'title="{request.normalized_title()}"')
+        elif request.concept_groups:
             # 中文说明：每个概念组取第一个同义词（规范写法）作为代表。
             group_reprs = [group[0] for group in request.concept_groups if group]
             if group_reprs:
@@ -781,6 +753,7 @@ class PaperSearchService:
         return SearchRequest(
             topic=request.topic,
             concept_groups=[list(g) for g in request.concept_groups],
+            title=request.title,
             source=source_name,
             sources=[],
             limit=request.limit,

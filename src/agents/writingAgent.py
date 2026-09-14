@@ -9,6 +9,7 @@ from typing import Any, Literal, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from src.llm import ModelConfig, ProviderSnapshot, SystemConfig, make_provider
+from src.services.paper_memory import resolve_paper_cache_dir
 from src.utils import get_logger
 from src.utils.read_utils.cache import safe_cache_name
 from src.utils.read_utils.chunkers import TextChunk, load_chunks_file
@@ -928,11 +929,14 @@ def _find_chunks_path(paper_id: str, cache_dir: Path) -> Path | None:
 
 
 def _paper_cache_dirs(paper_id: str, cache_dir: Path) -> list[Path]:
-    """根据 paperId 找可能的缓存目录。"""
+    """根据 paperId 找可能的缓存目录。优先用长期记忆记下的目录。"""
 
     directories: list[Path] = []
+    remembered = resolve_paper_cache_dir(cache_dir, paper_id)
+    if remembered.exists():
+        directories.append(remembered)
     direct = cache_dir / safe_cache_name(paper_id)
-    if direct.exists():
+    if direct.exists() and direct not in directories:
         directories.append(direct)
     if not cache_dir.exists():
         return directories

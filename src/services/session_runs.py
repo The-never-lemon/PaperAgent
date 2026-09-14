@@ -326,7 +326,6 @@ class SessionRunService:
 
         resolved_handler = self.message_handler
         assistant_buffer = AssistantMessageBuffer()
-        saw_turn_end = False
         # 中文注释：每次后台 run 都创建自己独立的一份运行时资源，后面节点可以通过
         # runtime_context 共享这些资源，不会和别的 run 混用。
         resources = WorkflowRuntimeResources()
@@ -339,15 +338,17 @@ class SessionRunService:
             流式 token 事件（delta / reasoning_delta）每一个都会过这个函数，
             但改造后它们不再落库——这些 token 的最终形态由 AssistantMessageBuffer
             聚合进 session_message 表的 assistant 消息里。其他事件（message、
-            runtime_event、status、turn_end 等）照常落库，保持行为不变。
+            runtime_event、status 等）照常落库；turn_end 则由收尾代码在保存完成后
+            单独发送，保证前端不会读到旧状态。
             """
 
-            nonlocal saw_turn_end
             event_copy = copy.deepcopy(event)
             assistant_buffer.apply(event_copy)
             event_name = str(event_copy.get("event") or "")
+            # 中文说明：真正的结束通知只能在所有内容和状态写完后发送。工作流内部
+            # 若过早发送 turn_end，浏览器会立刻读到仍是“运行中”的旧会话数据。
             if event_name == "turn_end":
-                saw_turn_end = True
+                return event_copy
             # 流式 token 不写数据库；其他事件照常落库。
             should_persist = event_name not in NON_PERSISTED_EVENT_TYPES
             return self._publish_runtime_event_nowait(
@@ -403,25 +404,15 @@ class SessionRunService:
                         run_id,
                         turn_id,
                         assistant_buffer,
-                        already_closed=saw_turn_end,
                     )
                     logger.info("run cancelled after user request")
                     return
-                if not saw_turn_end:
-                    emit(
-                        {
-                            "event": "turn_end",
-                            "status": "completed",
-                            "turn_id": turn_id,
-                            "timestamp": utc_now(),
-                        }
-                    )
                 self._finalize_success(session_key, run_id, turn_id, assistant_buffer)
                 logger.info("后台 run 执行完成")
         except asyncio.CancelledError:
             if self.broker.is_cancel_requested(run_id):
                 # 中文注释：用户主动停止不是程序错误，不发送 error 事件，也不把会话标成 failed。
-                self._finalize_cancelled(session_key, run_id, turn_id, assistant_buffer, already_closed=saw_turn_end)
+                self._finalize_cancelled(session_key, run_id, turn_id, assistant_buffer)
                 logger.info("run cancelled by user")
             else:
                 # 中文注释：如果没有用户停止标记，说明是服务关闭或其他外部取消，不能伪装成用户操作。
@@ -431,7 +422,6 @@ class SessionRunService:
                     turn_id=turn_id,
                     assistant_buffer=assistant_buffer,
                     error=RuntimeError("后台 run 被外部取消"),
-                    already_closed=saw_turn_end,
                 )
         except Exception as error:
             logger.exception("后台 run 执行失败")
@@ -441,7 +431,6 @@ class SessionRunService:
                 turn_id=turn_id,
                 assistant_buffer=assistant_buffer,
                 error=error,
-                already_closed=saw_turn_end,
             )
         finally:
             await resources.aclose()
@@ -453,13 +442,27 @@ class SessionRunService:
         turn_id: str,
         assistant_buffer: AssistantMessageBuffer,
     ) -> None:
-        """在 run 成功时写回助手消息，并通知前端「这次运行结束了」。"""
+        """在 run 成功时先保存最终数据，再通知前端「这次运行结束了」。"""
 
         try:
             assistant_buffer.persist(self.repo, session_key, turn_id)
             self.repo.set_status(session_key, "completed")
             self.repo.set_run_started_at(session_key, None)
             self.repo.set_active_run_id(session_key, None)
+            # 中文说明：前端收到结束通知后会马上重新读取会话，因此这条通知必须
+            # 放在所有保存动作之后，确保读取到的是最终状态而不是 running。
+            self._publish_runtime_event_nowait(
+                session_key,
+                run_id,
+                turn_id,
+                {
+                    "event": "turn_end",
+                    "status": "completed",
+                    "turn_id": turn_id,
+                    "timestamp": utc_now(),
+                },
+                persist_event=True,
+            )
         except SessionError:
             # 中文注释：会话可能在 run 执行期间被用户删掉了，这时状态写回没有
             # 意义；但下面仍要照常给前端发"运行结束"的信号，否则页面会永远等不到结果。
@@ -474,7 +477,8 @@ class SessionRunService:
                 "run 成功收尾时写库出现意外异常，仍会关闭事件流",
                 extra={"session_key": session_key, "run_id": run_id},
             )
-        self.broker.close_run_nowait(run_id)
+        finally:
+            self.broker.close_run_nowait(run_id)
 
     def _finalize_cancelled(
         self,
@@ -482,29 +486,28 @@ class SessionRunService:
         run_id: str,
         turn_id: str,
         assistant_buffer: AssistantMessageBuffer,
-        already_closed: bool = False,
     ) -> None:
         """保存用户停止前已经产生的回复，并把 run 结束为 cancelled。"""
 
         try:
-            if not already_closed:
-                self._publish_runtime_event_nowait(
-                    session_key,
-                    run_id,
-                    turn_id,
-                    {
-                        "event": "turn_end",
-                        "status": "cancelled",
-                        "message": "任务已按用户请求停止，已保留当前进度",
-                        "turn_id": turn_id,
-                        "timestamp": utc_now(),
-                    },
-                    persist_event=True,
-                )
             assistant_buffer.persist(self.repo, session_key, turn_id)
             self.repo.set_status(session_key, "cancelled")
             self.repo.set_run_started_at(session_key, None)
             self.repo.set_active_run_id(session_key, None)
+            # 中文说明：先保存停止状态，再告诉前端停止完成，避免它读到旧的运行状态。
+            self._publish_runtime_event_nowait(
+                session_key,
+                run_id,
+                turn_id,
+                {
+                    "event": "turn_end",
+                    "status": "cancelled",
+                    "message": "任务已按用户请求停止，已保留当前进度",
+                    "turn_id": turn_id,
+                    "timestamp": utc_now(),
+                },
+                persist_event=True,
+            )
         except SessionError:
             # 会话已被删除时跳过落库，但仍要给前端发结束信号（页面不能一直傻等）。
             self._log_session_gone(session_key, run_id)
@@ -517,7 +520,8 @@ class SessionRunService:
                 "run 停止收尾时出现意外异常，仍会关闭事件流",
                 extra={"session_key": session_key, "run_id": run_id},
             )
-        self.broker.close_run_nowait(run_id)
+        finally:
+            self.broker.close_run_nowait(run_id)
 
     def _finalize_failure(
         self,
@@ -527,11 +531,16 @@ class SessionRunService:
         turn_id: str,
         assistant_buffer: AssistantMessageBuffer,
         error: Exception,
-        already_closed: bool,
     ) -> None:
         """在 run 失败时补发错误和终止事件，并统一收口状态。"""
 
         try:
+            assistant_buffer.persist(self.repo, session_key, turn_id)
+            self.repo.set_status(session_key, "failed")
+            self.repo.set_run_started_at(session_key, None)
+            self.repo.set_active_run_id(session_key, None)
+            # 中文说明：状态已经保存后，才把错误和结束通知发给前端；这样前端
+            # 收到通知后重新读取会话，会稳定地拿到 failed。
             self._publish_runtime_event_nowait(
                 session_key,
                 run_id,
@@ -546,23 +555,18 @@ class SessionRunService:
                 },
                 persist_event=True,
             )
-            if not already_closed:
-                self._publish_runtime_event_nowait(
-                    session_key,
-                    run_id,
-                    turn_id,
-                    {
-                        "event": "turn_end",
-                        "status": "failed",
-                        "turn_id": turn_id,
-                        "timestamp": utc_now(),
-                    },
-                    persist_event=True,
-                )
-            assistant_buffer.persist(self.repo, session_key, turn_id)
-            self.repo.set_status(session_key, "failed")
-            self.repo.set_run_started_at(session_key, None)
-            self.repo.set_active_run_id(session_key, None)
+            self._publish_runtime_event_nowait(
+                session_key,
+                run_id,
+                turn_id,
+                {
+                    "event": "turn_end",
+                    "status": "failed",
+                    "turn_id": turn_id,
+                    "timestamp": utc_now(),
+                },
+                persist_event=True,
+            )
         except SessionError:
             # 会话已被删除时跳过补发事件与落库，但仍要给前端发结束信号（页面不能一直傻等）。
             self._log_session_gone(session_key, run_id)
@@ -575,7 +579,8 @@ class SessionRunService:
                 "run 失败收尾时出现意外异常，仍会关闭事件流",
                 extra={"session_key": session_key, "run_id": run_id},
             )
-        self.broker.close_run_nowait(run_id)
+        finally:
+            self.broker.close_run_nowait(run_id)
 
     def _log_session_gone(self, session_key: str, run_id: str) -> None:
         """记录"run 收尾时会话已被删除"的情况，方便排查用户删会话与运行中任务的竞争。"""
@@ -662,4 +667,3 @@ def encode_sse(event: JsonObject) -> str:
     lines.append(f"event: {event_name}")
     lines.append(f"data: {payload}")
     return "\n".join(lines) + "\n\n"
-
