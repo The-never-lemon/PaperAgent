@@ -20,7 +20,7 @@ Paper-Agent 3.0 是相对旧版<a href="https://github.com/GreatZack">@GreatZack
 
 - **前端**改为 Vue 3 + TypeScript + Vite，交互更现代、响应更快；
 - **包管理**统一使用 `uv`，一条命令即可完成 Python 依赖安装；
-- **论文来源**从单一 arXiv 扩展到 arXiv、OpenAlex、Semantic Scholar 三源检索；
+- **论文来源** 扩展到 arXiv、OpenAlex、Semantic Scholar 三源检索；
 - **会话持久化**改用 SQLite + 文件系统，浏览器刷新后历史线程不丢失；
 - **实时进度**基于 SSE 推送到工作台，从检索到写作每一步都可观察。
 
