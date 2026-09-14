@@ -19,7 +19,7 @@ defineOptions({ name: "DeepReadDrawer" });
 const props = defineProps<{
   visible: boolean;
   report: DeepReadReportPayload | null;
-  /** 所属会话编号，拼报告 JSON 下载地址用。 */
+  /** 所属会话编号，拼报告 Markdown 下载地址用。 */
   sessionKey?: string;
   /** 追问请求发出后禁用输入，避免一轮 run 里重复提问。 */
   busy?: boolean;
@@ -65,10 +65,10 @@ function dimensions(report: DeepReadReportPayload) {
   ];
 }
 
-/** 报告 JSON 文件的下载地址（artifact 缺失时隐藏按钮）。 */
-function reportUrl(sessionKey: string, artifactId: string) {
-  if (!sessionKey || !artifactId) return "";
-  return `/api/sessions/${encodeURIComponent(sessionKey)}/artifacts/${encodeURIComponent(artifactId)}`;
+/** 报告 Markdown 文件的下载地址（论文编号缺失时隐藏按钮）。 */
+function reportUrl(sessionKey: string, paperId: string) {
+  if (!sessionKey || !paperId) return "";
+  return `/api/sessions/${encodeURIComponent(sessionKey)}/workspace/papers/${encodeURIComponent(paperId)}/report.md`;
 }
 </script>
 
@@ -143,13 +143,12 @@ function reportUrl(sessionKey: string, artifactId: string) {
 
           <footer class="drawer-footer">
             <a
-              v-if="reportUrl(sessionKey ?? '', report.artifact_id)"
+              v-if="reportUrl(sessionKey ?? '', report.paper_id)"
               class="paper-card-action"
-              :href="reportUrl(sessionKey ?? '', report.artifact_id)"
-              target="_blank"
-              rel="noreferrer"
+              :href="reportUrl(sessionKey ?? '', report.paper_id)"
+              download
             >
-              <FileDown :size="14" /> 下载报告 JSON
+              <FileDown :size="14" /> 下载报告 Markdown
             </a>
             <span class="drawer-created-at">生成于 {{ report.created_at?.slice(0, 19).replace("T", " ") }}</span>
           </footer>

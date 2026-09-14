@@ -8,7 +8,8 @@
 3. PATCH  /api/sessions/{key}/workspace/papers/{paper_id}        —— 改用户标注或论文元数据；
 4. DELETE /api/sessions/{key}/workspace/papers                   —— 批量删除；
 5. GET    /api/sessions/{key}/workspace/export                   —— 导出清单；
-6. GET    /api/sessions/{key}/workspace/papers/{paper_id}/report —— 单篇论文的精读报告。
+6. GET    /api/sessions/{key}/workspace/papers/{paper_id}/report —— 单篇论文的精读报告；
+7. GET    /api/sessions/{key}/workspace/papers/{paper_id}/report.md —— 下载精读报告 Markdown 文件。
 
 路由层只做请求解析与响应适配，具体的读写分别交给 SessionWorkspace 和
 services/workspace_upload.py（工程规范：路由不承载业务逻辑）。
@@ -21,8 +22,9 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi.responses import Response
 
-from src.models.workspace import SessionWorkspace
+from src.models.workspace import SessionWorkspace, sanitize_for_filename
 from src.repositories.sessions.base import SessionRepository
 from src.services.workspace_export import export_workspace
 from src.services.workspace_upload import save_uploaded_pdf
@@ -192,7 +194,6 @@ def create_workspace_router(repo: SessionRepository) -> APIRouter:
         content_type, filename, file_content = await asyncio.to_thread(
             export_workspace, workspace, format=format, paper_ids=ids
         )
-        from fastapi.responses import Response
         return Response(
             content=file_content,
             media_type=content_type,
@@ -217,6 +218,28 @@ def create_workspace_router(repo: SessionRepository) -> APIRouter:
             "paper_id": paper_id,
             "report": entry.deep_read.to_dict(),
         }
+
+    @router.get("/{session_key}/workspace/papers/{paper_id:path}/report.md")
+    async def download_paper_report(session_key: str, paper_id: str) -> Response:
+        """下载单篇论文的精读报告 Markdown 文件；论文不存在或尚未精读时返回 404。
+
+        中文说明：
+        和上面那个读报告接口用的是同一份数据，区别只在于这里把报告拼成
+        Markdown 文本、当成文件发给浏览器下载。报告是现场拼出来的，不依赖
+        磁盘上有没有别的产物文件，所以以前精读过的老论文也能照常下载。
+        """
+
+        workspace = await _load_workspace(session_key)
+        entry = workspace.get_paper(paper_id)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"paper not found in workspace: {paper_id}")
+        if entry.deep_read is None:
+            raise HTTPException(status_code=404, detail=f"paper has no deep-read report yet: {paper_id}")
+        return Response(
+            content=entry.deep_read.to_markdown(),
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{_report_filename(paper_id)}"'},
+        )
 
     return router
 
@@ -247,3 +270,18 @@ async def _json_body(request: Request) -> JsonObject:
     if not isinstance(payload, dict):
         raise ValueError("request body must be a JSON object")
     return payload
+
+
+def _report_filename(paper_id: str) -> str:
+    """把论文编号整理成一个安全、又能认出来是哪篇的文件名。
+
+    中文说明：
+    这个名字会写进下载的响应头，而响应头只允许纯英文和数字，直接放中文会报错。
+    所以先把 Windows 不允许的字符（斜杠、冒号这些）换成下划线，再把中文这类
+    非英文字符整个去掉。万一清理完什么都不剩，就用 paper 兜底。
+    """
+
+    safe = sanitize_for_filename(paper_id)
+    safe = safe.encode("ascii", "ignore").decode("ascii")
+    safe = "_".join(safe.split()).strip("_")
+    return f"deep_read_{safe[:60] or 'paper'}.md"

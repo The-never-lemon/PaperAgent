@@ -23,6 +23,21 @@ DEEP_READ_SOURCE_ABSTRACT = "abstract_fallback"
 DIMENSION_SCORE_MIN = 0
 DIMENSION_SCORE_MAX = 100
 
+# 四个评分维度的中文名和先后顺序。
+# 顺序和前端精读抽屉里从上往下排的一样，保证"网页上看到什么，下载的文件里就是什么"。
+_DIMENSIONS: tuple[tuple[str, str], ...] = (
+    ("relevance", "相关性"),
+    ("novelty", "创新性"),
+    ("rigor", "严谨性"),
+    ("clarity", "清晰度"),
+)
+
+# 报告依据的材料对应的中文说法（和前端抽屉上那个来源小标签一致）。
+_SOURCE_LABELS: dict[str, str] = {
+    DEEP_READ_SOURCE_FULLTEXT: "全文精读",
+    DEEP_READ_SOURCE_ABSTRACT: "摘要降级",
+}
+
 
 @dataclass(slots=True)
 class DimensionScore:
@@ -145,6 +160,60 @@ class DeepReadReport:
             "fulltext_artifact_id": self.fulltext_artifact_id,
         }
 
+    def to_markdown(self) -> str:
+        """把整份报告拼成一段 Markdown 文本，用来下载成 .md 文件。
+
+        中文说明：
+        章节顺序和前端精读抽屉里从上往下看到的一模一样——网页上看到什么，
+        下载下来的文件里就是什么。某一节没有内容时会跳过它，不留下空标题。
+        """
+
+        # 每一"块"内容最后用空行拼起来。开头是报告标题和一行来源说明。
+        blocks: list[str] = [
+            f"# {_one_line(self.title) or '精读报告'}",
+            f"> {_SOURCE_LABELS.get(self.source, '摘要降级')} · 生成于 {_format_created_at(self.created_at)}",
+        ]
+
+        # 评分块：先把总分单独亮出来，再用一张表格列出四个维度的分数和打分理由。
+        score_lines: list[str] = [
+            "## 评分",
+            "",
+            f"**综合评分：{self.overall_score} / 100**",
+            "",
+            "| 维度 | 分数 | 打分理由 |",
+            "| --- | --- | --- |",
+        ]
+        for attribute, label in _DIMENSIONS:
+            dimension: DimensionScore = getattr(self, attribute)
+            score_lines.append(f"| {label} | {dimension.score} | {_table_cell(dimension.rationale)} |")
+        # 总评是一句整体评价，写在表格下面；没有就不写。
+        overall_comment = _one_line(self.overall_comment)
+        if overall_comment:
+            score_lines += ["", f"**总评**：{overall_comment}"]
+        blocks.append("\n".join(score_lines))
+
+        # 剩下的正文章节，按抽屉里的先后顺序排好。
+        # 注意这里的顺序不能按字段定义顺序来（那样"实验设置""结论"会跑到"方法"前面），
+        # 必须照着前端抽屉的展示顺序。
+        sections: tuple[tuple[str, str | list[str]], ...] = (
+            ("一段话总结", self.short_summary),
+            ("核心问题", self.main_question),
+            ("方法", self.methods),
+            ("数据集", self.datasets),
+            ("贡献", self.contributions),
+            ("主要结果", self.main_results),
+            ("实验设置", self.experimental_setup),
+            ("结论", self.conclusions),
+            ("局限", self.limitations),
+        )
+        for heading, content in sections:
+            section = _render_section(heading, content)
+            if section:
+                blocks.append(section)
+
+        # 结尾补一个换行，让文件以空行收尾（和综述 Markdown 产物的习惯保持一致）。
+        return "\n\n".join(blocks).strip() + "\n"
+
     @classmethod
     def from_dict(cls, data: Any) -> "DeepReadReport":
         """从普通字典还原一份精读报告。
@@ -185,6 +254,66 @@ class DeepReadReport:
             artifact_id=str(payload.get("artifact_id") or ""),
             fulltext_artifact_id=str(payload.get("fulltext_artifact_id") or ""),
         )
+
+
+def _render_section(heading: str, content: str | list[str]) -> str:
+    """把一个小节拼成 Markdown 文本；内容为空时返回空字符串。
+
+    中文说明：
+    同一份报告里，有的字段是一段话（比如"结论"），有的是好几条要点
+    （比如"方法"）。这里按类型分开拼：一段话直接写在标题下面，
+    要点则每条前面加一个短横线。整节都没内容就返回空字符串，
+    调用方看到空字符串就跳过这一节，不会留下一个孤零零的标题。
+    """
+
+    if isinstance(content, str):
+        text = _one_line(content)
+        return f"## {heading}\n\n{text}" if text else ""
+
+    lines: list[str] = []
+    for item in content:
+        text = _one_line(item)
+        if text:
+            lines.append(f"- {text}")
+    if not lines:
+        return ""
+    return f"## {heading}\n\n" + "\n".join(lines)
+
+
+def _one_line(text: Any) -> str:
+    """把一段文字压成一行：换行、制表符、连续空格全部变成一个空格。
+
+    中文说明：
+    报告里的文字是模型写的，中间可能夹着换行。Markdown 里一条要点如果被
+    换行劈成两行，排版就散了；压成一行最省事也最稳。
+    """
+
+    return " ".join(str(text or "").split())
+
+
+def _table_cell(text: Any) -> str:
+    """把一段文字整理成能放进 Markdown 表格单元格的形式。
+
+    中文说明：
+    表格是靠竖线分列的，所以文字里原本的竖线要写成 \\| 转义掉，
+    否则读起来会平白多出一列。换行也顺手压成空格。
+    """
+
+    return _one_line(text).replace("|", "\\|")
+
+
+def _format_created_at(value: Any) -> str:
+    """把报告生成时间（UTC ISO 字符串）整理成"2026-09-14 08:30 UTC"这种样子。
+
+    中文说明：
+    这里只做字符串截取，不把时间解析成对象——万一老报告里存着格式怪异的
+    时间字符串，截取顶多显示得难看一点，不会让整个下载直接报错。
+    """
+
+    text = str(value or "")
+    if len(text) < 19:
+        return text or "未知时间"
+    return text[:19].replace("T", " ") + " UTC"
 
 
 def _clamp_score(value: Any) -> int:
