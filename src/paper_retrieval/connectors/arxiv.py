@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-import asyncio
-import time
 from datetime import datetime
 from xml.etree import ElementTree as ET
 
 import httpx
 
+from ..arxiv_access import (
+    ARXIV_SEARCH_ENDPOINT,
+    arxiv_headers,
+    arxiv_request_slot,
+    arxiv_request_slot_async,
+)
 from ..models import PaperDocument, SearchRequest
 from .base import PaperSearchConnector
 
@@ -19,78 +23,52 @@ class ArxivPaperConnector(PaperSearchConnector):
     arXiv 的布尔语法：AND / OR / ANDNOT 必须大写，多词短语必须用双引号，空格是隐式 OR（反直觉！）。
     具体查询拼装规则不再暴露给上层 Agent。
 
-    arXiv ToU 要求每次请求间隔 ≥3 秒且单连接。这里用类级锁 + 时间戳强制实现：
-    - 同步 search：用 time.sleep
-    - 异步 async_search：用 asyncio.sleep
-    避免多源并发时触发 429 限流。
+    发请求的规矩（身份、每秒最多 1 次、同时只飞 1 个请求）都在 arxiv_access 里，
+    和下 PDF 共用，避免检索和下全文各打各的把接口打爆。
     """
 
     source_name = "arxiv"
-    _endpoint = "https://export.arxiv.org/api/query"
+    _endpoint = ARXIV_SEARCH_ENDPOINT
     _atom_ns = {"atom": "http://www.w3.org/2005/Atom"}
-    # 中文说明：arXiv ToU 要求每次请求间隔 ≥3 秒。类级时间戳用于强制串行化。
-    _last_request_time: float = 0.0
-    _sync_lock = __import__('threading').Lock()
-    _async_lock: asyncio.Lock | None = None
+    _accept = "application/atom+xml, application/xml;q=0.9, */*;q=0.8"
 
     def __init__(self, client: httpx.Client | None = None):
         """初始化 HTTP 客户端。"""
 
-        self.headers = {
-            "User-Agent": "papers-agents/0.1 paper-retrieval",
-            "Accept": "application/atom+xml, application/xml;q=0.9, */*;q=0.8",
-        }
+        self.headers = arxiv_headers(accept=self._accept)
         self.client = client or httpx.Client(
             timeout=20.0,
             headers=self.headers,
+            # 中文说明：检索客户端只保留 1 条连接，避免自己这边就开一堆连接。
+            limits=httpx.Limits(max_connections=1, max_keepalive_connections=1),
         )
 
-    def _enforce_sync_spacing(self) -> None:
-        """同步版本：强制请求间隔 ≥3 秒（arXiv ToU）。"""
+    def _request_params(self, query: str, request: SearchRequest) -> dict[str, str | int]:
+        """组装发给 arXiv 的查询参数，同步和异步入口共用。"""
 
-        with self._sync_lock:
-            now = time.monotonic()
-            elapsed = now - self.__class__._last_request_time
-            if elapsed < 3.0:
-                time.sleep(3.0 - elapsed)
-            self.__class__._last_request_time = time.monotonic()
-
-    async def _enforce_async_spacing(self) -> None:
-        """异步版本：强制请求间隔 ≥3 秒（arXiv ToU）。"""
-
-        # 中文说明：asyncio.Lock 必须在一个有事件循环的上下文里创建，
-        # 所以这里用懒初始化（第一次调用时创建）。
-        if self.__class__._async_lock is None:
-            self.__class__._async_lock = asyncio.Lock()
-        async with self.__class__._async_lock:
-            now = time.monotonic()
-            elapsed = now - self.__class__._last_request_time
-            if elapsed < 3.0:
-                await asyncio.sleep(3.0 - elapsed)
-            self.__class__._last_request_time = time.monotonic()
+        return {
+            "search_query": query,
+            "start": 0,
+            # 中文说明：max_results 用 request.limit（service 层已经做了超量放大）。
+            # arXiv 单次请求上限 2000，实测 >200 响应会很慢，这里加个软上限。
+            "max_results": max(1, min(request.limit, 2000)),
+            "sortBy": "relevance",
+            "sortOrder": "descending",
+        }
 
     def search(self, request: SearchRequest) -> list[PaperDocument]:
         """执行 arXiv 检索，并在 connector 内完成查询拼装。"""
 
         # 中文说明：先渲染查询串。没有标题、概念组也为空时直接返回空列表，
-        # 连下面那道 3 秒限速门都不用等。
+        # 连下面那道限速门都不用等。
         query = self._render_query(request)
         if not query:
             return []
-        # 中文说明：强制 3 秒串行门（arXiv ToU）。
-        self._enforce_sync_spacing()
-        response = self.client.get(
-            self._endpoint,
-            params={
-                "search_query": query,
-                "start": 0,
-                # 中文说明：max_results 用 request.limit（service 层已经做了超量放大）。
-                # arXiv 单次请求上限 2000，实测 >200 响应会很慢，这里加个软上限。
-                "max_results": max(1, min(request.limit, 2000)),
-                "sortBy": "relevance",
-                "sortOrder": "descending",
-            },
-        )
+        with arxiv_request_slot(self._endpoint):
+            response = self.client.get(
+                self._endpoint,
+                params=self._request_params(query, request),
+            )
         response.raise_for_status()
         return self._parse_response_text(response.text, request)
 
@@ -103,27 +81,23 @@ class ArxivPaperConnector(PaperSearchConnector):
         """异步执行 arXiv 检索，避免在异步编排里阻塞事件循环。"""
 
         # 中文说明：先渲染查询串。没有标题、概念组也为空时直接返回空列表，
-        # 连下面那道 3 秒限速门都不用等。
+        # 连下面那道限速门都不用等。
         query = self._render_query(request)
         if not query:
             return []
-        # 中文说明：强制 3 秒串行门（arXiv ToU）。
-        await self._enforce_async_spacing()
-        resolved_client = client or httpx.AsyncClient(timeout=20.0)
+        resolved_client = client or httpx.AsyncClient(
+            timeout=20.0,
+            limits=httpx.Limits(max_connections=1, max_keepalive_connections=1),
+        )
         owns_client = client is None
         try:
-            response = await resolved_client.get(
-                self._endpoint,
-                params={
-                    "search_query": query,
-                    "start": 0,
-                    "max_results": max(1, min(request.limit, 2000)),
-                    "sortBy": "relevance",
-                    "sortOrder": "descending",
-                },
-                headers=self.headers,
-                timeout=20.0,
-            )
+            async with arxiv_request_slot_async(self._endpoint):
+                response = await resolved_client.get(
+                    self._endpoint,
+                    params=self._request_params(query, request),
+                    headers=self.headers,
+                    timeout=20.0,
+                )
         finally:
             if owns_client:
                 await resolved_client.aclose()

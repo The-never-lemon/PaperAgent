@@ -13,6 +13,13 @@ from urllib.parse import urlparse
 
 import httpx
 
+from src.paper_retrieval.arxiv_access import (
+    ArxivAccessDenied,
+    arxiv_headers,
+    arxiv_request_slot_async,
+    is_allowed_arxiv_url,
+    is_arxiv_url,
+)
 from src.paper_retrieval.models import PaperDocument
 # 中文注释：引入项目统一的日志工具。以前下载模块里一条日志都没有，
 # 出了问题（比如下回来的其实是 HTML 介绍页而不是全文）完全没法排查。
@@ -98,6 +105,8 @@ async def async_download_paper_fulltext(
         return DownloadedPaper(status="no_url", reason=reason)
     if not _is_safe_http_url(source_url):
         return _download_failed("全文地址只允许使用 http 或 https", source_url)
+    if is_arxiv_url(source_url) and not is_allowed_arxiv_url(source_url):
+        return _download_failed("该 arXiv 地址不在允许下载的路径里", source_url)
 
     maximum_bytes = max(1, max_file_size_mb) * 1024 * 1024
     timeout = httpx.Timeout(float(max(1, download_timeout_seconds)), connect=float(max(1, connect_timeout_seconds)))
@@ -110,29 +119,38 @@ async def async_download_paper_fulltext(
         max_redirects=5,
     )
     owns_client = runtime_resources is None
+    # 中文注释：打到 arXiv 时补上程序名字和来源页，并和检索共用同一条限速门。
+    headers = {"Accept": "application/pdf, text/html;q=0.9"}
+    if is_arxiv_url(source_url):
+        headers = arxiv_headers(accept=headers["Accept"])
     async with semaphore:
         try:
-            async with client.stream(
-                "GET",
-                source_url,
-                headers={"Accept": "application/pdf, text/html;q=0.9"},
-                timeout=timeout,
-            ) as response:
-                final_url = str(response.url)
-                if not _is_safe_http_url(final_url):
-                    return _download_failed("跳转后的全文地址不安全", final_url)
-                if response.status_code < 200 or response.status_code >= 300:
-                    return _download_failed(f"下载地址返回 HTTP {response.status_code}", final_url)
-                declared_length = _safe_content_length(response.headers.get("content-length"))
-                if declared_length is not None and declared_length > maximum_bytes:
-                    return _download_failed("文件超过允许大小", final_url)
-                content = await _read_limited_content_async(response, maximum_bytes)
-                if content is None:
-                    return _download_failed("文件超过允许大小", final_url)
-                content_type = response.headers.get("content-type", "")
-                content_kind = _detect_content_kind(content, content_type)
-                if content_kind is None:
-                    return _download_failed("下载内容不是可读取的 PDF 或 HTML", final_url)
+            async with arxiv_request_slot_async(source_url):
+                async with client.stream(
+                    "GET",
+                    source_url,
+                    headers=headers,
+                    timeout=timeout,
+                ) as response:
+                    final_url = str(response.url)
+                    if not _is_safe_http_url(final_url):
+                        return _download_failed("跳转后的全文地址不安全", final_url)
+                    if is_arxiv_url(final_url) and not is_allowed_arxiv_url(final_url):
+                        return _download_failed("跳转后的 arXiv 地址不在允许下载的路径里", final_url)
+                    if response.status_code < 200 or response.status_code >= 300:
+                        return _download_failed(f"下载地址返回 HTTP {response.status_code}", final_url)
+                    declared_length = _safe_content_length(response.headers.get("content-length"))
+                    if declared_length is not None and declared_length > maximum_bytes:
+                        return _download_failed("文件超过允许大小", final_url)
+                    content = await _read_limited_content_async(response, maximum_bytes)
+                    if content is None:
+                        return _download_failed("文件超过允许大小", final_url)
+                    content_type = response.headers.get("content-type", "")
+                    content_kind = _detect_content_kind(content, content_type)
+                    if content_kind is None:
+                        return _download_failed("下载内容不是可读取的 PDF 或 HTML", final_url)
+        except ArxivAccessDenied as exc:
+            return _download_failed(str(exc), source_url)
         except httpx.TimeoutException:
             return _download_failed("下载全文超时", source_url)
         except httpx.HTTPError as exc:
