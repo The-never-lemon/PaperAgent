@@ -28,6 +28,7 @@ from fastapi import HTTPException
 from src.llm.config import SystemConfig
 from src.models.workspace import SessionWorkspace
 from src.paper_retrieval.models import PaperDocument
+from src.services.paper_memory import ensure_bound
 from src.utils import get_logger
 from src.utils.read_utils.cache import PRIMARY_PDF_NAME, paper_cache_dir, write_metadata
 from src.utils.read_utils.pdf_metadata import PdfFirstPageInfo, extract_first_page_info
@@ -167,11 +168,25 @@ async def save_uploaded_pdf(
         logger.error("上传的 PDF 没有被全文查找逻辑认出", extra={"paper_id": paper_id, "path": str(pdf_dir)})
         raise HTTPException(status_code=500, detail="论文已经保存，但系统没能识别到它，请把这个情况反馈给开发者")
 
-    # 第 7 步：登记进会话工作区。同一会话的上传排队执行，免得互相覆盖。
+    # 第 7 步：登记进会话工作区，并记下本机目录和当前会话的引用。
+    # 中文说明：同一会话的上传排队执行，免得互相覆盖。
     lock = _upload_locks.setdefault(workspace.session_key, asyncio.Lock())
+
+    def _register_uploaded() -> tuple[str, bool]:
+        """把上传的论文写进工作区，并绑到本机论文目录。"""
+
+        paper_id, is_new = workspace.upsert_paper(paper.to_dict())
+        ensure_bound(
+            workspace.session_key,
+            paper_id,
+            paper.to_dict(),
+            cache_dir=pdf_dir.name,
+            cache_present=True,
+        )
+        return paper_id, is_new
+
     async with lock:
-        outcomes = await asyncio.to_thread(workspace.upsert_paper, paper.to_dict())
-    paper_id, is_new = outcomes
+        paper_id, is_new = await asyncio.to_thread(_register_uploaded)
 
     notice = _build_notice(info=info, is_new=is_new, page_count=info.page_count)
     logger.info(

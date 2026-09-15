@@ -26,7 +26,7 @@ const props = defineProps<{
 }>();
 
 const parts = computed(() =>
-  splitMathText(props.text ?? "").map((part) =>
+  splitMathText(String(props.text ?? "")).map((part) =>
     // 普通文字那部分再剥一遍裸 LaTeX 标记（论文摘要里的 \textit{...}、\% 这类）。
     // 公式那部分不能碰，所以只处理 kind === "text" 的片段。
     part.kind === "text" ? { ...part, value: stripBareLatex(part.value) } : part

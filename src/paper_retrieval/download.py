@@ -31,7 +31,7 @@ from src.utils.read_utils.cache import (
     read_cached_source_url,
     write_metadata,
 )
-from src.services.paper_memory import resolve_paper_cache_dir
+from src.services.paper_memory import ensure_bound, resolve_paper_cache_dir
 
 
 # 中文注释：模块级日志器，本文件里所有下载相关的日志都通过它输出。
@@ -88,6 +88,9 @@ async def async_download_paper_fulltext(
     paper_dir = resolve_paper_cache_dir(cache_dir, paper)
     cached = _find_cached_file(paper_dir)
     if cached is not None:
+        # 中文说明：本地已经有全文时，也要把目录名写进论文目录表。
+        # 以前检索登记时常常没记下目录，换个编号再来就会找错文件夹。
+        await asyncio.to_thread(_remember_paper_cache_dir, paper, paper_dir)
         return DownloadedPaper(
             status="downloaded",
             source_url=read_cached_source_url(paper_dir),
@@ -178,6 +181,8 @@ async def async_download_paper_fulltext(
             "bytes": len(content),
         },
     )
+    # 中文说明：全文刚落到磁盘，立刻把这个文件夹的名字记进目录表。
+    await asyncio.to_thread(_remember_paper_cache_dir, paper, paper_dir)
     return DownloadedPaper(
         status="downloaded",
         source_url=final_url,
@@ -258,6 +263,12 @@ def _download_failed(reason: str, source_url: str | None = None) -> DownloadedPa
 
     logger.warning("论文全文下载失败", extra={"reason": reason, "source_url": source_url})
     return DownloadedPaper(status="download_failed", reason=reason, source_url=source_url)
+
+
+def _remember_paper_cache_dir(paper: PaperDocument, paper_dir: Path) -> None:
+    """全文已经在磁盘上时，把缓存目录名写进本机论文目录表。"""
+
+    ensure_bound("", "", paper, cache_dir=paper_dir.name, cache_present=True)
 
 
 def _paper_cache_name(paper: PaperDocument) -> str:

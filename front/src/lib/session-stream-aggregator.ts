@@ -254,11 +254,20 @@ export class SessionStreamAggregator {
     return false;
   }
 
-  /** 返回当前时间线快照。只浅拷贝顶层数组，不再把执行树整棵复制一遍。 */
+  /**
+   * 返回当前时间线快照。
+   *
+   * 中文说明：
+   * 页面用的是浅层响应式，只认「整份快照被换成了新对象」。
+   * 工具进度是改同一张卡片上的文字和状态，如果快照里还拿着原来的卡片对象、
+   * 原来的子卡片列表，里面那一层组件会以为没变化，界面就卡住，只能刷新才看得到。
+   * 所以这里把执行树的每一层都拷一份新的；聊天正文仍只拷顶层列表，
+   * 因为它在模板里是按字符串往下传的，父组件重画时就能带上新字。
+   */
   snapshot(): SessionTimelineSnapshot {
     return {
       messages: this.messages.slice(),
-      runtimeEvents: this.runtimeEvents.slice(),
+      runtimeEvents: cloneRuntimeEventTree(this.runtimeEvents),
       activeNodeKey: this.activeNodeKey,
       artifacts: this.artifacts.slice(),
       isStreaming: this.isStreaming,
@@ -742,6 +751,14 @@ function slimDeepReadCard(metadata: Record<string, unknown>): DeepReadCardPayloa
     rigor: scoreFrom(metadata.rigor ?? report.rigor),
     clarity: scoreFrom(metadata.clarity ?? report.clarity),
   };
+}
+
+/** 拷贝执行树：每一层都换成新对象、新的子列表，页面才能看出进度文字和状态变了。 */
+function cloneRuntimeEventTree(events: UIRuntimeTimelineEvent[] | undefined): UIRuntimeTimelineEvent[] {
+  return (events ?? []).map((event) => ({
+    ...event,
+    children: cloneRuntimeEventTree(event.children),
+  }));
 }
 
 function normalizeDetailContent(value: RuntimeDetailContent | undefined): RuntimeDetailContent {

@@ -27,8 +27,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 /** 读取会话工作区快照（研究主题 + 论文清单）。 */
-export function fetchWorkspace(sessionKey: string): Promise<WorkspaceSnapshot> {
-  return request<WorkspaceSnapshot>(`/api/sessions/${encodeURIComponent(sessionKey)}/workspace`);
+export function fetchWorkspace(sessionKey: string, signal?: AbortSignal): Promise<WorkspaceSnapshot> {
+  return request<WorkspaceSnapshot>(`/api/sessions/${encodeURIComponent(sessionKey)}/workspace`, { signal });
 }
 
 /**
@@ -118,11 +118,34 @@ export function updatePaperMetadata(
   );
 }
 
-/** 批量删除工作区论文。不启动 run，不消耗模型。 */
+/** 批量删除工作区论文。只退出当前会话，不删本机缓存和其他会话里的同一篇。 */
 export function batchRemovePapers(sessionKey: string, paperIds: string[]): Promise<{ removed: number }> {
   return request(`/api/sessions/${encodeURIComponent(sessionKey)}/workspace/papers`, {
     method: "DELETE",
     body: JSON.stringify({ paper_ids: paperIds }),
+  });
+}
+
+/** 清除一篇论文的本机全文缓存后，后端返回的结果。 */
+export interface PurgePaperCacheResult {
+  paper_id: string;
+  workspace_paper_id: string;
+  cache_deleted: boolean;
+  sessions_updated: number;
+}
+
+/**
+ * 清除一篇论文的本机全文。
+ *
+ * 中文说明：
+ * 卡片、评分、加星和笔记会留在所有会话里；精读报告清掉，状态回到可精读。
+ * 编号放在请求体里，不拼进网址。DOI 这类编号自带斜杠，写进路径会把网址拆乱，
+ * 后端会当成「改标注」那条只允许 PATCH 的接口，界面就报 Method Not Allowed。
+ */
+export function purgePaperCache(sessionKey: string, paperId: string): Promise<PurgePaperCacheResult> {
+  return request(`/api/sessions/${encodeURIComponent(sessionKey)}/workspace/fulltext-cache`, {
+    method: "DELETE",
+    body: JSON.stringify({ paper_id: paperId }),
   });
 }
 

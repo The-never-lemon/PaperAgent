@@ -21,6 +21,8 @@ const props = defineProps<{
   reasoning?: string;
   isStreaming?: boolean;
   reasoningStreaming?: boolean;
+  /** 工作区论文编号对照表：DOI / arXiv 等写法都能对上主键。 */
+  paperRefLookup?: Map<string, string>;
   /** 工作区里真实存在的 paper_id 集合，传给 MarkdownText 做引用按钮渲染。 */
   knownPaperIds?: Set<string>;
 }>();
@@ -63,6 +65,7 @@ watch(
         v-if="content"
         :content="content"
         :streaming="isStreaming"
+        :paper-ref-lookup="paperRefLookup"
         :known-paper-ids="knownPaperIds"
         @paper-click="(pid) => emit('paperClick', pid)"
       />

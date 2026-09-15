@@ -74,6 +74,11 @@ function toggleAbstract(paperId: string) {
     [paperId]: !expandedAbstracts.value[paperId],
   };
 }
+
+/** 卡片上的「原文」地址：没有 PDF 时也能用 DOI 或编号拼出来。 */
+function originalLink(paper: ChatPaperCard) {
+  return pickPaperLink(paper);
+}
 </script>
 
 <template>
@@ -92,7 +97,7 @@ function toggleAbstract(paperId: string) {
             </span>
           </header>
           <p class="paper-card-meta">
-            <span v-if="paper.authors.length">{{ paper.authors.slice(0, 3).join(", ") }}{{ paper.authors.length > 3 ? " 等" : "" }}</span>
+            <span v-if="paper.authors?.length">{{ paper.authors.slice(0, 3).join(", ") }}{{ paper.authors.length > 3 ? " 等" : "" }}</span>
             <span v-if="paper.year">{{ paper.year }}</span>
             <span v-if="paper.venue">{{ paper.venue }}</span>
             <span class="paper-source-badge">{{ paper.source || "未知来源" }}</span>
@@ -132,9 +137,9 @@ function toggleAbstract(paperId: string) {
               <FileText :size="14" /> 报告
             </button>
             <a
-              v-if="pickPaperLink(paper)"
+              v-if="originalLink(paper)"
               class="paper-card-action paper-card-link"
-              :href="pickPaperLink(paper)"
+              :href="originalLink(paper)"
               target="_blank"
               rel="noreferrer"
             >

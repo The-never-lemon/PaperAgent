@@ -583,6 +583,29 @@ class SessionWorkspace:
         self.save()
         return True
 
+    def invalidate_local_fulltext(self, paper_id: str) -> bool:
+        """清掉一篇论文的本地全文标记和精读报告，卡片、评分和标注都留下。
+
+        中文说明：
+        本机 paper_cache 被清掉或目录被手工删掉之后，这篇论文不能再当成
+        「已经精读」。这里只去掉报告和「本地有全文」标记，标题、摘要、评分、
+        加星还在，之后可以重新精读。
+        """
+
+        entry = self.get_paper(paper_id)
+        if entry is None:
+            return False
+        changed = False
+        if entry.deep_read is not None:
+            entry.deep_read = None
+            changed = True
+        if entry.fulltext_cached:
+            entry.fulltext_cached = False
+            changed = True
+        if changed:
+            self.save()
+        return changed
+
     def update_paper_annotations(
         self, paper_id: str, *, starred: bool | None = None, tags: list[str] | None = None, note: str | None = None
     ) -> bool:

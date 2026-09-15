@@ -23,7 +23,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from src.llm.base import normalize_token_usage
+from src.llm.base import attach_reasoning, normalize_token_usage
 from src.llm.config import SystemConfig
 from src.utils import get_logger
 from src.utils.llm_json import parse_llm_json
@@ -65,7 +65,9 @@ QA_TOC_MAX_ENTRIES = 60
 QA_TOC_PREVIEW_CHARS = 60
 
 # 模型调用失败时，写进失败原因的错误正文截断长度。
-QA_ERROR_DETAIL_CHARS = 120
+# 中文注释：上游 400 的真正原因往往写在很长一段 JSON 的 message 字段末尾，
+# 截太短时界面上只能看到 "invalid_request_error"，排查不到具体是哪条协议被拒。
+QA_ERROR_DETAIL_CHARS = 500
 
 # 问答小工具循环的最大轮数（每轮模型可调 read_sections 拉原文片段）。
 QA_MAX_TOOL_ROUNDS = 4
@@ -220,6 +222,8 @@ async def _run_paper_qa_impl(*, paper_id: str, question: str, deps: PaperQaDeps)
     # 未压缩的原始对话（含 assistant(tool_calls) 与 tool 结果），repair 时复用。
     conversation: list[JsonObject] = list(messages)
     final_text = ""
+    # 中文注释：记下产出最终回答的那一次模型响应，补救重试时要把思考原文一起带回。
+    final_response: "LLMResponse | None" = None
 
     for qa_round in range(1, QA_MAX_TOOL_ROUNDS + 1):
         _check_cancellation(deps)
@@ -238,34 +242,42 @@ async def _run_paper_qa_impl(*, paper_id: str, question: str, deps: PaperQaDeps)
         # 模型没调工具（或者已经到了最后一轮）：这份输出就是最终回答。
         if not response.tool_calls or qa_round == QA_MAX_TOOL_ROUNDS:
             final_text = response.content or ""
+            final_response = response
             break
 
         # 有工具调用：执行 read_sections，把结果回填进对话，进入下一轮。
+        # 中文注释：模型一次回复里可能同时点名取好几段原文。这些调用必须
+        # 写在同一条 assistant 消息里，后面再按顺序跟对应的 tool 结果。
+        # 如果拆成「一条 assistant + 一条 tool」反复拼接，上游会当成非法请求
+        # 直接返回 400（实测 deepseek-flash：一次发两条 read_sections 就会失败）。
         tool_calls = _normalize_tool_calls(response.tool_calls)
-        recorded_calls = []
+        assistant_message: JsonObject = {
+            "role": "assistant",
+            "content": response.content or "",
+            "tool_calls": [
+                {
+                    "id": call["id"],
+                    "type": "function",
+                    "function": {
+                        "name": call["name"],
+                        "arguments": json.dumps(call["arguments"], ensure_ascii=False),
+                    },
+                }
+                for call in tool_calls
+            ],
+        }
+        # 中文注释：开了思考档位的模型，上一轮的思考原文必须原样带回下一轮。
+        attach_reasoning(assistant_message, response)
+        conversation.append(assistant_message)
         for call in tool_calls:
             tool_result = _handle_read_sections(call["arguments"], chunks)
-            recorded_calls.append(
+            conversation.append(
                 {
-                    "role": "assistant",
-                    "content": response.content or "",
-                    "tool_calls": [
-                        {
-                            "id": call["id"],
-                            "type": "function",
-                            "function": {
-                                "name": call["name"],
-                                "arguments": json.dumps(call["arguments"], ensure_ascii=False),
-                            },
-                        }
-                    ],
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "name": call["name"],
+                    "content": tool_result,
                 }
-            )
-            conversation.extend(
-                [
-                    recorded_calls[-1],
-                    {"role": "tool", "tool_call_id": call["id"], "name": call["name"], "content": tool_result},
-                ]
             )
 
     # final_text 一直为空说明循环跑满了还在调工具（防御）。此时用最后一段
@@ -290,9 +302,12 @@ async def _run_paper_qa_impl(*, paper_id: str, question: str, deps: PaperQaDeps)
         """
 
         nonlocal total_input, total_output
+        repair_assistant: JsonObject = {"role": "assistant", "content": final_text}
+        if final_response is not None:
+            attach_reasoning(repair_assistant, final_response)
         repair_messages = [
             *conversation,
-            {"role": "assistant", "content": final_text},
+            repair_assistant,
             {
                 "role": "user",
                 "content": (

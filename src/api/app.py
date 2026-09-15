@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import sys
 import time
 import uuid
 from dataclasses import dataclass
@@ -26,6 +28,10 @@ from .routers.workspace import create_workspace_router
 
 JsonObject = dict[str, Any]
 logger = get_logger(__name__)
+
+# 中文注释：下面的 Windows 处理只需要做一次。create_app 在测试里可能被多次调用，
+# 不能反复给系统函数包一层，否则关连接时会套很多层。
+_windows_asyncio_prepared = False
 
 
 @dataclass(slots=True)
@@ -58,6 +64,9 @@ def create_app(
     """
 
     setup_logging()
+    # 中文注释：Windows 关掉已经断开的网络连接时，系统自带的异步循环会多报一段
+    # 看起来像崩溃的堆栈。服务一启动就处理掉，后面关模型客户端、关下载连接都不会再刷屏。
+    _prepare_windows_asyncio()
     settings_repo = settings_repo or SettingsRepository(_default_settings_path())
     sessions_repo = sessions_repo or SQLiteSessionRepository()
     config = config or GatewayConfig()
@@ -206,6 +215,66 @@ def _mount_frontend(app: FastAPI) -> None:
             return FileResponse(candidate)
         # 中文注释：未知前端路径统一回退到 index.html，由前端路由系统接管。
         return FileResponse(index_file)
+
+
+def _prepare_windows_asyncio() -> None:
+    """处理 Windows 上关闭网络连接时的一段多余报错。
+
+    中文说明：
+    Windows 默认的异步循环在关掉已经断开的连接时，还会再对插座做一次
+    “两边都关掉”。如果对面已经把连接掐了，这一步就会抛出 ConnectionResetError
+    （常见错误码 10054），控制台里看起来像程序崩了，其实这次请求多半早就结束了。
+
+    这里做两件事：
+    1. 如果异步循环还没启动，就换成 Windows 上更不容易在关连接时报错的那一套；
+    2. 如果循环已经在跑（例如用 uvicorn 命令行拉起服务），就给系统关连接的那一步
+       加一层保护：碰到“连接已被对面掐掉”就忽略，并把插座收干净。
+    """
+
+    global _windows_asyncio_prepared
+    if sys.platform != "win32" or _windows_asyncio_prepared:
+        return
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # 中文注释：还没有正在跑的异步循环时才能换循环类型，换完之后 uvicorn 会按新的来。
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    try:
+        from asyncio.proactor_events import _ProactorBasePipeTransport
+    except ImportError:
+        _windows_asyncio_prepared = True
+        return
+
+    original = _ProactorBasePipeTransport._call_connection_lost
+
+    def _call_connection_lost(self, exc):  # noqa: ANN001
+        """关连接时如果对面已经掐线，就把插座收干净，不再把堆栈打到控制台。"""
+
+        try:
+            return original(self, exc)
+        except OSError:
+            # 中文注释：系统原函数在 shutdown 这一步抛错后，后面的 close 不会执行。
+            # 这里补上关闭，避免插座一直挂着。
+            sock = getattr(self, "_sock", None)
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+                self._sock = None
+            server = getattr(self, "_server", None)
+            if server is not None:
+                try:
+                    server._detach()
+                except Exception:
+                    pass
+                self._server = None
+            self._called_connection_lost = True
+
+    _ProactorBasePipeTransport._call_connection_lost = _call_connection_lost
+    _windows_asyncio_prepared = True
 
 
 def _default_settings_path() -> Path:

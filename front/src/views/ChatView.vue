@@ -21,6 +21,7 @@ import {
   cancelSessionRun,
   createSession,
   fetchSessionThread,
+  isAbortError,
   startSessionRun,
   subscribeSessionRun,
 } from "../api/sessions";
@@ -38,6 +39,7 @@ import UserBubble from "../components/chat/UserBubble.vue";
 import StatusPill from "../components/StatusPill.vue";
 import PaperLibraryPanel from "../components/workspace/PaperLibraryPanel.vue";
 import { createReadableId } from "../lib/random-id";
+import { addPaperRefAliases } from "../lib/paper-link";
 import { SessionStreamAggregator } from "../lib/session-stream-aggregator";
 import { pushToast } from "../stores/notifications";
 import type {
@@ -47,6 +49,7 @@ import type {
   PaperListPayload,
   ReviewCardPayload,
   WorkspacePaperItem,
+  WorkspaceSnapshot,
 } from "../types/chat";
 import type {
   SessionRuntimeEvent,
@@ -81,6 +84,10 @@ const cancelling = ref(false);
 const activeRunId = ref<string | null>(null);
 const streamSource = ref<EventSource | null>(null);
 const manualClose = ref(false);
+// 中文注释：这里用浅层响应式，避免把整棵执行树做成深度监听。
+// 代价是子卡片那一层不会自动发现「同一张卡片被改了字」。
+// 所以 aggregator.snapshot() 必须把执行树拷成新对象，下面 syncSnapshot 换掉这一份后，
+// 工具进度才会跟着刷，而不用整页刷新。
 const timelineSnapshot = shallowRef<SessionTimelineSnapshot | null>(null);
 const scrollElement = ref<HTMLElement | null>(null);
 // 中文说明：旧会话可能有十几轮对话、上百张论文卡。打开时先只挂最近几轮，
@@ -184,8 +191,10 @@ const workspacePapers = ref<Map<string, WorkspacePaperItem>>(new Map());
 const paperDialogVisible = ref(false);
 const dialogPaper = ref<WorkspacePaperItem | null>(null);
 
-// 论文工作区面板引用（用于 turn_end 时刷新）
-const libraryPanelRef = ref<InstanceType<typeof PaperLibraryPanel> | null>(null);
+// 论文工作区快照：对话页拉一次，再传给右侧面板，避免同一份清单请求两遍。
+const workspaceSnapshot = ref<WorkspaceSnapshot | null>(null);
+// 中文说明：连点几个历史会话时，取消上一次还在路上的对话和工作区请求。
+let sessionLoadAbort: AbortController | null = null;
 
 const aggregator = new SessionStreamAggregator();
 
@@ -231,6 +240,31 @@ const isRunning = computed(() => {
   return timelineSnapshot.value?.isStreaming ?? false;
 });
 const hasMessages = computed(() => (timelineSnapshot.value?.messages.length ?? 0) > 0);
+
+/** 把工作区和对话里出现过的论文编号收成对照表，DOI / arXiv 写法也能点开。 */
+const paperRefLookup = computed(() => {
+  const lookup = new Map<string, string>();
+  for (const paper of workspacePapers.value.values()) {
+    addPaperRefAliases(lookup, paper.paper_id, [paper.doi, paper.url, paper.pdf_url]);
+  }
+  const snapshot = timelineSnapshot.value;
+  if (!snapshot) {
+    return lookup;
+  }
+  for (const message of snapshot.messages) {
+    const payload = asPaperList(message);
+    if (!payload) {
+      continue;
+    }
+    for (const paper of payload.papers) {
+      if (!paper?.paper_id) {
+        continue;
+      }
+      addPaperRefAliases(lookup, paper.paper_id, [paper.doi, paper.url, paper.pdf_url]);
+    }
+  }
+  return lookup;
+});
 
 /** 欢迎态：没有选中会话或会话里还没有任何消息时，显示居中的大输入框。 */
 const showWelcome = computed(() => !threadLoading.value && !hasMessages.value && !isRunning.value);
@@ -308,9 +342,18 @@ function turnNeedsStreamingPlaceholder(turn: FlowTurn, isLastVisible: boolean): 
 /** 上面是否还有更早的对话可以加载。 */
 const hasOlderTurns = computed(() => hiddenTurnCount.value > 0);
 
-/** 卡片载荷的类型收窄辅助（模板里按 kind 分发后做一次性断言）。 */
+/** 只把「论文清单」卡片收成列表载荷。精读/综述卡片没有 papers 字段。 */
 function asPaperList(message: UISessionMessage): PaperListPayload | null {
-  return (message.card as PaperListPayload | null) ?? null;
+  if (message.kind !== "paper_list" || !message.card) {
+    return null;
+  }
+  const card = message.card as PaperListPayload;
+  // 中文说明：对照表会 for...of 里面的 papers。精读卡片也带 card，但没有这份列表。
+  // 当成论文清单去遍历会直接抛错，Vue 把整页对话卸掉，看起来就像运行中白屏。
+  if (!Array.isArray(card.papers)) {
+    return null;
+  }
+  return card;
 }
 function asDeepRead(message: UISessionMessage): DeepReadCardPayload | null {
   return (message.card as DeepReadCardPayload | null) ?? null;
@@ -336,6 +379,7 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  sessionLoadAbort?.abort();
   closeStream(true);
   // 中文说明：组件卸载时把排队中的渲染取消掉，免得它下一帧去动已经销毁的组件状态。
   cancelScheduledSnapshot();
@@ -354,20 +398,27 @@ async function selectSession(sessionKey: string) {
   drawerReport.value = null;
   selectedSessionKey.value = sessionKey;
   threadLoading.value = true;
+  workspaceSnapshot.value = null;
   // 中文说明：先把上一份对话从页面上卸掉，切到很长的旧会话时就不会两份历史叠在一起画。
   timelineSnapshot.value = null;
   hiddenTurnCount.value = 0;
   userScrolledUp.value = false;
   showScrollToBottom.value = false;
+  // 中文说明：取消上一次会话还没回来的请求，避免连点几个会话时后端排队。
+  sessionLoadAbort?.abort();
+  sessionLoadAbort = new AbortController();
+  const signal = sessionLoadAbort.signal;
   try {
-    const thread = await fetchSessionThread(sessionKey);
-    // 中文注释：用户连续点击多个历史会话时，旧请求可能比新请求更晚返回；直接丢掉旧结果。
-    if (selectedSessionKey.value !== sessionKey) {
+    const thread = await fetchSessionThread(sessionKey, signal);
+    if (signal.aborted || selectedSessionKey.value !== sessionKey) {
       return;
     }
     hydrateThread(thread);
-    await refreshWorkspacePapers();
+    await refreshWorkspacePapers(signal);
   } catch (error) {
+    if (isAbortError(error)) {
+      return;
+    }
     if (error instanceof ApiRequestError && error.status === 404 && selectedSessionKey.value === sessionKey) {
       resetToBlankWorkspace();
       emit("update:selectedKey", "");
@@ -404,6 +455,11 @@ function resetToBlankWorkspace() {
   drawerVisible.value = false;
   drawerReport.value = null;
   readablePaperIds.value = new Set();
+  workspacePaperIds.value = new Set();
+  workspacePapers.value = new Map();
+  workspaceSnapshot.value = null;
+  sessionLoadAbort?.abort();
+  sessionLoadAbort = null;
 }
 
 /** 用线程快照重建聚合器状态，并在有活跃 run 时自动接回实时流。
@@ -476,15 +532,21 @@ function syncSnapshot() {
 }
 
 /** 拉取工作区快照，维护"哪些论文已有精读报告"（卡片上的报告按钮）。 */
-async function refreshWorkspacePapers() {
-  if (!selectedSessionKey.value) {
+async function refreshWorkspacePapers(signal?: AbortSignal) {
+  const sessionKey = selectedSessionKey.value;
+  if (!sessionKey) {
     readablePaperIds.value = new Set();
     workspacePaperIds.value = new Set();
     workspacePapers.value = new Map();
+    workspaceSnapshot.value = null;
     return;
   }
   try {
-    const snapshot = await fetchWorkspace(selectedSessionKey.value);
+    const snapshot = await fetchWorkspace(sessionKey, signal);
+    if (signal?.aborted || selectedSessionKey.value !== sessionKey) {
+      return;
+    }
+    workspaceSnapshot.value = snapshot;
     const nextReadable = snapshot.papers.filter((paper) => paper.has_report).map((paper) => paper.paper_id);
     const nextIds = snapshot.papers.map((paper) => paper.paper_id);
     // 中文注释：Set 引用变了会让所有助手气泡重解析 Markdown。成员没变时复用旧集合。
@@ -496,7 +558,12 @@ async function refreshWorkspacePapers() {
     }
     // 中文注释：同时按编号存一份论文明细，点引用但还没精读时用它弹出论文信息卡片。
     workspacePapers.value = new Map(snapshot.papers.map((paper) => [paper.paper_id, paper]));
-  } catch {
+    // 中文说明：对话里的检索卡片可能比工作区接口更早带上 DOI / 网址，补到对照表里。
+    rememberPapersFromTimeline();
+  } catch (error) {
+    if (isAbortError(error)) {
+      return;
+    }
     // 中文注释：工作区接口失败不阻塞聊天主流程，卡片只是暂时少一个"报告"按钮。
   }
 }
@@ -662,7 +729,8 @@ function openStream(sessionKey: string, streamUrl: string) {
       // 顺手让左侧论文面板重拉一次，用户不用刷新页面就能看到刚检索到的论文。
       const cardKind = typeof event.metadata?.kind === "string" ? event.metadata.kind : "";
       if (event.event === "message" && cardKind === "paper_list") {
-        void libraryPanelRef.value?.refresh();
+        const papers = Array.isArray(event.metadata?.papers) ? event.metadata.papers : [];
+        rememberPapersFromCards(papers);
         void refreshWorkspacePapers();
       }
       if (event.event === "turn_end") {
@@ -768,8 +836,7 @@ async function handleRunFinished(sessionKey: string, event: SessionRuntimeEvent)
   }
   await refreshWorkspacePapers();
   // 中文注释：一轮跑完后工作区可能已经变了（新检索到论文、评价出分、精读完成），
-  // 让左侧论文面板也跟着刷新一次，否则用户要手动刷新页面才能看到最新状态。
-  void libraryPanelRef.value?.refresh();
+  // 右侧论文面板和对话里的引用共用这一次刷新。
   emit("refreshSessions");
   if (event.status === "failed") {
     pushToast({
@@ -951,10 +1018,9 @@ function handlePaperClick(paperId: string) {
     void openReportById(paperId);
     return;
   }
-  const paper = workspacePapers.value.get(paperId);
+  const paper = findPaperRecord(paperId);
   if (!paper) {
-    // 中文注释：正常走不到这里（引用按钮只在编号存在于工作区时才渲染），
-    // 兜底沿用老行为打开报告，由它给出统一的失败提示。
+    // 中文注释：编号已经对上工作区主键，但清单还没拉回来时，先按报告接口试一次。
     void openReportById(paperId);
     return;
   }
@@ -980,6 +1046,102 @@ function sameStringSet(current: Set<string>, next: readonly string[]) {
     return false;
   }
   return next.every((value) => current.has(value));
+}
+
+/** 检索卡片一到，立刻把编号记进对照表，等不到工作区接口返回也能点开引用。 */
+function rememberPapersFromCards(papers: unknown[]) {
+  const nextIds = new Set(workspacePaperIds.value);
+  const nextMap = new Map(workspacePapers.value);
+  let changed = false;
+  for (const item of papers) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const paper = item as ChatPaperCard;
+    const paperId = String(paper.paper_id || "").trim();
+    if (!paperId) {
+      continue;
+    }
+    if (!nextIds.has(paperId)) {
+      nextIds.add(paperId);
+      changed = true;
+    }
+    const existing = nextMap.get(paperId);
+    if (existing) {
+      const doi = existing.doi || paper.doi || "";
+      const url = existing.url || paper.url || "";
+      const pdfUrl = existing.pdf_url || paper.pdf_url || "";
+      if (doi !== (existing.doi || "") || url !== existing.url || pdfUrl !== existing.pdf_url) {
+        nextMap.set(paperId, { ...existing, doi, url, pdf_url: pdfUrl });
+        changed = true;
+      }
+      continue;
+    }
+    nextMap.set(paperId, {
+      paper_id: paperId,
+      title: paper.title || "",
+      authors: Array.isArray(paper.authors) ? paper.authors : [],
+      year: paper.year ?? null,
+      venue: paper.venue || "",
+      source: paper.source || "",
+      abstract: paper.abstract || "",
+      url: paper.url || "",
+      pdf_url: paper.pdf_url || "",
+      doi: paper.doi || "",
+      status: paper.status || "new",
+      score: paper.score ?? null,
+      has_report: false,
+      fulltext_cached: false,
+      added_at: "",
+      starred: false,
+      tags: [],
+      note: "",
+    });
+    changed = true;
+  }
+  if (!changed) {
+    return;
+  }
+  workspacePaperIds.value = nextIds;
+  workspacePapers.value = nextMap;
+}
+
+/** 从当前对话里的检索卡片补 DOI / 网址，给引用按钮和「原文」用。 */
+function rememberPapersFromTimeline() {
+  const snapshot = timelineSnapshot.value;
+  if (!snapshot) {
+    return;
+  }
+  for (const message of snapshot.messages) {
+    const payload = asPaperList(message);
+    if (payload) {
+      rememberPapersFromCards(payload.papers);
+    }
+  }
+}
+
+/** 点引用时先找工作区，找不到再从对话里的检索卡片拼一份。 */
+function findPaperRecord(paperId: string) {
+  const fromWorkspace = workspacePapers.value.get(paperId);
+  if (fromWorkspace) {
+    return fromWorkspace;
+  }
+  const snapshot = timelineSnapshot.value;
+  if (!snapshot) {
+    return undefined;
+  }
+  for (const message of snapshot.messages) {
+    const payload = asPaperList(message);
+    if (!payload) {
+      continue;
+    }
+    const card = payload.papers.find((item) => item.paper_id === paperId);
+    if (card) {
+      rememberPapersFromCards([card]);
+      return workspacePapers.value.get(paperId);
+    }
+  }
+  return undefined;
 }
 
 function statusTone(status: string) {
@@ -1077,6 +1239,7 @@ function handleError(error: unknown, title: string) {
                   :reasoning="message.reasoning"
                   :is-streaming="message.isStreaming"
                   :reasoning-streaming="message.reasoningStreaming"
+                  :paper-ref-lookup="paperRefLookup"
                   :known-paper-ids="workspacePaperIds"
                   @paper-click="handlePaperClick"
                 />
@@ -1166,8 +1329,8 @@ function handleError(error: unknown, title: string) {
 
       <PaperLibraryPanel
         v-if="selectedSessionKey && !showWelcome"
-        ref="libraryPanelRef"
         :session-key="selectedSessionKey"
+        :snapshot="workspaceSnapshot"
         :busy="isRunning || sending"
         @request-deep-read="(paperId) => requestDeepReadById(paperId)"
         @open-report="openReportById"

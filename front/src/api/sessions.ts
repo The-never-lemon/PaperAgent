@@ -55,6 +55,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T;
 }
 
+/** 用户已经切走会话时，浏览器会取消还在路上的请求。这种失败不要弹错误。 */
+export function isAbortError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && (error as { name?: string }).name === "AbortError";
+}
+
 export function listSessions(): Promise<SessionListPayload> {
   return request<SessionListPayload>("/api/sessions");
 }
@@ -66,8 +71,8 @@ export function createSession(payload?: JsonObject): Promise<SessionCreatePayloa
   });
 }
 
-export function fetchSessionThread(sessionKey: string): Promise<SessionThreadPayload> {
-  return request<SessionThreadPayload>(`/api/sessions/${encodeURIComponent(sessionKey)}/webui-thread`);
+export function fetchSessionThread(sessionKey: string, signal?: AbortSignal): Promise<SessionThreadPayload> {
+  return request<SessionThreadPayload>(`/api/sessions/${encodeURIComponent(sessionKey)}/webui-thread`, { signal });
 }
 
 export function deleteSession(sessionKey: string): Promise<{ deleted: boolean; key: string }> {

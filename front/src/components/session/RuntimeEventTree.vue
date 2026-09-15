@@ -217,9 +217,12 @@ function hasDetail(event: UIRuntimeTimelineEvent) {
           <pre>{{ formatDetailContent(event.detailContent) }}</pre>
         </details>
 
+        <!-- 中文注释：子卡片列表必须传一份新数组。进度更新是改原来那张卡片，
+             若把原来的 children 原样往下传，这一层组件会以为列表没变，
+             正在执行 / 已完成 的文字就不会跟着刷新。 -->
         <RuntimeEventTree
           class="runtime-event-children"
-          :events="event.children"
+          :events="event.children.slice()"
           :depth="(depth ?? 0) + 1"
           :on-resume="onResume"
         />

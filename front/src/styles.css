@@ -5571,6 +5571,16 @@ body[data-resizing="true"] {
   color: var(--accent-ink);
 }
 
+.paper-library-panel .paper-action.danger {
+  color: var(--danger-ink);
+  border-color: var(--danger);
+}
+
+.paper-library-panel .paper-action:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .paper-library-panel .panel-loading,
 .paper-library-panel .panel-empty {
   padding: 2rem 1rem;

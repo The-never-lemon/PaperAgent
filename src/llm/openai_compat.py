@@ -116,6 +116,10 @@ class OpenAICompatProvider(LLMProvider):
         # 把分片聚合回完整的工具调用列表；没有这一步，上层（对话主 Agent 的工具循环）
         # 在流式模式下永远拿不到 tool_calls，模型请求的工具会被静默丢掉。
         tool_call_bucket: dict[int, JsonObject] = {}
+        # 中文注释：思考原文也是按分片推过来的，必须像正文一样拼起来。
+        # 拼好后挂在返回值上，上层才能在下一轮把思考原样带回；只推给前端、
+        # 自己不留下，下一轮请求就会被上游拒绝。
+        reasoning_parts: list[str] = []
         try:
             stream = await _maybe_await(
                 self.client.chat.completions.create(
@@ -139,8 +143,10 @@ class OpenAICompatProvider(LLMProvider):
                         callbacks.on_content_delta(text)  # 如果上层注册了文本回调，立刻把增量推送出去（前端实时打字效果靠这个）。
                         emitted = True
                 reasoning = getattr(delta, "reasoning_content", None) or ""
-                if reasoning and callbacks.on_thinking_delta:
-                    callbacks.on_thinking_delta(reasoning)
+                if reasoning:
+                    reasoning_parts.append(reasoning)
+                    if callbacks.on_thinking_delta:
+                        callbacks.on_thinking_delta(reasoning)
                     emitted = True
                 for item in getattr(delta, "tool_calls", None) or []:
                     item_dict = _to_dict(item)
@@ -156,6 +162,7 @@ class OpenAICompatProvider(LLMProvider):
                 tool_calls=_finalize_stream_tool_calls(tool_call_bucket),
                 finish_reason=finish_reason or "stop",
                 usage=usage,
+                reasoning_content="".join(reasoning_parts) or None,
             )
         except Exception as exc:
             return self._error_response(exc)
@@ -215,6 +222,11 @@ class OpenAICompatProvider(LLMProvider):
         }
         if tools:
             kwargs["tools"] = list(tools)
+            # 中文注释：显式请求允许模型在一次回复里同时发起多条工具调用（并行工具调用）。
+            # OpenAI 协议里这个参数默认是开的，但部分兼容网关（比如 OpenCode Go）可能会
+            # 重置或忽略这些默认值，导致模型每次回复只发一条工具调用、检索被迫一轮一轮排队。
+            # 这里显式发送出来实测网关是否真正透传生效。
+            kwargs["parallel_tool_calls"] = True
         if settings.temperature is not None and not _is_reasoning_model(self.model):
             # o 系列和 GPT-5 等推理模型通常不接受 temperature，避免请求被上游拒绝。
             kwargs["temperature"] = settings.temperature
@@ -350,16 +362,25 @@ def _sanitize_messages(messages: Sequence[Message]) -> list[JsonObject]:
     这个函数的目标是把“内部可用”的消息转换为“协议安全”的消息，避免把
     trace id、调试字段或其他业务元数据意外发送给模型供应商。
     """
-    # 只保留 Chat Completions 安全字段，避免把内部元数据传给上游。
+    # 只保留协议认识的字段，避免把内部元数据传给上游。
+    # reasoning_content 是思考模型在多轮工具调用里要求原样带回的字段。
     cleaned: list[JsonObject] = []
     for message in messages:
         role = message.get("role")
         if role not in {"system", "user", "assistant", "tool"}:
             raise ValueError(f"invalid message role: {role}")
-        item = {k: v for k, v in message.items() if k in {"role", "content", "tool_calls", "tool_call_id", "name"}}
+        item = {
+            k: v
+            for k, v in message.items()
+            if k in {"role", "content", "tool_calls", "tool_call_id", "name", "reasoning_content"}
+        }
         if role == "assistant" and item.get("tool_calls") and item.get("content") == "":
             # OpenAI 协议里，assistant 发起工具调用时 content 可为 null，而不是空字符串。
             item["content"] = None
+        # 中文注释：思考原文只在真正有内容时才带上。空字符串留给上游会被当成
+        # 多传了一个字段；没思考的模型本来就不会带这个键。
+        if not item.get("reasoning_content"):
+            item.pop("reasoning_content", None)
         cleaned.append(item)
     return _enforce_role_alternation(cleaned)
 

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from src.llm import ModelConfig, ProviderSnapshot, SystemConfig, make_provider
+from src.llm.base import LLMResponse, attach_reasoning
 from src.utils import get_logger
 from src.utils.llm_json import parse_llm_json
 
@@ -138,11 +139,12 @@ class AnalyseAgent(BaseAgent):
         configured_max_tokens = _resolve_max_tokens(self.context.llm)
         last_raw = ""
         last_reason = "模型没有返回可解析的 JSON"
+        last_response: LLMResponse | None = None
         for attempt in range(1, attempts + 1):
             max_tokens = _attempt_max_tokens(configured_max_tokens, attempt)
             try:
                 response = await self.context.llm.provider.chat(
-                    _attempt_messages(messages, last_raw, last_reason, attempt),
+                    _attempt_messages(messages, last_response, last_reason, attempt),
                     temperature=temperature,
                     max_tokens=max_tokens,
                     reasoning_effort=reasoning_effort,
@@ -155,6 +157,7 @@ class AnalyseAgent(BaseAgent):
                 )
                 continue
             self.report_usage(response, usage_callback)
+            last_response = response
             last_raw = str(getattr(response, "content", "") or "")
             outcome = await _parse_response(response, max_tokens=max_tokens)
             if outcome.parsed is not None:
@@ -244,7 +247,7 @@ def _attempt_max_tokens(configured_max_tokens: int | None, attempt: int) -> int 
 
 def _attempt_messages(
     messages: list[JsonObject],
-    last_raw: str,
+    last_response: LLMResponse | None,
     last_reason: str,
     attempt: int,
 ) -> list[JsonObject]:
@@ -255,13 +258,17 @@ def _attempt_messages(
     模型看不见自己上次写坏在哪，只会照着同样的毛病再写一遍。附带方式是：
     把上次的输出当成"模型自己的回答"放进对话里（assistant 那条），紧接着补一条
     用户消息指出问题并要求重写。这样既符合对话接口的格式要求，也让模型有据可依。
+    开了思考档位时，上一轮的思考原文也要挂在那条助手消息上，否则上游会拒绝这次请求。
     """
 
-    if attempt == 1 or not last_raw.strip():
+    last_raw = str(getattr(last_response, "content", "") or "") if last_response is not None else ""
+    if attempt == 1 or not last_raw.strip() or last_response is None:
         return list(messages)
+    assistant = {"role": "assistant", "content": last_raw}
+    attach_reasoning(assistant, last_response)
     return [
         *messages,
-        {"role": "assistant", "content": last_raw},
+        assistant,
         {
             "role": "user",
             "content": (

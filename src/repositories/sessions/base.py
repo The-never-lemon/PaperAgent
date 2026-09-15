@@ -22,6 +22,10 @@ class SessionRepository(ABC):
         """根据会话键获取完整会话记录。"""
 
     @abstractmethod
+    def session_exists(self, key: str) -> bool:
+        """只判断会话在不在，不把消息和过程记录读出来。"""
+
+    @abstractmethod
     def list(self) -> list[JsonObject]:
         """返回会话摘要列表。"""
 

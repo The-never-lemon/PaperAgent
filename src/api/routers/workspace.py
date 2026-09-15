@@ -6,10 +6,11 @@
 1. GET    /api/sessions/{key}/workspace                          —— 工作区论文清单快照；
 2. POST   /api/sessions/{key}/workspace/papers/upload            —— 上传本地 PDF；
 3. PATCH  /api/sessions/{key}/workspace/papers/{paper_id}        —— 改用户标注或论文元数据；
-4. DELETE /api/sessions/{key}/workspace/papers                   —— 批量删除；
-5. GET    /api/sessions/{key}/workspace/export                   —— 导出清单；
-6. GET    /api/sessions/{key}/workspace/papers/{paper_id}/report —— 单篇论文的精读报告；
-7. GET    /api/sessions/{key}/workspace/papers/{paper_id}/report.md —— 下载精读报告 Markdown 文件。
+4. DELETE /api/sessions/{key}/workspace/papers                   —— 批量删除（只退出当前会话）；
+5. DELETE /api/sessions/{key}/workspace/fulltext-cache           —— 清除一篇论文的本机全文（编号放请求体）；
+6. GET    /api/sessions/{key}/workspace/export                   —— 导出清单；
+7. GET    /api/sessions/{key}/workspace/papers/{paper_id}/report —— 单篇论文的精读报告；
+8. GET    /api/sessions/{key}/workspace/papers/{paper_id}/report.md —— 下载精读报告 Markdown 文件。
 
 路由层只做请求解析与响应适配，具体的读写分别交给 SessionWorkspace 和
 services/workspace_upload.py（工程规范：路由不承载业务逻辑）。
@@ -24,8 +25,10 @@ from typing import Any
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 
+from src.models.sessions import SessionError
 from src.models.workspace import SessionWorkspace, sanitize_for_filename
 from src.repositories.sessions.base import SessionRepository
+from src.services.paper_memory import purge_paper_cache, sync_workspace_missing_cache, unbind_session_papers
 from src.services.workspace_export import export_workspace
 from src.services.workspace_upload import save_uploaded_pdf
 
@@ -44,16 +47,30 @@ def create_workspace_router(repo: SessionRepository) -> APIRouter:
         return getattr(getattr(repo, "backend", None), "sessions_dir", None)
 
     async def _load_workspace(session_key: str) -> SessionWorkspace:
-        """校验会话存在后加载工作区（文件读取放进线程，避免阻塞事件循环）。"""
+        """校验会话存在后加载工作区。
 
-        repo.get(session_key)  # 会话不存在时抛 SessionError(404)，由 app 统一转错误响应
-        return await asyncio.to_thread(SessionWorkspace.load, session_key, _sessions_root())
+        中文说明：
+        以前这里会把整个会话的消息和过程记录都读出来，只为了确认会话还在。
+        打开工作区时那样做会把整页卡住。现在只查会话表有没有这一行，
+        再读工作区那份论文清单。
+        """
+
+        def _load() -> SessionWorkspace:
+            if not repo.session_exists(session_key):
+                raise SessionError(f"session not found: {session_key}", 404)
+            return SessionWorkspace.load(session_key, _sessions_root())
+
+        return await asyncio.to_thread(_load)
 
     @router.get("/{session_key}/workspace")
     async def get_workspace(session_key: str) -> JsonObject:
         """返回工作区快照：研究主题 + 论文清单（含评价分数与精读状态）。"""
 
         workspace = await _load_workspace(session_key)
+        # 中文说明：用户如果手工删掉了本机缓存目录，这里检查一遍。
+        # 发现目录没了，只改当前会话里这篇的精读状态，卡片还留着。
+        # 其它会话下次打开时再对齐，打开工作区时不去扫全部会话文件夹。
+        await asyncio.to_thread(sync_workspace_missing_cache, workspace)
         papers: list[JsonObject] = []
         # 按收录时间排序，保证前端展示顺序稳定。
         entries = sorted(workspace.papers.items(), key=lambda pair: pair[1].added_at)
@@ -75,6 +92,7 @@ def create_workspace_router(repo: SessionRepository) -> APIRouter:
                     "abstract": str(paper.get("abstract") or ""),
                     "url": str(paper.get("url") or ""),
                     "pdf_url": str(paper.get("pdf_url") or ""),
+                    "doi": str(paper.get("doi") or ""),
                     "status": entry.status(),
                     "score": evaluation.score if evaluation is not None else None,
                     "has_report": deep_read is not None,
@@ -177,7 +195,38 @@ def create_workspace_router(repo: SessionRepository) -> APIRouter:
             return {"removed": 0}
         workspace = await _load_workspace(session_key)
         removed = await asyncio.to_thread(workspace.remove_papers, paper_ids)
+        # 中文说明：工作区删除只退出当前会话，本机缓存和其他会话里的同一篇都还在。
+        await asyncio.to_thread(unbind_session_papers, session_key, paper_ids)
         return {"removed": removed}
+
+    @router.delete("/{session_key}/workspace/fulltext-cache")
+    async def purge_paper_local_cache(session_key: str, request: Request) -> JsonObject:
+        """清除一篇论文的本机全文缓存。卡片留在所有会话里，已精读改回可精读。
+
+        中文说明：
+        请求体是 {"paper_id": "..."}。编号不放进网址，是因为很多论文编号自带斜杠
+        （比如 DOI）。如果写成 /papers/编号/cache，斜杠会被拆成多段路径，容易撞上
+        旁边那个只允许 PATCH 的改标注接口，浏览器就会看到 Method Not Allowed。
+
+        这一步会删掉 data/paper_cache 里这篇论文的目录，并把所有会话工作区里
+        对应卡片的精读报告清掉、全文标记关掉。标题、作者、摘要、评分、加星和
+        笔记都还在。对话里已经发出去的精读卡片不改。
+        """
+
+        body = await _json_body(request)
+        paper_id = str(body.get("paper_id") or "").strip()
+        if not paper_id:
+            raise HTTPException(status_code=400, detail="paper_id is required")
+        workspace = await _load_workspace(session_key)
+        entry = workspace.get_paper(paper_id)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"paper not found: {paper_id}")
+        return await asyncio.to_thread(
+            purge_paper_cache,
+            session_key=session_key,
+            workspace_paper_id=paper_id,
+            paper=dict(entry.paper),
+        )
 
     @router.get("/{session_key}/workspace/export")
     async def export_workspace_endpoint(

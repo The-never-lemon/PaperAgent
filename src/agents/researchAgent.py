@@ -21,13 +21,14 @@ import json
 import re
 from typing import TYPE_CHECKING, Any
 
-from src.llm.base import StreamCallbacks, normalize_token_usage
+from src.llm.base import StreamCallbacks, attach_reasoning, normalize_token_usage, yield_to_event_loop
 from src.models.workspace import (
     PAPER_STATUS_DEEP_READ,
     PAPER_STATUS_EVALUATED,
     PAPER_STATUS_NEW,
     SessionWorkspace,
 )
+from src.paper_retrieval.identity import build_citation_lookup, resolve_citation_id
 from src.utils import get_logger
 
 from .Prompts import RESEARCH_AGENT_SYSTEM_PROMPT
@@ -315,7 +316,9 @@ async def run_conversation_agent(
                     },
                 )
                 # 把纠偏指令追加到上下文，不带 tools 再调一次
-                messages.append({"role": "assistant", "content": content})
+                repair_assistant: dict[str, Any] = {"role": "assistant", "content": content}
+                attach_reasoning(repair_assistant, response)
+                messages.append(repair_assistant)
                 repair_instruction = UNKNOWN_PAPER_ID_INSTRUCTION.format(
                     unknown_ids=", ".join(unknown)
                 )
@@ -390,7 +393,9 @@ async def run_conversation_agent(
         # 中文注释：这一轮的思考块要走两条路——一条进本次运行的上下文（供下一轮请求回传），
         # 一条落库（供下次对话重建历史时回传）。少任何一条，推理模型都会拒绝后续请求。
         thinking_blocks = response.reasoning_blocks
-        messages.append(_assistant_tool_call_message(content, calls, thinking_blocks))
+        assistant_tool_message = _assistant_tool_call_message(content, calls, thinking_blocks)
+        attach_reasoning(assistant_tool_message, response)
+        messages.append(assistant_tool_message)
         await asyncio.to_thread(
             repo.append_message,
             session_key,
@@ -398,6 +403,7 @@ async def run_conversation_agent(
             content,
             tool_calls=[{"id": call["id"], "name": call["name"], "arguments": call["arguments"]} for call in calls],
             thinking_blocks=thinking_blocks,
+            reasoning_content=response.reasoning_content,
             llm_round=round_no,
             turn_id=turn_id,
         )
@@ -451,6 +457,9 @@ async def run_conversation_agent(
                     arguments=call["arguments"],
                     arguments_summary=_arguments_summary(call["arguments"]),
                 )
+                # 中文注释：卡片已经写进推送队列。这里先把控制权交还给事件循环，
+                # 让页面上的「正在执行」能先画出来，再开始跑可能要很久的工具。
+                await yield_to_event_loop()
                 logger.info(
                     "执行工具调用",
                     extra={
@@ -476,6 +485,8 @@ async def run_conversation_agent(
                     )
                 else:
                     tool_reporter.completed(None, stage=call["name"], event_key=event_key)
+                # 中文注释：完成/失败状态同样先让页面收到，再去回填工具结果。
+                await yield_to_event_loop()
 
                 # 返回结果供主循环按顺序回填上下文和落库。
                 return {
@@ -610,25 +621,27 @@ async def build_llm_messages(
                 # 中文注释：还要把当时存下来的思考块一起带上。推理模型缺了它就会拒绝
                 # 这次请求，表现为「模型服务暂时不可用」。
                 stored_thinking = row.get("thinking_blocks")
-                converted.append(
-                    {
-                        "role": "assistant",
-                        "content": content or "",
-                        "tool_calls": [
-                            {
-                                "id": str(call.get("id") or ""),
-                                "type": "function",
-                                "function": {
-                                    "name": str(call.get("name") or ""),
-                                    "arguments": json.dumps(call.get("arguments") or {}, ensure_ascii=False),
-                                },
-                            }
-                            for call in tool_calls
-                            if isinstance(call, dict)
-                        ],
-                        "thinking_blocks": stored_thinking if isinstance(stored_thinking, list) else [],
-                    }
-                )
+                stored_reasoning = str(row.get("reasoning_content") or "").strip()
+                rebuilt: JsonObject = {
+                    "role": "assistant",
+                    "content": content or "",
+                    "tool_calls": [
+                        {
+                            "id": str(call.get("id") or ""),
+                            "type": "function",
+                            "function": {
+                                "name": str(call.get("name") or ""),
+                                "arguments": json.dumps(call.get("arguments") or {}, ensure_ascii=False),
+                            },
+                        }
+                        for call in tool_calls
+                        if isinstance(call, dict)
+                    ],
+                    "thinking_blocks": stored_thinking if isinstance(stored_thinking, list) else [],
+                }
+                if stored_reasoning:
+                    rebuilt["reasoning_content"] = stored_reasoning
+                converted.append(rebuilt)
             elif content.strip():
                 # 每轮的最终回复（由 run 服务的助手消息缓冲区落库）。
                 converted.append({"role": "assistant", "content": content})
@@ -733,6 +746,9 @@ def _repair_tool_call_pairing(converted: list[JsonObject]) -> list[JsonObject]:
                 thinking = message.get("thinking_blocks")
                 if isinstance(thinking, list) and thinking:
                     demoted["thinking_blocks"] = thinking
+                reasoning = str(message.get("reasoning_content") or "").strip()
+                if reasoning:
+                    demoted["reasoning_content"] = reasoning
                 repaired.append(demoted)
                 continue
         else:
@@ -792,10 +808,12 @@ async def _shrink_history_within_budget(
                         # 带工具调用的中间消息：只清思考块（占空间最大、模型不看），
                         # tool_calls 框架保留——协议要求它和随后的 tool 消息配对。
                         message["thinking_blocks"] = []
+                        message.pop("reasoning_content", None)
                     else:
                         # 旧轮次的最终回复：思考块清空，正文保留前 400 字符——
                         # 结论基本都在开头，太长的列表尾巴对后续对话价值不大。
                         message["thinking_blocks"] = []
+                        message.pop("reasoning_content", None)
                         content = str(message.get("content") or "")
                         if len(content) > 400:
                             message["content"] = content[:400] + "……[旧回复已截断]"
@@ -1012,9 +1030,9 @@ def _unknown_paper_ids(content: str, workspace: SessionWorkspace) -> list[str]:
         if candidate.lower() in _CITATION_PLACEHOLDER_WORDS:
             continue
         candidate_ids.append(candidate)
-    # 和工作区里的真实 paper_id 集合做差集
-    known_ids = set(workspace.papers.keys())
-    unknown = [pid for pid in candidate_ids if pid not in known_ids]
+    # 和工作区主键、以及 DOI / arXiv 的各种写法对照；对得上就不算虚构引用。
+    lookup = build_citation_lookup(workspace.papers)
+    unknown = [pid for pid in candidate_ids if resolve_citation_id(pid, lookup) is None]
     # 去重，保持出现顺序
     seen: set[str] = set()
     result: list[str] = []

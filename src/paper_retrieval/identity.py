@@ -29,6 +29,9 @@ ARXIV_DOI_PREFIX = "10.48550/arxiv."
 # 2007 年之后的 arXiv 编号长相：2401.12345 或 2401.12345v3。
 ARXIV_ID_PATTERN = re.compile(r"^\d{4}\.\d{4,5}(?:v\d+)?$")
 
+# Semantic Scholar 常用的 40 位十六进制编号。
+SEMANTIC_SCHOLAR_ID_PATTERN = re.compile(r"^[a-f0-9]{40}$", re.I)
+
 
 def paper_key(paper: PaperLike) -> str:
     """生成检索合并用的主编号。
@@ -120,6 +123,115 @@ def normalize_doi(value: str) -> str:
     text = text.removeprefix("https://doi.org/").removeprefix("http://doi.org/")
     text = text.removeprefix("https://dx.doi.org/").removeprefix("http://dx.doi.org/")
     return text.lower()
+
+
+def citation_lookup_keys(raw: str) -> set[str]:
+    """把回复里写下的一个编号展开成各种对照写法。
+
+    中文说明：
+    助手经常把 DOI 的大小写写得和工作区主键不一样，或者把 arXiv 论文写成
+    10.48550/arXiv.xxxx。这里把这些写法收成同一组小写键，后面查工作区时
+    对上任意一个就算同一篇。
+    """
+
+    text = str(raw or "").strip()
+    if not text:
+        return set()
+    keys = {text, text.lower()}
+    stripped = _strip_citation_wrappers(text)
+    if stripped:
+        keys.add(stripped)
+        keys.add(stripped.lower())
+    doi = normalize_doi(stripped)
+    if doi.startswith("10.") and "/" in doi:
+        keys.add(doi)
+        keys.add(f"doi:{doi}")
+        if doi.startswith(ARXIV_DOI_PREFIX):
+            keys.update(_arxiv_citation_keys(doi[len(ARXIV_DOI_PREFIX) :]))
+    lowered = stripped.lower()
+    if lowered.startswith("arxiv:"):
+        keys.update(_arxiv_citation_keys(lowered.split(":", 1)[-1]))
+    elif ARXIV_ID_PATTERN.match(lowered):
+        keys.update(_arxiv_citation_keys(lowered))
+    openalex_url = re.search(r"openalex\.org/(W\d+)", text, flags=re.I)
+    if openalex_url:
+        keys.add(openalex_url.group(1))
+        keys.add(openalex_url.group(1).upper())
+    elif re.fullmatch(r"W\d+", stripped, flags=re.I):
+        keys.add(stripped)
+        keys.add(stripped.upper())
+    s2_url = re.search(r"semanticscholar\.org/paper/([a-f0-9]{40})", text, flags=re.I)
+    if s2_url:
+        keys.add(s2_url.group(1).lower())
+    elif SEMANTIC_SCHOLAR_ID_PATTERN.match(stripped):
+        keys.add(stripped.lower())
+    return {item for item in keys if item}
+
+
+def build_citation_lookup(papers: Mapping[str, Any]) -> dict[str, str]:
+    """根据工作区论文编一份「各种写法 → 主键」对照表。"""
+
+    lookup: dict[str, str] = {}
+    for paper_id, entry in papers.items():
+        canonical = str(paper_id)
+        paper = entry.paper if hasattr(entry, "paper") else entry
+        if not isinstance(paper, Mapping):
+            paper = {"paperId": canonical}
+        tokens = [canonical]
+        for key in ("paperId", "id", "doi", "url", "pdf_url"):
+            value = str(paper.get(key) or "").strip()
+            if value:
+                tokens.append(value)
+        metadata = paper.get("metadata") if isinstance(paper, Mapping) else None
+        if isinstance(metadata, dict):
+            for meta_key in ("arxiv_id", "arxivId", "semantic_scholar_id", "openalex_id", "openalexId"):
+                value = str(metadata.get(meta_key) or "").strip()
+                if value:
+                    tokens.append(value)
+        for alias in paper_aliases(paper):
+            # 中文说明：标题整理键不能拿来对引用编号，避免标题里的 W1 被当成 OpenAlex 编号。
+            if str(alias).startswith("title:"):
+                continue
+            tokens.append(alias)
+        for token in tokens:
+            for key in citation_lookup_keys(token):
+                lookup.setdefault(key, canonical)
+    return lookup
+
+
+def resolve_citation_id(candidate: str, lookup: Mapping[str, str]) -> str | None:
+    """方括号里的文字若能对上工作区里的某篇论文，就返回那篇的主键。"""
+
+    for key in citation_lookup_keys(candidate):
+        hit = lookup.get(key)
+        if hit:
+            return hit
+    return None
+
+
+def _strip_citation_wrappers(raw: str) -> str:
+    """去掉 DOI / arXiv 网址前缀和 doi: 前缀，只留下中间的编号。"""
+
+    text = str(raw or "").strip()
+    text = re.sub(r"^https?://(?:dx\.|www\.)?doi\.org/", "", text, flags=re.I)
+    text = re.sub(r"^https?://arxiv\.org/(?:abs|pdf)/", "", text, flags=re.I)
+    text = re.sub(r"\.pdf$", "", text, flags=re.I)
+    text = re.sub(r"^doi:", "", text, flags=re.I)
+    return text.strip("/")
+
+
+def _arxiv_citation_keys(arxiv_id: str) -> set[str]:
+    """arXiv 编号的几种常见写法。"""
+
+    cleaned = _strip_arxiv_version(arxiv_id)
+    if not cleaned:
+        return set()
+    return {
+        cleaned,
+        f"arxiv:{cleaned}",
+        f"10.48550/arxiv.{cleaned}",
+        f"doi:10.48550/arxiv.{cleaned}",
+    }
 
 
 def _doi_key(paper: PaperLike) -> str:

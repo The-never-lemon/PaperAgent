@@ -11,7 +11,6 @@ from langgraph.graph import END, START, StateGraph
 from src.llm import ModelConfig, ProviderSnapshot, SystemConfig, make_provider
 from src.services.paper_memory import resolve_paper_cache_dir
 from src.utils import get_logger
-from src.utils.read_utils.cache import safe_cache_name
 from src.utils.read_utils.chunkers import TextChunk, load_chunks_file
 
 from .base import AgentContext, AgentSpec, BaseAgent
@@ -480,7 +479,7 @@ def get_extraction(
     中文注释：
     阅读节点如果已经把 extraction 放在 State 里，就优先读 State，因为这是本轮
     工作流最新的数据。State 里没有时，再读当前会话所有轮次的阅读产物；最后才
-    去 data/paper_cache 里的 extraction.json 找，保证单独从缓存恢复写作时也能拿到资料。
+    按本机论文目录表找到缓存文件夹，读里面的 extraction.json。
     """
 
     results: list[JsonObject] = []
@@ -904,63 +903,34 @@ def _find_extraction_in_session_read(paper_id: str, read_results: list[JsonObjec
 
 
 def _find_extraction_in_cache(paper_id: str, cache_dir: Path) -> JsonObject | None:
-    """从论文缓存目录中的 extraction.json 查找结构化摘要。"""
+    """从论文缓存目录中的 extraction.json 查找结构化摘要。
 
-    for directory in _paper_cache_dirs(paper_id, cache_dir):
-        path = directory / "extraction.json"
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        extraction = payload.get("extraction") if isinstance(payload, dict) else None
-        if isinstance(extraction, dict):
-            return dict(extraction)
+    中文说明：目录位置只查本机论文目录表，不再自己扫盘或读 metadata.json。
+    """
+
+    directory = resolve_paper_cache_dir(cache_dir, paper_id)
+    path = directory / "extraction.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    extraction = payload.get("extraction") if isinstance(payload, dict) else None
+    if isinstance(extraction, dict):
+        return dict(extraction)
     return None
 
 
 def _find_chunks_path(paper_id: str, cache_dir: Path) -> Path | None:
-    """定位某篇论文缓存目录下的 chunk.json。"""
+    """定位某篇论文缓存目录下的 chunk.json。
 
-    for directory in _paper_cache_dirs(paper_id, cache_dir):
-        chunks_path = directory / "chunk.json"
-        if chunks_path.exists():
-            return chunks_path
+    中文说明：目录位置只查本机论文目录表，编号对不上时由目录表里记下的文件夹名来对。
+    """
+
+    directory = resolve_paper_cache_dir(cache_dir, paper_id)
+    chunks_path = directory / "chunk.json"
+    if chunks_path.exists():
+        return chunks_path
     return None
-
-
-def _paper_cache_dirs(paper_id: str, cache_dir: Path) -> list[Path]:
-    """根据 paperId 找可能的缓存目录。优先用长期记忆记下的目录。"""
-
-    directories: list[Path] = []
-    remembered = resolve_paper_cache_dir(cache_dir, paper_id)
-    if remembered.exists():
-        directories.append(remembered)
-    direct = cache_dir / safe_cache_name(paper_id)
-    if direct.exists() and direct not in directories:
-        directories.append(direct)
-    if not cache_dir.exists():
-        return directories
-    for candidate in cache_dir.iterdir():
-        if not candidate.is_dir() or candidate in directories:
-            continue
-        if _cache_dir_matches_paper_id(candidate, paper_id):
-            directories.append(candidate)
-    return directories
-
-
-def _cache_dir_matches_paper_id(directory: Path, paper_id: str) -> bool:
-    """通过 metadata.json 判断缓存目录是否属于目标论文。"""
-
-    metadata_path = directory / "metadata.json"
-    try:
-        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    if not isinstance(payload, dict):
-        return False
-    paper = dict(payload.get("paper") or {})
-    candidates = {str(payload.get("paperId") or ""), str(paper.get("paperId") or ""), str(paper.get("id") or "")}
-    return paper_id in candidates
 
 
 def _chunk_to_markdown(chunk: TextChunk) -> JsonObject:

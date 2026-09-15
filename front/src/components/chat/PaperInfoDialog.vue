@@ -7,10 +7,8 @@
  * 展示标题、作者年份来源、摘要，以及一个可以打开原文的按钮。
  * 已经精读过的文章不会走这里——那种情况直接打开精读报告抽屉。
  *
- * 关于"原文"链接：数据源给的 pdf_url 并不总是真 PDF——OpenAlex 找不到 PDF 时会把
- * DOI 跳转地址填进去（形如 https://doi.org/10.xxxx/yyyy）。DOI 地址点开是落地页，
- * 装了 sci-hub 之类插件的浏览器还会把它劫持到第三方站点。所以挑链接时跳过 DOI 地址，
- * 优先真实的 PDF 直链，其次用检索源自己的论文页面（arXiv 摘要页、OpenAlex / S2 详情页）。
+ * 关于"原文"链接：优先用开放获取 PDF 和检索源页面；没有这两样时再用 DOI
+ * 或根据编号拼出的 arXiv / OpenAlex / Semantic Scholar 地址，尽量每篇都能点开。
  *
  * 这是一个独立浮层，不会往对话流里插入任何内容。
  */
@@ -35,7 +33,7 @@ const emit = defineEmits<{
   deepRead: [paperId: string];
 }>();
 
-/** 论文原文地址：跳过 DOI 跳转地址，优先开放获取 PDF 直链，其次检索源的论文页面。 */
+/** 论文原文地址：有 PDF 或检索源页面就用它们，没有再退到 DOI / 根据编号拼出的地址。 */
 function paperLink(paper: WorkspacePaperItem) {
   return pickPaperLink(paper);
 }

@@ -501,6 +501,34 @@ class SessionStoreBackend:
                 CREATE INDEX IF NOT EXISTS idx_session_event_session_seq ON session_event(session_id, seq_no);
                 CREATE INDEX IF NOT EXISTS idx_session_message_session_created ON session_message(session_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_session_artifact_session_created ON session_artifact(session_id, created_at);
+
+                CREATE TABLE IF NOT EXISTS paper (
+                    id TEXT PRIMARY KEY,
+                    cache_dir TEXT NOT NULL DEFAULT '',
+                    title TEXT NOT NULL DEFAULT '',
+                    year INTEGER,
+                    has_chunks INTEGER NOT NULL DEFAULT 0,
+                    cache_present INTEGER NOT NULL DEFAULT 0,
+                    recorded_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS paper_alias (
+                    alias TEXT PRIMARY KEY,
+                    paper_id TEXT NOT NULL,
+                    FOREIGN KEY(paper_id) REFERENCES paper(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS paper_session (
+                    session_id TEXT NOT NULL,
+                    workspace_paper_id TEXT NOT NULL,
+                    paper_id TEXT NOT NULL,
+                    PRIMARY KEY (session_id, workspace_paper_id),
+                    FOREIGN KEY(session_id) REFERENCES session(id) ON DELETE CASCADE,
+                    FOREIGN KEY(paper_id) REFERENCES paper(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_paper_alias_paper_id ON paper_alias(paper_id);
+                CREATE INDEX IF NOT EXISTS idx_paper_session_paper_id ON paper_session(paper_id);
                 """
             )
 
@@ -598,6 +626,328 @@ class SessionStoreBackend:
             "metadata": self._load_json(row["metadata"]),
         }
 
+    def paper_catalog_is_empty(self) -> bool:
+        """本机论文目录表是否还没有任何记录。"""
+
+        with self._connection() as connection:
+            row = connection.execute("SELECT COUNT(1) AS count FROM paper").fetchone()
+        return not bool(row and int(row["count"]) > 0)
+
+    def get_paper_catalog(self, paper_id: str) -> JsonObject | None:
+        """按本机论文主键读一条目录记录。"""
+
+        cleaned = str(paper_id or "").strip()
+        if not cleaned:
+            return None
+        with self._connection() as connection:
+            row = connection.execute("SELECT * FROM paper WHERE id = ?", (cleaned,)).fetchone()
+            if row is None:
+                return None
+            aliases = [
+                str(item["alias"])
+                for item in connection.execute(
+                    "SELECT alias FROM paper_alias WHERE paper_id = ?",
+                    (cleaned,),
+                ).fetchall()
+            ]
+        return self._row_to_paper_catalog(row, aliases)
+
+    def lookup_paper_by_alias(self, alias: str) -> JsonObject | None:
+        """按别名查找本机论文。"""
+
+        cleaned = str(alias or "").strip()
+        if not cleaned:
+            return None
+        with self._connection() as connection:
+            link = connection.execute(
+                "SELECT paper_id FROM paper_alias WHERE alias = ?",
+                (cleaned,),
+            ).fetchone()
+            if link is None:
+                return None
+            paper_id = str(link["paper_id"])
+            row = connection.execute("SELECT * FROM paper WHERE id = ?", (paper_id,)).fetchone()
+            if row is None:
+                return None
+            aliases = [
+                str(item["alias"])
+                for item in connection.execute(
+                    "SELECT alias FROM paper_alias WHERE paper_id = ?",
+                    (paper_id,),
+                ).fetchall()
+            ]
+        return self._row_to_paper_catalog(row, aliases)
+
+    def lookup_papers_by_aliases(self, aliases: list[str]) -> list[JsonObject]:
+        """按一批别名查找本机论文，按传入顺序去重。"""
+
+        found: list[JsonObject] = []
+        seen: set[str] = set()
+        for alias in aliases:
+            item = self.lookup_paper_by_alias(alias)
+            if item is None:
+                continue
+            paper_id = str(item.get("id") or "")
+            if not paper_id or paper_id in seen:
+                continue
+            seen.add(paper_id)
+            found.append(item)
+        return found
+
+    def upsert_paper_catalog(
+        self,
+        *,
+        paper_id: str,
+        cache_dir: str = "",
+        title: str = "",
+        year: int | None = None,
+        has_chunks: bool = False,
+        cache_present: bool = False,
+        recorded_at: str = "",
+        aliases: list[str] | None = None,
+    ) -> str:
+        """写入或合并一条本机论文目录。返回实际使用的主键。"""
+
+        canonical = str(paper_id or "").strip()
+        if not canonical:
+            return ""
+        names = [canonical]
+        for item in aliases or []:
+            cleaned = str(item or "").strip()
+            if cleaned and cleaned not in names:
+                names.append(cleaned)
+        existing = self.get_paper_catalog(canonical)
+        if existing is None:
+            hits = self.lookup_papers_by_aliases(names)
+            if hits:
+                existing = hits[0]
+        now = recorded_at or utc_now()
+        if existing is not None:
+            canonical = str(existing["id"])
+            merged_dir = str(cache_dir or existing.get("cache_dir") or "")
+            merged_title = str(title or existing.get("title") or "")
+            merged_year = year if year is not None else existing.get("year")
+            merged_chunks = bool(existing.get("has_chunks")) or bool(has_chunks)
+            merged_present = bool(existing.get("cache_present")) or bool(cache_present)
+            merged_aliases = list(dict.fromkeys([*(existing.get("aliases") or []), *names]))
+            with self._connection() as connection:
+                connection.execute(
+                    """
+                    UPDATE paper
+                    SET cache_dir = ?, title = ?, year = ?, has_chunks = ?, cache_present = ?, recorded_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        merged_dir,
+                        merged_title,
+                        merged_year,
+                        1 if merged_chunks else 0,
+                        1 if merged_present else 0,
+                        str(existing.get("recorded_at") or now),
+                        canonical,
+                    ),
+                )
+                self._replace_paper_aliases(connection, canonical, merged_aliases)
+            return canonical
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO paper (id, cache_dir, title, year, has_chunks, cache_present, recorded_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    canonical,
+                    str(cache_dir or ""),
+                    str(title or ""),
+                    year,
+                    1 if has_chunks else 0,
+                    1 if cache_present else 0,
+                    now,
+                ),
+            )
+            self._replace_paper_aliases(connection, canonical, names)
+        return canonical
+
+    def mark_paper_cache(
+        self,
+        paper_id: str,
+        *,
+        cache_dir: str | None = None,
+        has_chunks: bool | None = None,
+        cache_present: bool | None = None,
+    ) -> None:
+        """更新一篇本机论文的缓存状态。"""
+
+        cleaned = str(paper_id or "").strip()
+        if not cleaned:
+            return
+        current = self.get_paper_catalog(cleaned)
+        if current is None:
+            return
+        next_dir = current.get("cache_dir") if cache_dir is None else cache_dir
+        next_chunks = current.get("has_chunks") if has_chunks is None else has_chunks
+        next_present = current.get("cache_present") if cache_present is None else cache_present
+        with self._connection() as connection:
+            connection.execute(
+                """
+                UPDATE paper
+                SET cache_dir = ?, has_chunks = ?, cache_present = ?
+                WHERE id = ?
+                """,
+                (
+                    str(next_dir or ""),
+                    1 if next_chunks else 0,
+                    1 if next_present else 0,
+                    cleaned,
+                ),
+            )
+
+    def bind_paper_session(self, session_id: str, workspace_paper_id: str, paper_id: str) -> None:
+        """记下某个会话工作区编号对应本机哪一篇论文。"""
+
+        session_key = str(session_id or "").strip()
+        workspace_id = str(workspace_paper_id or "").strip()
+        catalog_id = str(paper_id or "").strip()
+        if not session_key or not workspace_id or not catalog_id:
+            return
+        if self.get_session(session_key) is None:
+            return
+        if self.get_paper_catalog(catalog_id) is None:
+            return
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO paper_session (session_id, workspace_paper_id, paper_id)
+                VALUES (?, ?, ?)
+                ON CONFLICT(session_id, workspace_paper_id) DO UPDATE SET paper_id = excluded.paper_id
+                """,
+                (session_key, workspace_id, catalog_id),
+            )
+
+    def unbind_paper_session(self, session_id: str, workspace_paper_ids: list[str]) -> None:
+        """取消当前会话对若干工作区论文的本机引用。不删本机论文。"""
+
+        session_key = str(session_id or "").strip()
+        cleaned = [str(item or "").strip() for item in workspace_paper_ids if str(item or "").strip()]
+        if not session_key or not cleaned:
+            return
+        placeholders = ",".join("?" for _ in cleaned)
+        with self._connection() as connection:
+            connection.execute(
+                f"DELETE FROM paper_session WHERE session_id = ? AND workspace_paper_id IN ({placeholders})",
+                (session_key, *cleaned),
+            )
+
+    def list_paper_sessions(self, paper_id: str) -> list[JsonObject]:
+        """列出引用了这篇本机论文的全部会话工作区编号。"""
+
+        cleaned = str(paper_id or "").strip()
+        if not cleaned:
+            return []
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT session_id, workspace_paper_id, paper_id
+                FROM paper_session
+                WHERE paper_id = ?
+                """,
+                (cleaned,),
+            ).fetchall()
+        return [
+            {
+                "session_id": str(row["session_id"]),
+                "workspace_paper_id": str(row["workspace_paper_id"]),
+                "paper_id": str(row["paper_id"]),
+            }
+            for row in rows
+        ]
+
+    def resolve_session_paper_id(self, session_id: str, workspace_paper_id: str) -> str:
+        """把会话工作区里的论文编号翻译成本机论文主键。找不到返回空字符串。"""
+
+        session_key = str(session_id or "").strip()
+        workspace_id = str(workspace_paper_id or "").strip()
+        if not session_key or not workspace_id:
+            return ""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT paper_id FROM paper_session
+                WHERE session_id = ? AND workspace_paper_id = ?
+                """,
+                (session_key, workspace_id),
+            ).fetchone()
+        return str(row["paper_id"]) if row is not None else ""
+
+    def delete_artifacts_for_paper(self, session_id: str, paper_id: str) -> int:
+        """删掉某个会话里属于这篇论文的全文、精读报告和配图产物。"""
+
+        session_key = str(session_id or "").strip()
+        cleaned = str(paper_id or "").strip()
+        if not session_key or not cleaned:
+            return 0
+        # 中文说明：只动这篇论文的全文、精读报告和配图，对话消息和其他产物原样留下。
+        cache_artifact_types = {"deep_read_report", "paper_fulltext", "paper_figure"}
+        artifacts = self.list_artifacts(session_key)
+        deleted = 0
+        for item in artifacts:
+            if str(item.get("artifact_type") or "") not in cache_artifact_types:
+                continue
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            if str(metadata.get("paper_id") or "") != cleaned:
+                continue
+            raw_path = str(item.get("path") or "").strip()
+            if raw_path:
+                path = Path(raw_path)
+                try:
+                    if path.is_file():
+                        path.unlink()
+                except OSError:
+                    logger.warning(
+                        "删除论文产物文件失败",
+                        extra={"session_key": session_key, "paper_id": cleaned, "path": raw_path},
+                    )
+            with self._connection() as connection:
+                connection.execute(
+                    "DELETE FROM session_artifact WHERE id = ? AND session_id = ?",
+                    (str(item.get("id") or ""), session_key),
+                )
+            deleted += 1
+        return deleted
+
+    def _replace_paper_aliases(self, connection: sqlite3.Connection, paper_id: str, aliases: list[str]) -> None:
+        """覆盖一篇论文的别名表。"""
+
+        connection.execute("DELETE FROM paper_alias WHERE paper_id = ?", (paper_id,))
+        for alias in aliases:
+            cleaned = str(alias or "").strip()
+            if not cleaned:
+                continue
+            connection.execute(
+                """
+                INSERT INTO paper_alias (alias, paper_id)
+                VALUES (?, ?)
+                ON CONFLICT(alias) DO UPDATE SET paper_id = excluded.paper_id
+                """,
+                (cleaned, paper_id),
+            )
+
+    def _row_to_paper_catalog(self, row: sqlite3.Row, aliases: list[str]) -> JsonObject:
+        """把 paper 表记录转成普通字典。"""
+
+        year_raw = row["year"]
+        year = int(year_raw) if year_raw not in (None, "") else None
+        return {
+            "id": str(row["id"]),
+            "cache_dir": str(row["cache_dir"] or ""),
+            "title": str(row["title"] or ""),
+            "year": year,
+            "has_chunks": bool(row["has_chunks"]),
+            "cache_present": bool(row["cache_present"]),
+            "recorded_at": str(row["recorded_at"] or ""),
+            "aliases": aliases,
+        }
+
     def _dump_json(self, payload: JsonObject) -> str:
         """把字典安全序列化成 UTF-8 友好的 JSON 字符串。"""
 
@@ -628,6 +978,12 @@ class SQLiteSessionRepository(SessionRepository):
         self.backend = backend or SessionStoreBackend(storage_root or Path("data"))
         if initial and not self.backend.has_sessions():
             self._bootstrap_initial_sessions(initial)
+        # 中文说明：本机论文目录和会话库共用同一个 SQLite。仓储一建好就把目录
+        # 后端交给长期记忆模块，并在目录表还空时把旧的 index.json 迁进来。
+        from src.services.paper_memory import configure_paper_catalog, migrate_paper_catalog_if_needed
+
+        configure_paper_catalog(self.backend)
+        migrate_paper_catalog_if_needed()
         logger.info("会话仓储初始化完成", extra={"storage_root": str(self.backend.storage_root.resolve())})
 
     def create(self, title: str = "New chat", workspace_scope: JsonObject | None = None) -> SessionRecord:
@@ -658,10 +1014,36 @@ class SQLiteSessionRepository(SessionRepository):
             raise SessionError(f"session not found: {key}", 404)
         return self._hydrate_record(raw_session)
 
-    def list(self) -> list[JsonObject]:
-        """返回按更新时间倒序排列的会话摘要列表。"""
+    def session_exists(self, key: str) -> bool:
+        """只查会话表有没有这一行，不把消息和过程记录读出来。"""
 
-        return [self._hydrate_record(item).summary() for item in self.backend.list_sessions()]
+        return self.backend.get_session(key) is not None
+
+    def list(self) -> list[JsonObject]:
+        """返回按更新时间倒序排列的会话摘要列表。
+
+        中文说明：
+        左侧栏只要标题、一句预览和状态。以前会把每个会话的全部消息和过程
+        记录都读出来再丢掉，一刷新侧栏整页都会卡住。现在只读会话表这一行。
+        """
+
+        return [self._summary_from_row(item) for item in self.backend.list_sessions()]
+
+    def _summary_from_row(self, payload: JsonObject) -> JsonObject:
+        """把会话表的一行整理成侧栏要用的摘要。"""
+
+        return {
+            "key": payload["key"],
+            "title": str(payload.get("title") or "New chat"),
+            "created_at": str(payload.get("created_at") or utc_now()),
+            "updated_at": str(payload.get("updated_at") or utc_now()),
+            "preview": str(payload.get("summary") or "")[:120],
+            "run_started_at": payload.get("run_started_at"),
+            "workspace_scope": copy.deepcopy(payload.get("workspace_scope")),
+            "status": str(payload.get("status") or "created"),
+            "user_id": str(payload.get("user_id") or self.default_user_id),
+            "last_message_at": payload.get("last_message_at"),
+        }
 
     def delete(self, key: str) -> None:
         """删除指定会话。"""

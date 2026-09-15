@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
-from src.llm.base import normalize_token_usage
+from src.llm.base import attach_reasoning, normalize_token_usage
 from src.llm.config import SystemConfig
 from src.models.deep_read import (
     DEEP_READ_SOURCE_ABSTRACT,
@@ -639,10 +639,12 @@ async def _run_reduce(
         """
 
         nonlocal total_input, total_output
+        repair_assistant: JsonObject = {"role": "assistant", "content": response.content or ""}
+        attach_reasoning(repair_assistant, response)
         repair_messages = [
             {"role": "system", "content": DEEP_READ_REDUCE_SYSTEM_PROMPT},
             {"role": "user", "content": reduce_user_content},
-            {"role": "assistant", "content": response.content or ""},
+            repair_assistant,
             {"role": "user", "content": f"你上次的输出无法解析成要求的 JSON：{error}。请重新只输出一个符合要求的 JSON 对象。"},
         ]
         repair_response = await deps.llm.provider.chat(repair_messages, temperature=0)
@@ -753,10 +755,12 @@ async def _run_abstract_fallback(
         """带着原始材料、上次的坏输出和解析错误信息让模型重新输出一次。"""
 
         nonlocal total_input, total_output
+        repair_assistant: JsonObject = {"role": "assistant", "content": response.content or ""}
+        attach_reasoning(repair_assistant, response)
         repair_messages = [
             {"role": "system", "content": DEEP_READ_ABSTRACT_SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
-            {"role": "assistant", "content": response.content or ""},
+            repair_assistant,
             {"role": "user", "content": f"你上次的输出无法解析成要求的 JSON：{error}。请重新只输出一个符合要求的 JSON 对象。"},
         ]
         repair_response = await deps.llm.provider.chat(repair_messages, temperature=0)

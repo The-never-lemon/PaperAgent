@@ -113,6 +113,24 @@ class LLMResponse:
         return self.finish_reason != "error"
 
 
+def attach_reasoning(message: JsonObject, response: LLMResponse) -> JsonObject:
+    """把这一轮模型给出的思考挂回助手消息，供下一轮原样带回。
+
+    中文注释：开了思考档位的模型（比如 DeepSeek）有一条硬规定——
+    上一轮助手消息里如果带了思考原文，下一轮把这条消息再送回去时必须原样带上。
+    缺了上游会直接拒绝请求，表现就是 HTTP 400。
+    Claude 走 thinking_blocks（带签名的思考块），DeepSeek 这类接口走 reasoning_content。
+    两种都在这里一并挂上；没有内容就不加字段，避免给不认这个字段的模型多传东西。
+    """
+
+    text = str(response.reasoning_content or "").strip()
+    if text:
+        message["reasoning_content"] = text
+    if response.reasoning_blocks:
+        message["thinking_blocks"] = list(response.reasoning_blocks)
+    return message
+
+
 def normalize_token_usage(usage: Mapping[str, Any] | None) -> JsonObject:
     """把不同模型服务商返回的用量字段整理成统一的输入和输出数量。"""
 

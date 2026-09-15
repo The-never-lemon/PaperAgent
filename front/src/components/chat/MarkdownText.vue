@@ -24,6 +24,7 @@
 import { computed } from "vue";
 
 import { looksLikeFormula, splitMathText, stripBareLatex } from "../../lib/math-text";
+import { resolvePaperRef } from "../../lib/paper-link";
 import MathFormula from "./MathFormula.vue";
 
 defineOptions({ name: "MarkdownText" });
@@ -32,6 +33,8 @@ const props = defineProps<{
   content: string;
   /** 流式输出中：在内容末尾显示闪烁光标。 */
   streaming?: boolean;
+  /** 工作区论文编号对照表：DOI / arXiv 等写法都能对上主键。 */
+  paperRefLookup?: Map<string, string>;
   /** 工作区里真实存在的 paper_id 集合。[xxx] 形式的引用如果匹配就渲染成可点击按钮。 */
   knownPaperIds?: Set<string>;
 }>();
@@ -127,12 +130,14 @@ function parseMarkdownInline(text: string): InlinePart[] {
       const href = raw.slice(splitAt + 2, -1);
       parts.push({ text: label, href });
     } else if (raw.startsWith("[") && raw.endsWith("]")) {
-      // 可能是 paper_id 引用：如果已知 paper_id 集合里有这个编号就渲染成按钮。
+      // 可能是论文编号：主键对得上，或 DOI / arXiv 写法能对上工作区里的某篇，就做成按钮。
       const candidate = raw.slice(1, -1);
-      if (props.knownPaperIds?.has(candidate)) {
+      const resolved = resolvePaperRef(candidate, props.paperRefLookup);
+      if (resolved) {
+        parts.push({ text: candidate, paperId: resolved });
+      } else if (props.knownPaperIds?.has(candidate)) {
         parts.push({ text: candidate, paperId: candidate });
       } else {
-        // 不是 paper_id，原样显示。
         parts.push({ text: raw });
       }
     }
@@ -278,7 +283,12 @@ function parseBlocks(source: string): Block[] {
   return blocks;
 }
 
-const blocks = computed<Block[]>(() => parseBlocks(props.content ?? ""));
+const blocks = computed<Block[]>(() => {
+  // 中文说明：编号对照表变了也要重新切一遍，否则刚检索进来的论文点不了。
+  void props.paperRefLookup;
+  void props.knownPaperIds;
+  return parseBlocks(props.content ?? "");
+});
 
 /** 最后一个块是不是段落/列表（决定光标贴在哪里显示）。 */
 const lastBlockIndex = computed(() => blocks.value.length - 1);

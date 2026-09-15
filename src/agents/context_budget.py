@@ -73,6 +73,8 @@ def estimate_messages_tokens(
                     total_chars += len(str(block.get("thinking") or block.get("text") or ""))
                 elif isinstance(block, str):
                     total_chars += len(block)
+        reasoning = str(message.get("reasoning_content") or "")
+        total_chars += len(reasoning)
         # assistant 带 tool_calls 的消息：工具名和参数 JSON 也是上下文的一部分。
         tool_calls = message.get("tool_calls")
         if isinstance(tool_calls, list):

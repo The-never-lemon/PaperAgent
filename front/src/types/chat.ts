@@ -25,6 +25,8 @@ export interface ChatPaperCard {
   abstract: string;
   url: string;
   pdf_url: string;
+  /** 论文 DOI。没有时为空字符串。 */
+  doi?: string;
   has_pdf: boolean;
   /** 三维评分总分（仅评价后的卡片携带）。 */
   score?: number | null;
@@ -137,6 +139,8 @@ export interface WorkspacePaperItem {
   abstract: string;
   url: string;
   pdf_url: string;
+  /** 论文 DOI。没有时为空字符串。 */
+  doi?: string;
   status: string;
   score: number | null;
   has_report: boolean;

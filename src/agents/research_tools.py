@@ -28,7 +28,7 @@ from src.models.workspace import PaperEvaluation, SearchHistoryEntry, SessionWor
 from src.paper_retrieval.download import _find_fulltext_url, async_download_paper_fulltext
 from src.paper_retrieval.models import PaperDocument
 from src.paper_retrieval.service import PaperSearchService
-from src.services.paper_memory import import_memory_into_session
+from src.services.paper_memory import ensure_bound, import_memory_into_session, unbind_session_papers
 from src.utils import get_logger
 
 from .deepReadAgent import DeepReadDeps, REPORT_SUMMARY_CHARS, run_deep_read
@@ -910,6 +910,7 @@ def _paper_card(paper: JsonObject, paper_id: str) -> JsonObject:
         "abstract": str(paper.get("abstract") or "")[:ABSTRACT_PREVIEW_CHARS],
         "url": str(paper.get("url") or ""),
         "pdf_url": str(paper.get("pdf_url") or ""),
+        "doi": str(paper.get("doi") or ""),
         "has_pdf": _has_pdf(paper),
     }
 
@@ -926,6 +927,7 @@ def _paper_llm_view(paper: JsonObject, paper_id: str) -> JsonObject:
         "venue": str(paper.get("venue") or paper.get("journal_conference") or ""),
         "source": str(paper.get("source") or ""),
         "abstract": str(paper.get("abstract") or "")[:ABSTRACT_PREVIEW_CHARS],
+        "doi": str(paper.get("doi") or ""),
         "has_pdf": _has_pdf(paper),
     }
 
@@ -1463,6 +1465,8 @@ async def _handle_remove_papers(
         # 并行执行时可能同时删除多批论文，用 workspace_lock 互斥。
         async with context.workspace_lock:
             removed = await asyncio.to_thread(context.workspace.remove_papers, existing)
+            # 中文说明：只取消当前会话对这几篇的引用。本机缓存和其他会话里的同一篇都还在。
+            await asyncio.to_thread(unbind_session_papers, context.session_key, existing)
 
     # not_found 只在不为空时才带上。
     response: JsonObject = {"removed": removed}
@@ -1517,8 +1521,21 @@ async def _handle_download_paper(
         runtime_resources=context.resources,
     )
 
-    # 第五步：下载成功就标记工作区全文缓存，返回本地路径和是否复用缓存。
+    # 第五步：下载成功就标记工作区全文缓存，并补上当前会话对这篇本机论文的引用。
+    # 中文说明：检索时已经绑过一次；这里主要是把缓存目录名写进目录表，
+    # 同时保证只下载、还没精读的论文也有会话引用。
     if downloaded.status == "downloaded":
+        cache_name = downloaded.file_path.parent.name if downloaded.file_path is not None else ""
+        await asyncio.to_thread(
+            partial(
+                ensure_bound,
+                context.session_key,
+                cleaned,
+                entry.paper,
+                cache_dir=cache_name,
+                cache_present=True,
+            )
+        )
         await asyncio.to_thread(context.workspace.set_fulltext_cached, cleaned, True)
         logger.info(
             "工具 download_paper 执行完成",

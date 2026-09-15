@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python 'D:\\Java_Project\\Paper-Agent-main\\.codex\\hooks\\resume_guard.py'"
+          }
+        ]
+      }
+    ]
+  }
+}

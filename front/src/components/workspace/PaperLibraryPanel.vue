@@ -14,14 +14,15 @@
  * 动作分流：纯状态动作（加星/删除/导出）走 PATCH/DELETE REST，不启动 run；
  *           需要 Agent 产出的动作（精读）走主 Agent 工具。
  */
-import { computed, ref, watch } from "vue";
-import { Star, Trash2, Download, BookOpenCheck, FileText, X, Filter, SortAsc, Upload } from "lucide-vue-next";
+import { computed, ref } from "vue";
+import { Star, Trash2, Download, BookOpenCheck, FileText, FolderX, X, Filter, SortAsc, Upload } from "lucide-vue-next";
 
+import { pickPaperLink } from "../../lib/paper-link";
 import type { WorkspacePaperItem, WorkspaceSnapshot } from "../../types/chat";
 import {
   batchRemovePapers,
   exportWorkspace,
-  fetchWorkspace,
+  purgePaperCache,
   updatePaperAnnotations,
   uploadPaper,
   type UploadPaperResult,
@@ -36,6 +37,8 @@ const props = defineProps<{
   sessionKey: string;
   /** 运行中禁用批量动作按钮，避免和正在跑的 Agent 冲突。 */
   busy?: boolean;
+  /** 论文清单由对话页拉一次再传进来，面板自己不再重复请求。 */
+  snapshot?: WorkspaceSnapshot | null;
 }>();
 
 const emit = defineEmits<{
@@ -51,28 +54,9 @@ const emit = defineEmits<{
 // 数据加载
 // ---------------------------------------------------------------------------
 
-const snapshot = ref<WorkspaceSnapshot | null>(null);
-const loading = ref(false);
-
-async function refresh() {
-  if (!props.sessionKey) {
-    snapshot.value = null;
-    return;
-  }
-  loading.value = true;
-  try {
-    snapshot.value = await fetchWorkspace(props.sessionKey);
-  } catch (err) {
-    pushToast({ tone: "error", title: "加载工作区失败", description: (err as Error).message });
-  } finally {
-    loading.value = false;
-  }
-}
-
-watch(() => props.sessionKey, refresh, { immediate: true });
-
-// 暴露给父组件调用的刷新方法（turn_end 时调用，保证面板和对话流同步）。
-defineExpose({ refresh });
+// 中文说明：清单由对话页拉好再传进来。面板改动（上传、删除、清全文）后
+// 通知对话页再拉一次，两边看到的是同一份数据。
+const snapshot = computed(() => props.snapshot ?? null);
 
 // ---------------------------------------------------------------------------
 // 上传本地 PDF
@@ -108,7 +92,6 @@ async function handleFiles(files: FileList | null) {
       title: result.is_new ? "已加入工作区" : "工作区里已经有这篇了",
       description: result.notice,
     });
-    await refresh();
     emit("workspaceChanged");
     uploadedResult.value = result;
     metaDialogVisible.value = true;
@@ -214,6 +197,47 @@ function clearSelection() {
   selectedIds.value = new Set();
 }
 
+/** 工作区列表上的「原文」地址：没有 PDF 时也能用 DOI 或编号拼出来。 */
+function originalLink(paper: WorkspacePaperItem) {
+  return pickPaperLink(paper);
+}
+
+/** 已经下载过全文，或已经精读过，才显示「清除本地全文」。 */
+function canPurgeLocalFulltext(paper: WorkspacePaperItem) {
+  return Boolean(paper.fulltext_cached || paper.has_report || paper.status === "deep_read");
+}
+
+const purgingIds = ref<Set<string>>(new Set());
+
+/** 清掉这篇论文的本机缓存。卡片留着，所有会话里的已精读都会变回可精读。 */
+async function purgeLocalFulltext(paper: WorkspacePaperItem) {
+  if (props.busy || purgingIds.value.has(paper.paper_id)) return;
+  const confirmed = confirm(
+    "确定清除这篇论文的本地全文吗？标题、评分和笔记会留在所有会话里，但已精读会变回可精读，需要重新下载和阅读。",
+  );
+  if (!confirmed) return;
+  const next = new Set(purgingIds.value);
+  next.add(paper.paper_id);
+  purgingIds.value = next;
+  try {
+    const result = await purgePaperCache(props.sessionKey, paper.paper_id);
+    pushToast({
+      tone: "success",
+      title: "已清除本地全文",
+      description: result.sessions_updated
+        ? `已把 ${result.sessions_updated} 个会话里的精读状态改回可精读`
+        : "本机缓存已处理",
+    });
+    emit("workspaceChanged");
+  } catch (err) {
+    pushToast({ tone: "error", title: "清除本地全文失败", description: (err as Error).message });
+  } finally {
+    const remaining = new Set(purgingIds.value);
+    remaining.delete(paper.paper_id);
+    purgingIds.value = remaining;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 动作：加星 / 删除 / 导出
 // ---------------------------------------------------------------------------
@@ -235,7 +259,6 @@ async function deleteSelected() {
     const result = await batchRemovePapers(props.sessionKey, ids);
     pushToast({ tone: "success", title: `已删除 ${result.removed} 篇` });
     selectedIds.value = new Set();
-    await refresh();
     emit("workspaceChanged");
   } catch (err) {
     pushToast({ tone: "error", title: "删除失败", description: (err as Error).message });
@@ -389,7 +412,7 @@ function statusLabel(status: string): string {
     </div>
 
     <!-- 论文列表 -->
-    <div class="paper-list" v-if="!loading && filteredPapers.length > 0">
+    <div class="paper-list" v-if="snapshot && filteredPapers.length > 0">
       <div
         v-for="paper in filteredPapers"
         :key="paper.paper_id"
@@ -449,20 +472,31 @@ function statusLabel(status: string): string {
               <FileText :size="13" /> 报告
             </button>
             <a
-              v-if="paper.url"
-              :href="paper.url"
+              v-if="originalLink(paper)"
+              :href="originalLink(paper)"
               target="_blank"
               rel="noreferrer"
               class="paper-action link"
             >
               原文 ↗
             </a>
+            <button
+              v-if="canPurgeLocalFulltext(paper)"
+              type="button"
+              class="paper-action danger"
+              :disabled="busy || purgingIds.has(paper.paper_id)"
+              title="删掉本机缓存的全文；卡片会留下，所有会话里的已精读都会变回可精读"
+              @click="purgeLocalFulltext(paper)"
+            >
+              <FolderX :size="13" />
+              {{ purgingIds.has(paper.paper_id) ? "清除中…" : "清除本地全文" }}
+            </button>
           </div>
         </div>
       </div>
     </div>
 
-    <div v-else-if="loading" class="panel-loading">加载中…</div>
+    <div v-else-if="!snapshot" class="panel-loading">加载中…</div>
     <div v-else-if="snapshot && snapshot.papers.length === 0" class="panel-empty">
       工作区暂无论文：可以在对话里检索，也可以点右上角「上传 PDF」把本地论文加进来。
     </div>
@@ -477,6 +511,6 @@ function statusLabel(status: string): string {
     :session-key="sessionKey"
     :result="uploadedResult"
     @close="metaDialogVisible = false"
-    @saved="refresh"
+    @saved="emit('workspaceChanged')"
   />
 </template>
