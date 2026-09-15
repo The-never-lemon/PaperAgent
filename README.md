@@ -121,14 +121,14 @@ flowchart TB
 
 > 主对话共注册 10 个工具（上图全部列出）。引文扩展（`expand_by_citations`）由 OpenAlex 与 Semantic Scholar 承担：arXiv 的接口本身不提供引文数据，所以它不参与回答，但 arXiv 来源的论文只要带编号（arXiv 编号或 DOI）一样可以扩展。
 
-### 编排范式：什么用流程图、什么用手写循环
+### 编排范式：什么用流程图、什么用ReAct循环
 
 项目里有两种编排方式，分工是明确的：
 
 | 流程长什么样 | 用什么 | 为什么 |
 |------|------|------|
 | 阶段能提前枚举出来（综述：分析 → 大纲 → 逐节写作 → 摘要 → 参考文献 → 终稿） | LangGraph `StateGraph` | 控制流一眼看得全，而且阶段之间天然就是"这一步做完了"的边界，正好用来存检查点 |
-| 需要模型每轮自由决定下一步（主对话：想检索就检索、想精读就精读、够了就直接回答） | 手写 `while` 循环 | 循环里要插三件框架不让你顺手插的事：每轮开头的取消检查、推理模型 thinking 块的协议回传、同一轮多个工具的并发控制 |
+| 需要模型每轮自由决定下一步（主对话：想检索就检索、想精读就精读、够了就直接回答） |  `ReAct` 循环 | 循环里要插三件框架不让你顺手插的事：每轮开头的取消检查、推理模型 thinking 块的协议回传、同一轮多个工具的并发控制 |
 
 所以"主对话"和"综述"看起来风格不一样，不是没统一，是两件事的形状本来就不一样。
 
@@ -165,7 +165,7 @@ flowchart TB
 |------|---------|
 | 运行时 | Python 3.12+、`uv`、Uvicorn |
 | 后端 API | FastAPI、REST、Server-Sent Events（SSE） |
-| 编排模式 | 主对话：Orchestrator-workers（主 Agent + 子 Agent 以 tool 形式注册，手写多轮工具循环）；综述流水线：LangGraph `StateGraph` |
+| 编排模式 | 主对话：Orchestrator-workers（主 Agent + 子 Agent 以 tool 形式注册，多轮ReAct工具循环）；综述流水线：LangGraph `StateGraph` |
 | 执行持久化 | LangGraph SQLite checkpointer；检查点库在会话目录内（`checkpoints.db`，随会话一起删除）。只覆盖综述流水线，粒度是"一节一个检查点" |
 | Agent | 主对话 Agent（researchAgent）+ 精读 / 追问 / 综述三个子 Agent |
 | LLM 适配 | OpenAI 兼容协议、Anthropic Messages 协议 |
