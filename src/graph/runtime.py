@@ -16,6 +16,18 @@ from src.models.sessions import utc_now
 JsonObject = dict[str, Any]
 WorkflowEventEmitter = Callable[[JsonObject], JsonObject]
 
+# 流式 token 事件字段都是标量，浅拷贝就够；每个字都 deepcopy 会把事件循环占满，
+# SSE 推不出去，前端就变成整段文字一次性出现。
+_SHALLOW_COPY_EVENTS = frozenset({"delta", "reasoning_delta"})
+
+
+def clone_runtime_event(event: JsonObject) -> JsonObject:
+    """复制一条运行事件；token 增量只做浅拷贝。"""
+
+    if event.get("event") in _SHALLOW_COPY_EVENTS:
+        return dict(event)
+    return copy.deepcopy(event)
+
 
 class WorkflowCancellation:
     """保存一次运行是否收到用户停止请求。"""
@@ -100,7 +112,7 @@ class InlineWorkflowSyncPort:
     def emit(self, event: JsonObject) -> JsonObject:
         """补齐运行期公共字段，然后立刻把事件交给外层统一处理。"""
 
-        payload = copy.deepcopy(event)
+        payload = clone_runtime_event(event)
         payload.setdefault("turn_id", self.turn_id)
         payload.setdefault("session_key", self.session_key)
         payload.setdefault("run_id", self.run_id)

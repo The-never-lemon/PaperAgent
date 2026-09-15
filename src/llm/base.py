@@ -174,6 +174,16 @@ class StreamCallbacks:
     on_tool_call_delta: Callable[[JsonObject], None] | None = None
 
 
+async def yield_to_event_loop() -> None:
+    """把控制权交还事件循环，让 SSE 推流协程把当前增量立刻发给浏览器。
+
+    同步回调（delta / reasoning_delta / 工具预览）会在同一次 LLM 流迭代里
+    连续执行；如果不主动让出，队列里会积压整段 token，前端就变成一次性弹出。
+    """
+
+    await asyncio.sleep(0)
+
+
 class ProviderHttpError(Exception):
     def __init__(self, status_code: int, body: str, headers: Mapping[str, str]):
         """表示供应商返回了明确的 HTTP 错误响应。

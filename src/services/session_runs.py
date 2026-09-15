@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.graph.runtime import InlineWorkflowSyncPort, WorkflowCancellation, WorkflowRuntimeContext
+from src.graph.runtime import InlineWorkflowSyncPort, WorkflowCancellation, WorkflowRuntimeContext, clone_runtime_event
 from src.graph.runtime_resources import WorkflowRuntimeResources
 from src.models.sessions import SESSION_STATUS_INTERRUPTED, SessionError, utc_now
 from src.repositories.sessions.base import SessionRepository
@@ -121,13 +121,13 @@ class SessionRunBroker:
             state = self._runs.get(run_id)
             if state is None:
                 raise SessionError(f"run not found: {run_id}", 404)
-            event_copy = copy.deepcopy(event)
+            event_copy = clone_runtime_event(event)
             event_copy.setdefault("stream_seq", len(state.events) + 1)
             state.events.append(event_copy)
             subscribers = list(state.subscribers)
 
         for queue in subscribers:
-            queue.put_nowait(copy.deepcopy(event_copy))
+            queue.put_nowait(clone_runtime_event(event_copy))
         return event_copy
 
     async def close_run(self, run_id: str) -> None:
@@ -156,7 +156,7 @@ class SessionRunBroker:
             state = self._runs.get(run_id)
             if state is None:
                 raise SessionError(f"run not found: {run_id}", 404)
-            history = [copy.deepcopy(item) for item in state.events]
+            history = [clone_runtime_event(item) for item in state.events]
             closed = state.closed
             if not closed:
                 state.subscribers.append(queue)
@@ -170,7 +170,7 @@ class SessionRunBroker:
                 item = await queue.get()
                 if item is None:
                     break
-                yield copy.deepcopy(item)
+                yield clone_runtime_event(item)
         finally:
             with self._lock:
                 state = self._runs.get(run_id)
@@ -342,7 +342,7 @@ class SessionRunService:
             单独发送，保证前端不会读到旧状态。
             """
 
-            event_copy = copy.deepcopy(event)
+            event_copy = clone_runtime_event(event)
             assistant_buffer.apply(event_copy)
             event_name = str(event_copy.get("event") or "")
             # 中文说明：真正的结束通知只能在所有内容和状态写完后发送。工作流内部
@@ -645,7 +645,7 @@ class SessionRunService:
     def _normalize_event(self, session_key: str, run_id: str, turn_id: str, event: JsonObject) -> JsonObject:
         """补齐统一字段，保证历史事件和实时事件结构一致。"""
 
-        normalized_event = copy.deepcopy(event)
+        normalized_event = clone_runtime_event(event)
         normalized_event.setdefault("event", "message")
         normalized_event["session_key"] = session_key
         normalized_event["chat_id"] = session_key

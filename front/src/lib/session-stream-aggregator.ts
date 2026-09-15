@@ -65,6 +65,11 @@ function createRuntimeEvent(partial: Partial<UIRuntimeTimelineEvent> & { id: str
 }
 
 const FINISHED_STATUSES = new Set(["completed", "failed", "cancelled", "skipped"]);
+const TERMINAL_SESSION_STATUSES = new Set(["completed", "failed", "cancelled", "interrupted"]);
+
+function isTerminalSessionStatus(status: string | null | undefined): boolean {
+  return Boolean(status && TERMINAL_SESSION_STATUSES.has(status));
+}
 
 export class SessionStreamAggregator {
   private messages: UISessionMessage[] = [];
@@ -110,6 +115,8 @@ export class SessionStreamAggregator {
         this.recalculateTokenTotals();
       }
     }
+
+    this.reconcileTerminalThread(thread);
 
     // 中文注释：兼容没有事件流的老数据，如果历史里没有消息事件，就从消息表重建基础聊天内容。
     if (this.messages.length === 0) {
@@ -217,11 +224,7 @@ export class SessionStreamAggregator {
         return true;
       case "turn_end":
         this.status = event.status ?? this.status;
-        if (event.status === "cancelled") {
-          // 用户主动停止后，后端不会再为每个正在运行的子节点单独发送结束事件。
-          // 这里统一补上取消状态，避免整体已经停止但节点卡片仍显示“处理中”。
-          this.markUnfinishedRuntimeEventsCancelled(event);
-        }
+        this.settleUnfinishedRuntimeEvents(this.status, event);
         this.isStreaming = false;
         this.activeNodeKey = null;
         this.stopActiveAssistantStreaming();
@@ -237,10 +240,17 @@ export class SessionStreamAggregator {
     if (typeof seq !== "number" || !Number.isFinite(seq) || seq <= 0) {
       return false;
     }
-    if (seq <= this.lastStreamSeq) {
+    // 中文注释：落库事件用数据库 seq_no，流式 token 用当前 run 内存队列长度，
+    // 两套序号会交错变大变小。思考增量一旦把水位抬到 1200，后面 seq=242 的
+    // 「工具完成」和 turn_end 若也按「更小就丢」处理，卡片就会永远停在处理中。
+    // 只对 token 增量去重；工具卡片、正文和结束事件按 id 更新，重放也安全。
+    const isTokenDelta = event.event === "delta" || event.event === "reasoning_delta";
+    if (isTokenDelta && seq <= this.lastStreamSeq) {
       return true;
     }
-    this.lastStreamSeq = seq;
+    if (seq > this.lastStreamSeq) {
+      this.lastStreamSeq = seq;
+    }
     return false;
   }
 
@@ -495,6 +505,39 @@ export class SessionStreamAggregator {
   }
 
   /**
+   * 线程快照已经是终态时，以会话状态为准收尾。
+   * 实时流若漏掉工具完成事件，hydrate 后仍可能留下「处理中」卡片。
+   */
+  private reconcileTerminalThread(thread: SessionThread) {
+    if (!isTerminalSessionStatus(thread.status)) {
+      return;
+    }
+    this.status = thread.status;
+    this.isStreaming = false;
+    this.runStartedAt = null;
+    this.activeNodeKey = null;
+    this.stopActiveAssistantStreaming();
+    this.settleUnfinishedRuntimeEvents(thread.status, {
+      event: "turn_end",
+      session_key: thread.key,
+      status: thread.status,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  /** 运行已经结束时，把还停在处理中的卡片收成与会话一致的终态。 */
+  private settleUnfinishedRuntimeEvents(status: string, event: SessionRuntimeEvent) {
+    if (status === "cancelled") {
+      this.markUnfinishedRuntimeEventsCancelled(event);
+      return;
+    }
+    if (!isTerminalSessionStatus(status)) {
+      return;
+    }
+    this.markUnfinishedRuntimeEventsCompleted(event, status === "failed" ? "failed" : "completed");
+  }
+
+  /**
    * 将运行树中还没有结束的节点统一标记为已取消。
    * 已完成、已失败或已经跳过的节点不改动，保证用户仍能看到中断前已经完成的结果。
    */
@@ -519,6 +562,35 @@ export class SessionStreamAggregator {
         };
       }
 
+      for (const child of item.children) {
+        update(child);
+      }
+    };
+
+    for (const item of this.runtimeEvents) {
+      update(item);
+    }
+    this.recalculateTokenTotals();
+  }
+
+  /** 运行成功或失败结束后，把漏掉完成事件的处理中卡片收成终态。 */
+  private markUnfinishedRuntimeEventsCompleted(event: SessionRuntimeEvent, status: "completed" | "failed") {
+    const timestamp = event.timestamp ?? new Date().toISOString();
+    const showContent = status === "failed" ? "执行失败" : "已完成";
+    const update = (item: UIRuntimeTimelineEvent) => {
+      if (item.status === "running" || item.status === "pending" || item.status === "cancel_requested") {
+        item.status = status;
+        item.showContent = showContent;
+        item.updatedAt = timestamp;
+        item.completedAt = timestamp;
+        item.raw = {
+          ...item.raw,
+          event: "runtime_event",
+          status,
+          message: showContent,
+          timestamp,
+        };
+      }
       for (const child of item.children) {
         update(child);
       }

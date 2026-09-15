@@ -4,7 +4,7 @@ import json
 import unittest
 from typing import Any
 
-from src.graph.runtime import InlineWorkflowSyncPort, WorkflowNodeReporter
+from src.graph.runtime import InlineWorkflowSyncPort, WorkflowNodeReporter, clone_runtime_event
 
 
 def _collecting_reporter() -> tuple[list[dict[str, Any]], WorkflowNodeReporter]:
@@ -30,6 +30,13 @@ def _step_event(events: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 class RuntimeEventDetailTests(unittest.TestCase):
+    def test_delta_events_are_cloned_without_deepcopy(self) -> None:
+        original = {"event": "delta", "content": "你好"}
+        cloned = clone_runtime_event(original)
+        self.assertIsNot(cloned, original)
+        cloned["content"] = "改过"
+        self.assertEqual(original["content"], "你好")
+
     def test_tool_start_detail_content_is_arguments_object(self) -> None:
         """用户展开详情时应看到参数对象本身，而不是 arguments_summary 包着的转义字符串。"""
 

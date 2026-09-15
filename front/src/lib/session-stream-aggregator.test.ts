@@ -170,3 +170,103 @@ test("hydrate 回放用户消息时复用和乐观插入相同的稳定 id", () 
 
   assert.equal(aggregator.snapshot().messages[0]?.id, liveId);
 });
+
+test("思考增量把 stream_seq 抬高后，序号更小的工具完成和 turn_end 仍要落地", () => {
+  const aggregator = new SessionStreamAggregator();
+  aggregator.apply(
+    runtimeEvent({
+      event: "runtime_event",
+      id: "turn-1:tool:expand_by_citations_1",
+      parent_id: "turn-1:tool",
+      title: "引文扩展检索",
+      status: "running",
+      show_content: "正在执行 expand_by_citations",
+      turn_id: "turn-1",
+      stream_seq: 240,
+    }),
+  );
+  aggregator.apply(
+    runtimeEvent({
+      event: "reasoning_delta",
+      content: "先顺着引用关系扩展",
+      turn_id: "turn-1",
+      stream_seq: 1200,
+    }),
+  );
+
+  const completed = aggregator.apply(
+    runtimeEvent({
+      event: "runtime_event",
+      id: "turn-1:tool:expand_by_citations_1",
+      parent_id: "turn-1:tool",
+      title: "引文扩展检索",
+      status: "completed",
+      show_content: "工具执行已完成",
+      turn_id: "turn-1",
+      stream_seq: 242,
+    }),
+  );
+  const ended = aggregator.apply(
+    runtimeEvent({
+      event: "turn_end",
+      status: "completed",
+      turn_id: "turn-1",
+      stream_seq: 262,
+    }),
+  );
+
+  const snapshot = aggregator.snapshot();
+  const card = snapshot.runtimeEvents[0]?.children[0];
+  assert.equal(completed, true);
+  assert.equal(ended, true);
+  assert.equal(card?.status, "completed");
+  assert.equal(snapshot.status, "completed");
+  assert.equal(snapshot.isStreaming, false);
+});
+
+test("会话已结束后 hydrate 不会把未收到完成事件的工具卡留在处理中", () => {
+  const aggregator = new SessionStreamAggregator();
+  aggregator.hydrate({
+    key: "s",
+    title: "调研对话",
+    status: "completed",
+    messages: [],
+    events: [
+      stored({
+        event_type: "runtime_event",
+        seq_no: 240,
+        content: "正在执行 expand_by_citations",
+        metadata: {
+          event: "runtime_event",
+          id: "turn-1:tool:expand_by_citations_1",
+          parent_id: "turn-1:tool",
+          title: "引文扩展检索",
+          status: "running",
+          show_content: "正在执行 expand_by_citations",
+          turn_id: "turn-1",
+          stream_seq: 240,
+        },
+      }),
+      stored({
+        event_type: "turn_end",
+        seq_no: 262,
+        metadata: {
+          event: "turn_end",
+          status: "completed",
+          turn_id: "turn-1",
+          stream_seq: 262,
+        },
+      }),
+    ],
+    artifacts: [],
+    has_pending_tool_calls: false,
+    run_started_at: null,
+    active_run_id: null,
+  });
+
+  const snapshot = aggregator.snapshot();
+  const card = snapshot.runtimeEvents[0]?.children[0];
+  assert.equal(snapshot.status, "completed");
+  assert.equal(snapshot.isStreaming, false);
+  assert.equal(card?.status, "completed");
+});

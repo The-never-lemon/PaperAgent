@@ -5,7 +5,7 @@ import json
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
-from .base import JsonObject, LLMProvider, LLMResponse, Message, StreamCallbacks, ToolCallRequest
+from .base import JsonObject, LLMProvider, LLMResponse, Message, StreamCallbacks, ToolCallRequest, yield_to_event_loop
 from .registry import ProviderSpec
 from src.utils import get_logger
 
@@ -131,19 +131,26 @@ class OpenAICompatProvider(LLMProvider):
                 if choice is not None and getattr(choice, "finish_reason", None):
                     finish_reason = getattr(choice, "finish_reason", None)
                 delta = getattr(choice, "delta", None) if choice is not None else None
+                emitted = False
                 text = getattr(delta, "content", None) or ""
                 if text:
                     content.append(text)
                     if callbacks.on_content_delta:
                         callbacks.on_content_delta(text)  # 如果上层注册了文本回调，立刻把增量推送出去（前端实时打字效果靠这个）。
+                        emitted = True
                 reasoning = getattr(delta, "reasoning_content", None) or ""
                 if reasoning and callbacks.on_thinking_delta:
                     callbacks.on_thinking_delta(reasoning)
+                    emitted = True
                 for item in getattr(delta, "tool_calls", None) or []:
                     item_dict = _to_dict(item)
                     if callbacks.on_tool_call_delta:
                         callbacks.on_tool_call_delta(item_dict)
+                        emitted = True
                     _accumulate_tool_call_delta(tool_call_bucket, item_dict)
+                if emitted:
+                    # 让 SSE 生成器把这一小段先推出去，而不是等整轮模型调用结束。
+                    await yield_to_event_loop()
             return LLMResponse(
                 content="".join(content),
                 tool_calls=_finalize_stream_tool_calls(tool_call_bucket),

@@ -98,6 +98,12 @@ const showScrollToBottom = ref(false);
 // 指数退避：1s / 2s / 4s / 8s / 16s，最多 5 次。
 const reconnectAttempts = ref(0);
 const MAX_RECONNECT_ATTEMPTS = 5;
+const STALE_STREAM_CHECK_MS = 8000;
+const TERMINAL_SESSION_STATUSES = new Set(["completed", "failed", "cancelled", "interrupted"]);
+
+function isTerminalSessionStatus(status: string | null | undefined): boolean {
+  return Boolean(status && TERMINAL_SESSION_STATUSES.has(status));
+}
 
 // ---------------------------------------------------------------------------
 // 右栏（论文工作区）宽度：用户可以拖拽调整，拖完的宽度会记在浏览器里
@@ -191,8 +197,39 @@ watch(selectedSummary, (summary) => {
   }
 });
 
-const currentStatus = computed(() => timelineSnapshot.value?.status ?? selectedSummary.value?.status ?? "created");
-const isRunning = computed(() => timelineSnapshot.value?.isStreaming ?? false);
+watch(
+  () => selectedSummary.value?.status,
+  async (status, previous) => {
+    if (!status || status === previous || !isTerminalSessionStatus(status)) {
+      return;
+    }
+    if (!timelineSnapshot.value?.isStreaming && !hasRunningRuntimeCards()) {
+      return;
+    }
+    try {
+      await reloadCurrentThread();
+    } catch {
+      syncSnapshot();
+    }
+  },
+);
+
+const currentStatus = computed(() => {
+  const listed = selectedSummary.value?.status;
+  // 中文注释：侧栏已经从接口拿到终态，但 SSE 漏了 turn_end 时，本地快照仍可能是 running。
+  // 状态点以会话记录为准，避免标题写「已完成」输入框却还锁着。
+  if (listed && isTerminalSessionStatus(listed)) {
+    return listed;
+  }
+  return timelineSnapshot.value?.status ?? listed ?? "created";
+});
+const isRunning = computed(() => {
+  const listed = selectedSummary.value?.status;
+  if (listed && isTerminalSessionStatus(listed)) {
+    return false;
+  }
+  return timelineSnapshot.value?.isStreaming ?? false;
+});
 const hasMessages = computed(() => (timelineSnapshot.value?.messages.length ?? 0) > 0);
 
 /** 欢迎态：没有选中会话或会话里还没有任何消息时，显示居中的大输入框。 */
@@ -256,6 +293,17 @@ const flowTurns = computed<FlowTurn[]>(() => {
 
 /** 真正挂到页面上的回合：跳过开头藏起来的那些更早对话。 */
 const visibleFlowTurns = computed(() => flowTurns.value.slice(hiddenTurnCount.value));
+
+/**
+ * 当前回合还没有正在打字的助手气泡时，先占一张「正在组织回复…」。
+ * 第一段思考/正文到达后会换成真正的流式气泡，避免发送后长时间空白。
+ */
+function turnNeedsStreamingPlaceholder(turn: FlowTurn, isLastVisible: boolean): boolean {
+  if (!isLastVisible || !isRunning.value) {
+    return false;
+  }
+  return !turn.messages.some((message) => message.role === "assistant" && message.isStreaming);
+}
 
 /** 上面是否还有更早的对话可以加载。 */
 const hasOlderTurns = computed(() => hiddenTurnCount.value > 0);
@@ -394,6 +442,7 @@ function hydrateThread(thread: SessionThread) {
    注意：hydrateThread 和 submitMessage 里调的是 syncSnapshot()（不合并），
    因为它们各自代表一次用户可见的完整动作（切换会话、发出消息），必须马上看到结果。 */
 let pendingSnapshotFrame = 0;
+let staleStreamCheckTimer = 0;
 
 /** 把下一次快照渲染排到当前这一帧的末尾。同一帧里重复调用只会排一次。 */
 function scheduleSnapshot() {
@@ -626,9 +675,10 @@ function openStream(sessionKey: string, streamUrl: string) {
       }
       const source = event.target as EventSource | null;
       // 中文注释：浏览器 EventSource 断线后会把 readyState 设成 CONNECTING 并自己重连。
-      // 这时千万不要关掉连接、也不要整段 hydrate：工具执行中的静默心跳或代理闪断
-      // 都会走到这里，整页重挂看起来就像「每次调用工具都强制刷新」。
+      // 心跳闪断不要整段 hydrate。但若后端其实已经跑完，这条连接可能一直停在
+      // CONNECTING，界面就会永远锁在「处理中」。过几秒去对一下线程快照。
       if (source && source.readyState !== EventSource.CLOSED) {
+        scheduleStaleStreamCheck(sessionKey);
         return;
       }
       // 中文注释：连接已经被关掉（不是浏览器正在重连）才走下面的退避。
@@ -709,7 +759,13 @@ async function handleRunFinished(sessionKey: string, event: SessionRuntimeEvent)
   sending.value = false;
   cancelling.value = false;
   activeRunId.value = null;
-  syncSnapshot();
+  // 中文注释：结束通知到达时，中间的工具完成事件可能已经被 stream_seq 去重丢掉。
+  // 消息 id 已经稳定，这里重新拉线程只会把漏掉的卡片状态补齐，不会拆掉整页。
+  try {
+    await reloadCurrentThread();
+  } catch {
+    syncSnapshot();
+  }
   await refreshWorkspacePapers();
   // 中文注释：一轮跑完后工作区可能已经变了（新检索到论文、评价出分、精读完成），
   // 让左侧论文面板也跟着刷新一次，否则用户要手动刷新页面才能看到最新状态。
@@ -748,10 +804,56 @@ async function ensureActiveSession() {
 /** 关闭当前 EventSource，避免切换会话后仍消费旧流。 */
 function closeStream(markAsManual: boolean) {
   manualClose.value = markAsManual;
+  if (staleStreamCheckTimer) {
+    window.clearTimeout(staleStreamCheckTimer);
+    staleStreamCheckTimer = 0;
+  }
   if (streamSource.value) {
     streamSource.value.close();
     streamSource.value = null;
   }
+}
+
+/** SSE 还在自己重连时，过几秒去对一次线程快照；后端已经结束就补齐卡片并解锁输入。 */
+function scheduleStaleStreamCheck(sessionKey: string) {
+  if (staleStreamCheckTimer || manualClose.value) {
+    return;
+  }
+  staleStreamCheckTimer = window.setTimeout(async () => {
+    staleStreamCheckTimer = 0;
+    if (manualClose.value || selectedSessionKey.value !== sessionKey) {
+      return;
+    }
+    if (!timelineSnapshot.value?.isStreaming && !hasRunningRuntimeCards()) {
+      return;
+    }
+    try {
+      const thread = await fetchSessionThread(sessionKey);
+      if (selectedSessionKey.value !== sessionKey) {
+        return;
+      }
+      if (thread.status === "running" || thread.status === "cancel_requested") {
+        return;
+      }
+      hydrateThread(thread);
+      sending.value = false;
+      cancelling.value = false;
+      activeRunId.value = null;
+      emit("refreshSessions");
+    } catch {
+      // 快照暂时拿不到就再等下一次 onerror。
+    }
+  }, STALE_STREAM_CHECK_MS);
+}
+
+function hasRunningRuntimeCards(events: UIRuntimeTimelineEvent[] = timelineSnapshot.value?.runtimeEvents ?? []): boolean {
+  return events.some(
+    (event) =>
+      event.status === "running" ||
+      event.status === "pending" ||
+      event.status === "cancel_requested" ||
+      hasRunningRuntimeCards(event.children),
+  );
 }
 
 /** 重新拉取当前会话线程（run 结束或断流后的状态修复）。 */
@@ -1010,6 +1112,12 @@ function handleError(error: unknown, title: string) {
                   <MathText :text="message.content" />
                 </div>
               </template>
+
+              <AssistantBubble
+                v-if="turnNeedsStreamingPlaceholder(turn, turnIndex === visibleFlowTurns.length - 1)"
+                content=""
+                :is-streaming="true"
+              />
 
               <ToolCallTrace
                 :events="turn.events"

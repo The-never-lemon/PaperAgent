@@ -183,6 +183,9 @@ async def run_conversation_agent(
     repo = context.repo
     workspace = context.workspace
 
+    # 主卡片先亮起来：整理历史可能要读库、压缩上下文，这段时间前端不能一片空白。
+    chat_reporter.started("正在整理对话上下文")
+
     # 第一步：从消息表重建对话历史（本轮 user 消息已由 run 服务先行落库），
     # 拼出系统提示词 + 按预算压缩后的历史消息。文件/数据库读取放到线程里，避免卡住事件循环。
     record = await asyncio.to_thread(repo.get, session_key)
@@ -238,11 +241,26 @@ async def run_conversation_agent(
         context.check_cancelled()
 
         # 第二步：流式调用模型。正文增量推 delta、思考增量推 reasoning_delta，
-        # 前端靠它们实时渲染打字效果。工具调用增量（on_tool_call_delta）刻意不消费：
-        # 它是非累积的参数分片，等本轮聚合出完整 tool_calls 后统一发运行卡片更可靠。
+        # 前端靠它们实时渲染打字效果。工具名一旦在流里出现，就先开一张「准备调用」
+        # 卡片；参数分片不再重复发卡，真正执行时复用同一张卡改成「正在执行」。
+        chat_reporter.progress(f"正在思考（第 {round_no} 轮）", stage="llm_round")
+        preview_keys: dict[int, str] = {}
+
+        def on_tool_call_delta(item: JsonObject) -> None:
+            noted = note_streaming_tool_call(preview_keys, item, round_no)
+            if noted is None:
+                return
+            _index, name, event_key = noted
+            tool_reporter.started(
+                f"准备调用 {name}",
+                stage=name,
+                event_key=event_key,
+            )
+
         callbacks = StreamCallbacks(
             on_content_delta=chat_reporter.delta,
             on_thinking_delta=chat_reporter.reasoning_delta,
+            on_tool_call_delta=on_tool_call_delta,
         )
         response = await context.llm.provider.chat_stream(
             messages,
@@ -384,12 +402,19 @@ async def run_conversation_agent(
             turn_id=turn_id,
         )
 
-                # 第五步：并行执行本轮请求的工具调用。
+        # 第五步：并行执行本轮请求的工具调用。
         # 先给每个调用预分配 event_key 和 seq，避免并发时互相覆盖。
+        # 流式预览已经按供应商 index 开过卡的，这里必须复用同一把键，
+        # 否则前端会先看到「准备调用」再突然多出一张「正在执行」。
+        ordered_preview_keys = [preview_keys[index] for index in sorted(preview_keys)]
         call_metadata = []
-        for call in calls:
+        for call_index, call in enumerate(calls):
             tool_call_seq += 1
-            event_key = f"{call['name']}_{tool_call_seq}"
+            event_key = (
+                ordered_preview_keys[call_index]
+                if call_index < len(ordered_preview_keys)
+                else f"{call['name']}_{tool_call_seq}"
+            )
             call_metadata.append({
                 "call": call,
                 "seq": tool_call_seq,
@@ -998,6 +1023,30 @@ def _unknown_paper_ids(content: str, workspace: SessionWorkspace) -> list[str]:
             seen.add(pid)
             result.append(pid)
     return result
+
+
+def note_streaming_tool_call(
+    preview_keys: dict[int, str],
+    item: dict[str, Any],
+    round_no: int,
+) -> tuple[int, str, str] | None:
+    """流式工具名首次出现时登记卡片键；参数碎片不重复发卡。"""
+    try:
+        index = int(item.get("index", -1))
+    except (TypeError, ValueError):
+        return None
+    if index < 0:
+        return None
+    name = str(item.get("name") or "").strip()
+    if not name:
+        function = item.get("function")
+        if isinstance(function, dict):
+            name = str(function.get("name") or "").strip()
+    if not name or index in preview_keys:
+        return None
+    event_key = f"{name}_r{round_no}_{index}"
+    preview_keys[index] = event_key
+    return index, name, event_key
 
 
 def _normalize_tool_calls(raw_calls: list[Any], round_no: int) -> list[JsonObject]:

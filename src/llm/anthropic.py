@@ -5,7 +5,7 @@ import json
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
-from .base import JsonObject, LLMProvider, LLMResponse, Message, StreamCallbacks, ToolCallRequest
+from .base import JsonObject, LLMProvider, LLMResponse, Message, StreamCallbacks, ToolCallRequest, yield_to_event_loop
 from .registry import ProviderSpec
 
 
@@ -129,6 +129,7 @@ class AnthropicProvider(LLMProvider):
                 item = _to_dict(event)
                 event_type = item.get("type")
                 delta = item.get("delta") or {}
+                emitted = False
                 if isinstance(item.get("usage"), dict):
                     usage = item["usage"]
                 if item.get("stop_reason"):
@@ -136,11 +137,21 @@ class AnthropicProvider(LLMProvider):
                 if event_type == "content_block_start":
                     block = item.get("content_block") or {}
                     if isinstance(block, dict) and block.get("type") == "tool_use":
-                        tool_blocks[_block_index(item, tool_blocks)] = {
+                        index = _block_index(item, tool_blocks)
+                        tool_blocks[index] = {
                             "id": str(block.get("id") or ""),
                             "name": str(block.get("name") or ""),
                             "json_parts": [],
                         }
+                        if callbacks.on_tool_call_delta:
+                            callbacks.on_tool_call_delta(
+                                {
+                                    "index": index,
+                                    "name": str(block.get("name") or ""),
+                                    "id": str(block.get("id") or ""),
+                                }
+                            )
+                            emitted = True
                     if isinstance(block, dict) and block.get("type") == "thinking":
                         _thinking_slot(thinking_blocks, item)["thinking"] += str(block.get("thinking") or "")
                 if event_type == "content_block_delta" and delta.get("type") == "text_delta":
@@ -148,22 +159,33 @@ class AnthropicProvider(LLMProvider):
                     content.append(text)
                     if callbacks.on_content_delta:
                         callbacks.on_content_delta(text)
+                        emitted = True
                 if event_type == "content_block_delta" and delta.get("type") == "thinking_delta":
                     # 中文注释：先把分片攒进当前 thinking 块，再决定要不要转发给界面。
                     # 攒数据不能受有没有回调影响，否则上层一不传回调，回传内容就缺了。
                     _thinking_slot(thinking_blocks, item)["thinking"] += str(delta.get("thinking") or "")
                     if callbacks.on_thinking_delta:
                         callbacks.on_thinking_delta(delta.get("thinking") or "")
+                        emitted = True
                 if event_type == "content_block_delta" and delta.get("type") == "signature_delta":
                     # 中文注释：Anthropic 官方通过 signature 校验 thinking 是否被篡改，
                     # 拿到就存下来一起回传；DeepSeek 这类兼容网关不给也能通过。
                     _thinking_slot(thinking_blocks, item)["signature"] = str(delta.get("signature") or "")
                 if event_type == "content_block_delta" and delta.get("type") == "input_json_delta":
+                    index = _block_index(item, tool_blocks)
                     if callbacks.on_tool_call_delta:
-                        callbacks.on_tool_call_delta({"arguments_delta": delta.get("partial_json") or ""})
-                    slot = tool_blocks.get(_block_index(item, tool_blocks))
+                        callbacks.on_tool_call_delta(
+                            {
+                                "index": index,
+                                "arguments_delta": delta.get("partial_json") or "",
+                            }
+                        )
+                        emitted = True
+                    slot = tool_blocks.get(index)
                     if slot is not None and delta.get("partial_json"):
                         slot["json_parts"].append(str(delta["partial_json"]))
+                if emitted:
+                    await yield_to_event_loop()
             finalized_thinking = _finalize_stream_thinking_blocks(thinking_blocks)
             return LLMResponse(
                 content="".join(content),

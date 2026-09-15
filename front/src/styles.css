@@ -1471,6 +1471,7 @@ a {
 
 .runtime-event-item {
   position: relative;
+  animation: chat-enter var(--dur-slow) var(--ease);
 }
 
 .runtime-event-branch {
@@ -3827,6 +3828,7 @@ a {
 
 .chat-row {
   display: flex;
+  animation: chat-enter var(--dur-slow) var(--ease);
 }
 
 .chat-row-user {
@@ -3901,6 +3903,17 @@ a {
 @keyframes chat-cursor-blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
+}
+
+@keyframes chat-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .chat-reasoning-toggle {
