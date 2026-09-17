@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -68,6 +69,15 @@ logger = get_logger(__name__)
 
 # map 阶段同时精读多少个正文片段（信号量并发上限）。
 DEEP_READ_MAP_CONCURRENCY = 3
+
+# 读一块时，从前一块末尾、下一块开头各取几句当衔接，帮助看清跨段有没有接上。
+# 先按句切开，再卡字数：句数、字数哪个先到用哪个，避免把整张表或大公式块整段塞进来。
+NEIGHBOR_CONTEXT_MAX_SENTENCES = 2
+NEIGHBOR_CONTEXT_MAX_CHARS = 240
+
+# 中文句号、问号、叹号直接算一句结束；英文的 .!? 只有后面是空白、换行或到头才算，
+# 避免把 0.5 这种小数点当成句号。
+_SENTENCE_END = re.compile(r"(?<=[。！？])|(?<=[.!?])(?=\s|$)")
 
 # 单块笔记最多保留多少字，超出截断。
 MAP_NOTE_MAX_CHARS = 500
@@ -523,6 +533,30 @@ async def _write_figure_artifacts(
     return markdown_text
 
 
+def _neighbor_snippet(text: str, *, from_end: bool) -> str:
+    """从一段正文里取出大约一两句，给精读当下一块的衔接。
+
+    from_end 为真时取末尾（上一块的尾巴），为假时取开头（下一块的头）。
+    先按句号切开，再卡在约 240 字以内；切完是空的就返回空字符串，
+    调用方不要把空内容塞进给模型的提示里。
+    """
+
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return ""
+    # 按句切开后丢掉空白段；切不出句就当没有衔接，不强行补半句。
+    parts = [piece.strip() for piece in _SENTENCE_END.split(cleaned) if piece.strip()]
+    if not parts:
+        return ""
+    chosen = parts[-NEIGHBOR_CONTEXT_MAX_SENTENCES:] if from_end else parts[:NEIGHBOR_CONTEXT_MAX_SENTENCES]
+    snippet = " ".join(chosen).strip()
+    if len(snippet) > NEIGHBOR_CONTEXT_MAX_CHARS:
+        # 字数先到：末尾衔接留最后一段字，开头衔接留最前面一段字。
+        snippet = snippet[-NEIGHBOR_CONTEXT_MAX_CHARS:] if from_end else snippet[:NEIGHBOR_CONTEXT_MAX_CHARS]
+        snippet = snippet.strip()
+    return snippet
+
+
 async def _map_chunks(
     deps: DeepReadDeps,
     doc: PaperDocument,
@@ -532,6 +566,7 @@ async def _map_chunks(
     """并发精读每个正文片段，返回 (每块笔记列表, 输入token, 输出token)。
 
     用 asyncio.Semaphore 把并发压在 DEEP_READ_MAP_CONCURRENCY 内。
+    读每一块时附带上一块末尾、下一块开头各一两句，方便看清跨段有没有接上。
     单块失败（response.ok 为 False 或抛异常）→ 该块笔记记为空字符串，不中断整批。
     每完成一块更新进度"正在精读第 x/y 段"。
     """
@@ -542,22 +577,33 @@ async def _map_chunks(
     total_input = 0
     total_output = 0
     topic = deps.workspace.research_topic
+    # 按片段编号找相邻块，读某一块时带上前后各一两句。
+    chunks_by_id = {item.chunk_id: item for item in chunks}
 
     async def _map_one(chunk: "TextChunk") -> str:
         """精读单个正文片段，返回笔记文本（失败返回空字符串）。"""
 
         nonlocal completed, total_input, total_output
         async with semaphore:
-            # 构造用户消息：研究主题 + 关注点 + 片段编号 + 正文片段。
-            user_content = json.dumps(
-                {
-                    "研究主题": topic,
-                    "用户关注点": focus,
-                    "chunk_id": chunk.chunk_id,
-                    "正文片段": chunk.content,
-                },
-                ensure_ascii=False,
-            )
+            # 构造用户消息：研究主题 + 关注点 + 片段编号 + 正文片段；
+            # 有相邻块时再附上前后各一两句，方便看清跨段有没有接上。
+            payload: JsonObject = {
+                "研究主题": topic,
+                "用户关注点": focus,
+                "chunk_id": chunk.chunk_id,
+                "正文片段": chunk.content,
+            }
+            previous = chunks_by_id.get(chunk.previous_chunk_id or "")
+            if previous is not None:
+                leading = _neighbor_snippet(previous.content, from_end=True)
+                if leading:
+                    payload["前文衔接"] = leading
+            following = chunks_by_id.get(chunk.next_chunk_id or "")
+            if following is not None:
+                trailing = _neighbor_snippet(following.content, from_end=False)
+                if trailing:
+                    payload["后文衔接"] = trailing
+            user_content = json.dumps(payload, ensure_ascii=False)
             messages = [
                 {"role": "system", "content": DEEP_READ_MAP_SYSTEM_PROMPT},
                 {"role": "user", "content": user_content},
