@@ -152,7 +152,7 @@ flowchart TB
 
 两个实现细节：
 
-- **小节内部不另存检查点。** 写一节时会在「补资料、写正文、审查」之间转几轮。这些中间状态没有恢复价值：外层已经是写完一节才记一笔，续跑只会从某一节的开头重来。所以这一层用普通循环，不写进检查点。以前它也是一张嵌在里面的流程图，中间状态曾占到整个检查点库的四分之三。
+- **小节内部是普通循环，不另存检查点。** 写一节时先看证据够不够，不够就补资料（最多 5 次），写完再审查，不通过最多改 2 轮。这些中间状态没有恢复价值：外层已经是写完一节才记一笔，续跑只会从这一节开头重来。分析、大纲、写作是这条流水线里的函数，不再各算一个子 Agent。
 - 检查点库的大小随综述规模增长：每完成一节就落一次快照，快照里含当时已写的全部小节。一份 12 节、单篇论文的综述实测约 2 MB。
 
 > 说明：这是**流程级**的恢复，粒度是"一节一个检查点"，只有综述流水线支持。主对话的恢复是另一套：消息落库 + 刷新页面接回实时流，粒度是整轮。
@@ -289,7 +289,7 @@ uv run python scripts/package.py    # 生成 Paper-Agent-<日期>.zip
 
 ## 🔧 模型配置
 
-系统支持配置多个 Provider。内置档位只有 `default_agent` 一个，AgentSpec 中声明了档位的子 Agent 都指向它；主对话另有可选档位 `research_agent`（未配置时回退 `default_agent`）。
+系统支持配置多个 Provider。内置档位只有 `default_agent` 一个；主对话另有可选档位 `research_agent`（未配置时回退 `default_agent`）。精读、追问和综述不单独配档位，直接复用主对话这次用的模型。
 
 - 配置主文件：`config/model.json`（含密钥，不入库），示例见 `config/model.example.json`，系统参数见 `config/system.yaml`
 
@@ -302,7 +302,7 @@ uv run python scripts/package.py    # 生成 Paper-Agent-<日期>.zip
 
 `default_agent` 是唯一必需的档位，缺失时配置无法工作。
 
-> 说明：`AgentSpec` 里声明的 `llm_profile` 在当前装配路径下不生效——对话中被当作工具调用的子 Agent 直接复用主对话的模型快照，因此配了 `research_agent` 时它们跑的也是 `research_agent` 的模型。
+> 说明：配了 `research_agent` 时，精读、追问、综述和摘要相关性评价跑的都是这一档的模型。`ReadAgent` 的 `AgentSpec` 里虽然写了 `llm_profile`，对话里并不按它另装一份。综述里的分析、大纲、写作也不再单独声明档位。
 
 ### Provider 后端
 
