@@ -55,10 +55,10 @@ class AgentContext:
 
 
 class BaseAgent(ABC):
-    """所有论文流程 Agent 的统一基类。
+    """论文流程里仍走统一基类的 Agent。
 
-    新设计下，Agent 不再依赖独立的 `AgentRunInput/Output` 契约，
-    而是直接接收共享状态，并返回一个待合并的局部状态更新字典。
+    子类接收自己要用的状态，返回一小段待合并的结果。
+    综述的分析、大纲和写作不走这个基类，它们是综述流水线直接调用的函数。
     """
 
     spec: AgentSpec

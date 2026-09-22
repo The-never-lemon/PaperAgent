@@ -1,30 +1,27 @@
-"""综述子 Agent（agent-as-tool 模式）。
+"""综述子 Agent（作为主对话的一个工具来用）。
 
-这个模块是综述链路的执行核心。主 Agent 通过 generate_review 工具把综述任务
-委派到这里，本模块负责编排已有的三个 Agent（AnalyseAgent→WritingOutlineAgent
-→WritingAgent）：工作区论文 → 子主题分析 → 全局综合 → 大纲 → 逐节写作 → 摘要
-→ 参考文献与引用替换 → 终稿 Markdown 存 artifact → 推 review 卡片 → 返回
-{status, word_count, sections, artifact_id}。
+主 Agent 通过 generate_review 把写综述这件事交到这里。本模块按固定顺序往下走：
+准备工作区论文 → 分析论文集 → 做领域综合 → 拟大纲 → 一节一节写正文 → 写摘要
+→ 整理参考文献 → 拼成 Markdown 存下来 → 推出综述卡片。
 
-流程用 LangGraph 的 StateGraph 编排：每个阶段是流程图上的一个节点，节点与节点
-之间的边界就是"这一步已经做完了"的天然标记。这么做有两个好处——控制流一眼能
-看全（哪一步接哪一步、哪里会绕回去），以及接上检查点以后能从任意一个做完的
-阶段接着往下跑，不用从头重来。
+分析、大纲、写作是本模块调用的普通函数，不是再嵌进去的子 Agent。
+小节内部用普通循环取证和审查，不另存检查点。
 
-其中最长的"逐节写作"用一条指回自己的条件边表示：写完一节就回到同一个节点写
-下一节，直到大纲里的小节都写完，再去写摘要。
+流程用一张流程图串起来：每个阶段是图上的一个节点，节点与节点之间的边界
+就是「这一步已经做完了」。接上检查点以后，可以从最后一个做完的阶段接着写，
+不用从头重来。已经写好的小节不用重写，正在写的那一节要重做。
 
-每做完一个阶段，图的状态会被写进会话目录下的 checkpoints.db。所以综述跑到一半
-进程挂了、或者用户点了停止，可以用 resume_review 从最后一个做完的阶段接着写：
-已经写好的小节不用重写，正在写的那一节要重做（它还没做完，没有记下来）。
+其中「逐节写作」用一条指回自己的边表示：写完一节就回到同一个节点写下一节，
+直到大纲里的小节都写完，再去写摘要。
 
-每个节点都要用的运行期对象（工作区、仓储、事件上报器、模型快照、取消控制）
-都不是能保存下来的普通数据，所以统一用闭包从 ReviewDeps 传进去，图状态里
-只放能存进检查点的普通数据——各种 dict、文本、数字。
+每做完一个阶段，图的状态会写进会话目录下的 checkpoints.db。用户点了停止，
+或者进程中途停了，可以用 resume_review 接着写。
 
-整个流程自包含，不依赖 research_tools / researchAgent / deepReadAgent /
-paperQaAgent，也不依赖 src.graph 下任何节点模块。所有从旧节点移植过来的逻辑
-都改成对参数 / 工作区的依赖，避免和 State 耦合。
+每个节点都要用的运行期对象（工作区、仓储、进度上报、模型、取消控制）
+没法写进检查点，所以用 ReviewDeps 传进去。图状态里只放能存下来的
+普通数据：文本、数字、字典和列表。
+
+节点名字和状态字段不要改。进行中的综述是靠这些名字接着写的。
 """
 
 from __future__ import annotations
@@ -44,10 +41,20 @@ from src.llm.config import SystemConfig
 from src.models.sessions import utc_now
 from src.utils import get_logger
 
-from .analyseAgent import build_analyse_agent
 from .contracts import JsonObject
-from .writingAgent import build_writing_agent
-from .writingOutlineAgent import OVERALL_ANALYSIS_FIELDS, build_writing_outline_agent
+from .review_analyse import analyse_overall, analyse_subtopic
+from .review_document import (
+    _build_final_markdown,
+    _build_references,
+    _extract_paper_ids_from_sections,
+    _has_reference_metadata,
+    _remove_unknown_citation_markers,
+    _remove_unknown_paper_citations,
+    _replace_citation_numbers,
+    _replace_section_citations,
+)
+from .review_outline import OVERALL_ANALYSIS_FIELDS, generate_outline
+from .review_writing import write_abstract, write_section
 
 
 if TYPE_CHECKING:
@@ -535,10 +542,10 @@ async def _node_analyse_subtopic(state: ReviewState, deps: ReviewDeps) -> JsonOb
 
     group = dict(state.get("group") or {})
     usage = _UsageCollector()
-    analyse_agent = build_analyse_agent(deps.llm)
-    subtopic_result = await analyse_agent.async_analyse_subtopic(
+    subtopic_result = await analyse_subtopic(
         topic=str(state.get("topic") or ""),
         group=group,
+        llm=deps.llm,
         usage_callback=usage.collect,
     )
     if subtopic_result.parsed is None:
@@ -556,14 +563,14 @@ async def _node_analyse_overall(state: ReviewState, deps: ReviewDeps) -> JsonObj
     deps.reporter.progress("正在综合分析", stage=REVIEW_STAGE, event_key=deps.event_key)
 
     usage = _UsageCollector()
-    analyse_agent = build_analyse_agent(deps.llm)
-    # 中文说明：模型调用本身的重试（网络抖动、限流、输出被截断）已经在 AnalyseAgent
+    # 中文说明：模型调用本身的重试（网络抖动、限流、输出被截断）已经在分析函数
     # 内部处理过了，这里不再套一层重试循环——套了就是同一件事做两遍。走到这一步还
     # 是没解析出来，说明真的写不动了，直接把模型自己给的原因报上去，别再用一句
     # 笼统的"未返回合法 JSON"盖住具体原因。
-    overall_result = await analyse_agent.async_analyse_overall(
+    overall_result = await analyse_overall(
         topic=str(state.get("topic") or ""),
         subtopic_analyses=[dict(state.get("subtopic_analysis") or {})],
+        llm=deps.llm,
         usage_callback=usage.collect,
     )
     if overall_result.parsed is None:
@@ -593,10 +600,10 @@ async def _node_build_outline(state: ReviewState, deps: ReviewDeps) -> JsonObjec
 
     deps.reporter.progress("正在生成写作大纲", stage=REVIEW_STAGE, event_key=deps.event_key)
     usage = _UsageCollector()
-    outline_agent = build_writing_outline_agent(deps.llm)
-    outline, _raw, reason = await outline_agent.async_generate_outline(
+    outline, _raw, reason = await generate_outline(
         topic=topic_text,
         analysis_report=analysis_report,
+        llm=deps.llm,
         usage_callback=usage.collect,
     )
     if outline is None:
@@ -653,8 +660,7 @@ async def _node_write_section(state: ReviewState, deps: ReviewDeps) -> JsonObjec
 
         usage.collect(section_usage)
 
-    writing_agent = build_writing_agent(deps.llm)
-    section_result = await writing_agent.async_write_section(
+    writing_result = await write_section(
         section_id=str(section_task["section_id"]),
         task=str(section_task.get("task") or ""),
         evidence_map=evidence,
@@ -662,19 +668,19 @@ async def _node_write_section(state: ReviewState, deps: ReviewDeps) -> JsonObjec
         word_count=int(section_task.get("word_count") or DEFAULT_SECTION_WORD_COUNT),
         read_results=list(state.get("analysis_inputs") or []),
         cache_dir=str(state.get("cache_dir") or ""),
-        session_read_results=[],
         available_paper_ids=list(state.get("available_paper_ids") or []),
         progress_callback=on_section_progress,
+        llm=deps.llm,
     )
     # 补上章节信息，方便后面拼 Markdown 和提取引用。
-    section_result.update(
+    writing_result.update(
         chapter_key=section_task["chapter_key"],
         section_key=section_task["section_key"],
         chapter_title=str(section_task.get("chapter_title") or section_task["chapter_key"]),
         section_title=section_title,
     )
     return {
-        "written_sections": [*written_sections, section_result],
+        "written_sections": [*written_sections, writing_result],
         **_usage_update(state, usage),
     }
 
@@ -686,12 +692,12 @@ async def _node_write_abstract(state: ReviewState, deps: ReviewDeps) -> JsonObje
     deps.reporter.progress("正在生成摘要", stage=REVIEW_STAGE, event_key=deps.event_key)
 
     usage = _UsageCollector()
-    writing_agent = build_writing_agent(deps.llm)
-    abstract, abstract_status = await writing_agent.async_write_abstract(
+    abstract, abstract_status = await write_abstract(
         topic=str(state.get("topic") or ""),
         sections=list(state.get("written_sections") or []),
         word_count=ABSTRACT_WORD_COUNT,
         usage_callback=usage.collect,
+        llm=deps.llm,
     )
     return {
         "abstract": abstract,
@@ -971,12 +977,12 @@ def _normalize_subtopic_analysis(parsed: JsonObject, group: JsonObject) -> JsonO
         "search_keyword": str(group.get("search_keyword") or ""),
         "paper_count": int(group.get("paper_count") or len(paper_ids)),
         "paperIds": paper_ids,
-        "研究现状": _text_with_citation(parsed.get("研究现状") or fallback["研究现状"], paper_ids),
-        "一致点": _text_list_with_citation(parsed.get("一致点"), paper_ids),
-        "矛盾点": _text_with_citation(parsed.get("矛盾点") or fallback["矛盾点"], paper_ids),
-        "研究空白": _text_with_citation(parsed.get("研究空白") or fallback["研究空白"], paper_ids),
-        "时间线演化": _text_with_citation(parsed.get("时间线演化") or fallback["时间线演化"], paper_ids),
-        "技术方法栈演变": _text_with_citation(parsed.get("技术方法栈演变") or fallback["技术方法栈演变"], paper_ids),
+        "研究现状": _text_with_citation(parsed.get("研究现状") or fallback["研究现状"]),
+        "一致点": _text_list_with_citation(parsed.get("一致点")),
+        "矛盾点": _text_with_citation(parsed.get("矛盾点") or fallback["矛盾点"]),
+        "研究空白": _text_with_citation(parsed.get("研究空白") or fallback["研究空白"]),
+        "时间线演化": _text_with_citation(parsed.get("时间线演化") or fallback["时间线演化"]),
+        "技术方法栈演变": _text_with_citation(parsed.get("技术方法栈演变") or fallback["技术方法栈演变"]),
     }
 
 
@@ -1012,15 +1018,11 @@ def _fallback_subtopic_analysis(group: JsonObject, *, reason: str) -> JsonObject
 
 
 def _normalize_overall_analysis(parsed: JsonObject, subtopic_analyses: list[JsonObject]) -> JsonObject:
-    """整理模型返回的八部分综合结果，并保证每段文字带有论文引用。
+    """整理模型返回的八部分综合结果。空字段用兜底句子填上，不自动补引用。"""
 
-    移植自 analyse_node._normalize_overall_analysis。
-    """
-
-    paper_ids = _paper_ids_from_analyses(subtopic_analyses)
     fallback = _fallback_overall_analysis("当前研究领域", subtopic_analyses, reason="")
     normalized: JsonObject = {
-        field: _text_with_citation(parsed.get(field) or fallback[field], paper_ids)
+        field: _text_with_citation(parsed.get(field) or fallback[field])
         for field in OVERALL_ANALYSIS_FIELDS
     }
     return normalized
@@ -1084,7 +1086,6 @@ def _fallback_timeline(group: JsonObject) -> str:
 
     papers = list(group.get("papers") or [])
     years = [int(paper["year"]) for paper in papers if str(paper.get("year") or "").isdigit()]
-    paper_ids = [str(paper.get("paperId") or "").strip() for paper in papers if str(paper.get("paperId") or "").strip()]
     # 中文注释：兜底文本不再自动贴论文引用，理由同 _fallback_subtopic_analysis。
     if not years:
         return "暂无足够的年份信息来归纳时间线演化。"
@@ -1116,14 +1117,11 @@ def _paper_ids_from_analyses(analyses: list[JsonObject]) -> list[str]:
     return ids
 
 
-def _text_with_citation(value: Any, paper_ids: list[str]) -> str:
-    """整理关键文本字段，空文本填占位。
+def _text_with_citation(value: Any) -> str:
+    """整理关键文本字段。空文本填一句占位，不自动贴论文编号。
 
-    中文注释：
-    改造前这个函数会在文本缺少 [...] 引用时自动贴上 paper_ids 的编号尾巴。
-    这导致程序系统性地伪造归因——任何模型没写引用的结论都被自动贴上三篇
-    论文的编号，下游 _build_references 再据此生成正式的 GB/T 7714 参考文献。
-    现在只保留「空文本填占位」，引用由模型自己写，不自动补。
+    中文说明：引用必须由模型自己写。程序如果在缺引用时自动补上论文编号，
+    后面生成参考文献时就会把没被论述过的论文写进去。
     """
 
     text = str(value or "").strip()
@@ -1132,17 +1130,10 @@ def _text_with_citation(value: Any, paper_ids: list[str]) -> str:
     return text
 
 
-def _citation_tail(paper_ids: list[str]) -> str:
-    """把 paperId 列表变成 [paperId] 引用尾巴。移植自 analyse_node._citation_tail。"""
+def _text_list_with_citation(value: Any) -> list[str]:
+    """整理一致点数组。每一条空文本同样只填占位，不自动补引用。"""
 
-    cleaned = [paper_id for paper_id in paper_ids if paper_id]
-    return "".join(f"[{paper_id}]" for paper_id in cleaned[:6])
-
-
-def _text_list_with_citation(value: Any, paper_ids: list[str]) -> list[str]:
-    """整理一致点数组，并保证每一条都至少带一个论文引用。"""
-
-    return [_text_with_citation(item, paper_ids) for item in _string_list(value)]
+    return [_text_with_citation(item) for item in _string_list(value)]
 
 
 # ---------------------------------------------------------------------------
@@ -1198,7 +1189,7 @@ def _resolve_section_evidence(*, evidence_fields: list[Any], overall_analysis: J
         if field not in OVERALL_ANALYSIS_FIELDS or field in used_fields:
             continue
         content = str(overall_analysis.get(field) or "").strip()
-        # 空字段不能支撑正文，因此不传给写作 Agent。
+        # 空字段不能支撑正文，因此不传给写作步骤。
         if not content:
             continue
         evidence.append({"全局分析字段": field, "内容": content})
@@ -1223,312 +1214,6 @@ def _build_workspace_metadata(
         if key and key not in metadata_by_id:
             metadata_by_id[key] = paper
     return metadata_by_id
-
-
-def _has_reference_metadata(paper: JsonObject) -> bool:
-    """判断论文资料是否至少包含可展示的题名。移植自 writing_node._has_reference_metadata。"""
-
-    return bool(str(paper.get("title") or "").strip())
-
-
-def _build_references(paper_ids: list[str], metadata_by_id: dict[str, JsonObject]) -> list[JsonObject]:
-    """按正文首次引用顺序生成 GB/T 7714 参考文献条目。移植自 writing_node._build_references。"""
-
-    references: list[JsonObject] = []
-    for paper_id in paper_ids:
-        metadata = dict(metadata_by_id.get(paper_id.lower()) or {})
-        # 没有题名的资料不生成参考文献，不能用 paperId 代替论文题名。
-        if not _has_reference_metadata(metadata):
-            continue
-        references.append(
-            {
-                "index": len(references) + 1,
-                "paperId": paper_id,
-                "citation": _format_gbt7714_reference(paper_id, metadata),
-                "metadata": metadata,
-            }
-        )
-    return references
-
-
-def _format_gbt7714_reference(paper_id: str, paper: JsonObject) -> str:
-    """使用论文元数据生成常见的 GB/T 7714 顺序编码制格式。
-
-    移植自 writing_node._format_gbt7714_reference，格式保持不变。
-    """
-
-    title = str(paper.get("title") or paper_id).strip()
-    extra_metadata = paper.get("metadata") if isinstance(paper.get("metadata"), dict) else {}
-    authors = _format_reference_authors(paper.get("authors") or paper.get("author"))
-    resource_type = _reference_resource_type(paper)
-    container = str(
-        paper.get("journal_conference")
-        or paper.get("journal/conference")
-        or paper.get("journal")
-        or paper.get("venue")
-        or extra_metadata.get("journal")
-        or ""
-    ).strip()
-    year = str(paper.get("year") or paper.get("publication_date") or "").strip()[:4]
-    volume = str(paper.get("volume") or "").strip()
-    issue = str(paper.get("issue") or "").strip()
-    pages = str(
-        paper.get("pages")
-        or paper.get("page_range")
-        or extra_metadata.get("pages")
-        or (
-            f"{paper.get('page_start')}-{paper.get('page_end')}"
-            if paper.get("page_start") is not None and paper.get("page_end") is not None
-            else ""
-        )
-    ).strip()
-    doi = str(paper.get("doi") or "").strip()
-    url = str(paper.get("url") or "").strip()
-
-    citation = f"{authors + '. ' if authors else ''}{title}[{resource_type}]"
-    if container:
-        citation += f". {container}"
-    if year:
-        citation += f", {year}"
-    if volume:
-        citation += f", {volume}"
-        if issue:
-            citation += f"({issue})"
-    elif issue:
-        citation += f", ({issue})"
-    if pages:
-        citation += f": {pages}"
-    citation += "."
-    if doi:
-        citation += f" DOI: {doi}."
-    elif url:
-        citation += f" {url}."
-    return citation
-
-
-def _format_reference_authors(value: Any) -> str:
-    """整理作者字段，超过三位时按 GB/T 7714 习惯使用 et al.。移植自 writing_node._format_reference_authors。"""
-
-    if isinstance(value, str):
-        authors = [item.strip() for item in re.split(r"[,;，；]", value) if item.strip()]
-    elif isinstance(value, list):
-        authors = []
-        for item in value:
-            if isinstance(item, dict):
-                name = str(item.get("name") or item.get("author") or "").strip()
-            else:
-                name = str(item or "").strip()
-            if name:
-                authors.append(name)
-    else:
-        authors = []
-    if len(authors) > 3:
-        suffix = "等" if any("一" <= character <= "鿿" for character in authors[0]) else "et al"
-        return ", ".join(authors[:3]) + ("，" if suffix == "等" else ", ") + suffix
-    return ", ".join(authors)
-
-
-def _reference_resource_type(paper: JsonObject) -> str:
-    """根据元数据推断参考文献类型，缺少信息时按期刊论文处理。移植自 writing_node._reference_resource_type。"""
-
-    type_text = " ".join(
-        str(paper.get(key) or "")
-        for key in ("type", "document_type", "publication_type", "source")
-    ).lower()
-    if "conference" in type_text or "proceedings" in type_text:
-        return "C"
-    if "thesis" in type_text or "dissertation" in type_text:
-        return "D"
-    if "book" in type_text:
-        return "M"
-    if "arxiv" in type_text or "preprint" in type_text:
-        return "EB/OL"
-    return "J"
-
-
-def _extract_paper_ids_from_sections(sections: list[JsonObject]) -> list[str]:
-    """从小节正文的方括号引用中提取 paperId，并按首次出现顺序去重。
-
-    移植自 writing_node._extract_paper_ids_from_sections。
-    """
-
-    declared_ids = _collect_cited_paper_ids(sections)
-    declared_by_key = {paper_id.lower(): paper_id for paper_id in declared_ids}
-    found: list[str] = []
-    seen: set[str] = set()
-    citation_pattern = re.compile(r"\[([^\[\]\r\n]+)\]")
-    for section in sections:
-        content = str(section.get("content") or "")
-        for match in citation_pattern.finditer(content):
-            candidate = match.group(1).strip().strip('"').strip("'")
-            if not candidate or any(character.isspace() for character in candidate):
-                continue
-            # 即使模型漏掉了前面的归一化，也不能把切片编号直接生成参考文献。
-            if _is_chunk_id(candidate):
-                continue
-            paper_id = declared_by_key.get(candidate.lower(), candidate)
-            if candidate.lower() not in declared_by_key and not re.search(r"\d|[:/.]", candidate):
-                continue
-            key = paper_id.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            found.append(paper_id)
-        # 如果模型把引用列在结构化字段里但正文没有重复写出，仍保留该引用。
-        for paper_id in list(section.get("cited_paper_ids") or []):
-            text = str(paper_id or "").strip()
-            if _is_chunk_id(text):
-                continue
-            key = text.lower()
-            if text and key not in seen:
-                seen.add(key)
-                found.append(text)
-    return found
-
-
-def _is_chunk_id(value: str) -> bool:
-    """判断一个候选编号是否符合全文切片的页码或分段编号格式。移植自 writing_node._is_chunk_id。"""
-
-    return bool(re.search(r":(?:p|c)\d{4}(?::s\d{4})?$", str(value or "").strip(), flags=re.IGNORECASE))
-
-
-def _collect_cited_paper_ids(sections: list[JsonObject]) -> list[str]:
-    """汇总所有小节实际引用到的 paperId。移植自 writing_node._collect_cited_paper_ids。"""
-
-    seen: set[str] = set()
-    result: list[str] = []
-    for section in sections:
-        for paper_id in list(section.get("cited_paper_ids") or []):
-            text = str(paper_id or "").strip()
-            if _is_chunk_id(text):
-                continue
-            key = text.lower()
-            if not text or key in seen:
-                continue
-            seen.add(key)
-            result.append(text)
-    return result
-
-
-def _remove_unknown_paper_citations(
-    sections: list[JsonObject],
-    unknown_paper_ids: list[str],
-) -> list[JsonObject]:
-    """删除小节中没有真实论文资料支撑的引用标记。移植自 writing_node._remove_unknown_paper_citations。"""
-
-    if not unknown_paper_ids:
-        return [dict(section) for section in sections]
-    unknown_keys = {paper_id.lower() for paper_id in unknown_paper_ids}
-    cleaned_sections: list[JsonObject] = []
-    for section in sections:
-        cleaned = dict(section)
-        cleaned["content"] = _remove_unknown_citation_markers(
-            str(cleaned.get("content") or ""),
-            unknown_paper_ids,
-        )
-        # 正文和 cited_paper_ids 必须同步清理。
-        cleaned["cited_paper_ids"] = [
-            paper_id
-            for paper_id in list(cleaned.get("cited_paper_ids") or [])
-            if str(paper_id or "").strip().lower() not in unknown_keys
-        ]
-        cleaned_sections.append(cleaned)
-    return cleaned_sections
-
-
-def _remove_unknown_citation_markers(content: str, unknown_paper_ids: list[str]) -> str:
-    """从一段文字中删除形如 [P1] 的未知引用标记。移植自 writing_node._remove_unknown_citation_markers。"""
-
-    if not content or not unknown_paper_ids:
-        return content
-    unknown_keys = {paper_id.lower() for paper_id in unknown_paper_ids}
-    citation_pattern = re.compile(r"\[([^\[\]\r\n]+)\]")
-
-    def replace(match: re.Match[str]) -> str:
-        paper_id = match.group(1).strip().strip('"').strip("'")
-        return "" if paper_id.lower() in unknown_keys else match.group(0)
-
-    return citation_pattern.sub(replace, content)
-
-
-def _replace_section_citations(
-    sections: list[JsonObject],
-    citation_index_by_paper_id: dict[str, str],
-) -> list[JsonObject]:
-    """把正文小节中的 [paperId] 替换为参考文献序号。移植自 writing_node._replace_section_citations。"""
-
-    if not citation_index_by_paper_id:
-        return [dict(section) for section in sections]
-    replaced: list[JsonObject] = []
-    for section in sections:
-        item = dict(section)
-        item["content"] = _replace_citation_numbers(
-            str(item.get("content") or ""), citation_index_by_paper_id
-        )
-        replaced.append(item)
-    return replaced
-
-
-def _replace_citation_numbers(content: str, citation_index_by_paper_id: dict[str, str]) -> str:
-    """替换一段文本中的论文编号，普通 Markdown 方括号保持不变。移植自 writing_node._replace_citation_numbers。"""
-
-    citation_pattern = re.compile(r"\[([^\[\]\r\n]+)\]")
-
-    def replace(match: re.Match[str]) -> str:
-        candidate = match.group(1).strip().strip('"').strip("'").strip()
-        index = citation_index_by_paper_id.get(candidate.lower())
-        return f"[{index}]" if index else match.group(0)
-
-    return citation_pattern.sub(replace, content)
-
-
-# ---------------------------------------------------------------------------
-# 终稿 Markdown（移植自 reply_node._build_final_markdown）
-# ---------------------------------------------------------------------------
-
-
-def _build_final_markdown(
-    *,
-    topic: str,
-    sections: list[JsonObject],
-    abstract: str,
-    references: list[JsonObject],
-) -> str:
-    """把写作节点的全部已完成内容拼成一份可以直接保存的 Markdown 综述。
-
-    结构移植自 reply_node._build_final_markdown：# 标题 / ## 摘要 / ## 章标题 /
-    ### 节标题 / ## 参考文献。
-    """
-
-    blocks: list[str] = []
-    title = topic.strip() or "文献综述"
-    if title:
-        blocks.append(f"# {title}")
-    if abstract.strip():
-        blocks.append(f"## 摘要\n\n{abstract.strip()}")
-
-    current_chapter = ""
-    for section in sections:
-        if not isinstance(section, dict):
-            continue
-        chapter_key = str(section.get("chapter_key") or "").strip()
-        chapter_title = str(section.get("chapter_title") or chapter_key).strip()
-        if chapter_key and chapter_key != current_chapter:
-            blocks.append(f"## {chapter_title or chapter_key}")
-            current_chapter = chapter_key
-        section_title = str(section.get("section_title") or section.get("section_id") or "小节").strip()
-        content = str(section.get("content") or "").strip()
-        if content:
-            blocks.append(f"### {section_title}\n\n{content}")
-
-    reference_lines = [
-        f"[{item.get('index')}] {item.get('citation')}"
-        for item in references
-        if isinstance(item, dict) and str(item.get("citation") or "").strip()
-    ]
-    if reference_lines:
-        blocks.append("## 参考文献\n\n" + "\n".join(reference_lines))
-    return "\n\n".join(blocks).strip() + ("\n" if blocks else "")
 
 
 # ---------------------------------------------------------------------------

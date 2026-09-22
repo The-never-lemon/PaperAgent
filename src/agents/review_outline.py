@@ -1,13 +1,18 @@
+"""综述的大纲步骤：把分析报告收成章节和小节任务。
+
+这里不是独立子 Agent。模型由综述流水线传入，本模块只负责提示词、
+解析和把大纲整理成固定字段。
+"""
+
 from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
 from typing import Any
 
-from src.llm import ModelConfig, ProviderSnapshot, SystemConfig, make_provider
+from src.llm import ProviderSnapshot
+from src.llm.base import normalize_token_usage
 
-from .base import AgentContext, AgentSpec, BaseAgent
 from .contracts import JsonObject
 from .Prompts import WRITING_OUTLINE_AGENT_SYSTEM_PROMPT
 
@@ -26,106 +31,52 @@ OVERALL_ANALYSIS_FIELDS = (
 )
 
 
-class WritingOutlineAgent(BaseAgent):
-    """根据分析结果生成论文写作大纲的 Agent。
+def _report_usage(response: object, usage_callback: Any | None) -> None:
+    """把这次模型调用的真实用量交给流水线，不按文字长度估算。"""
 
-    中文说明：
-    这个 Agent 现在只做一件事：把分析节点产出的 overall_framework 变成章节大纲。
-    小节正文怎么写暂时还没有定，所以这里不会提前设计正文写作逻辑。
+    if not callable(usage_callback):
+        return
+    usage_callback(normalize_token_usage(getattr(response, "usage", None)))
+
+
+async def generate_outline(
+    *,
+    topic: str,
+    analysis_report: JsonObject,
+    llm: ProviderSnapshot | None,
+    usage_callback: Any | None = None,
+) -> tuple[JsonObject | None, str, str]:
+    """调用大模型生成大纲。
+
+    中文说明：只接收综述主题和分析报告，不读整份流程图状态。
+
+    返回值说明：
+    1. 第一个值是解析后的大纲；如果为 None，说明模型不可用或输出格式不对；
+    2. 第二个值是模型原始输出，方便排查问题；
+    3. 第三个值是简单状态说明，方便调用方写入诊断信息。
     """
 
-    spec = AgentSpec(
-        name="writing_outline_agent",
-        role="plan",
-        description="根据论文分析结果生成章节和小节级别的写作大纲。",
-        # 中文说明：大纲和分析关系很近，先复用 default_agent 的模型配置，减少用户需要维护的配置项。
-        llm_profile="default_agent",
-        # 中文说明（阶段4去耦合）：大纲生成已改为显式入参（topic / analysis_report），
-        # 不再从共享 State 里读字段，这里不再声明依赖的状态键。
-        input_keys=(),
-    )
-
-    def __init__(self, context: AgentContext):
-        """初始化 WritingOutlineAgent，并记录当前 Agent 的固定配置。"""
-
-        context.spec = self.spec
-        super().__init__(context)
-
-    def _run(self, state: JsonObject) -> JsonObject:
-        """BaseAgent 要求同步入口，但当前写作大纲节点只使用异步入口。"""
-
-        raise NotImplementedError("WritingOutlineAgent 请使用 async_generate_outline")
-
-    async def async_generate_outline(
-        self,
-        *,
-        topic: str,
-        analysis_report: JsonObject,
-        usage_callback: Any | None = None,
-    ) -> tuple[JsonObject | None, str, str]:
-        """调用大模型生成大纲。
-
-        去耦合说明（实施方案阶段4）：不再接收整份共享 State，只接收大纲生成
-        需要的两个显式输入——综述主题和分析报告，方便综述子 Agent 直接调用。
-
-        返回值说明：
-        1. 第一个值是解析后的大纲；如果为 None，说明模型不可用或输出格式不对；
-        2. 第二个值是模型原始输出，方便排查问题；
-        3. 第三个值是简单状态说明，方便调用方写入诊断信息。
-        """
-
-        if self.context.llm is None:
-            return None, "", "未配置可用的写作大纲模型"
-        try:
-            response = await self.context.llm.provider.chat(
-                _outline_messages(topic=topic, analysis_report=analysis_report),
-                temperature=0.2,
-                reasoning_effort="medium",
-            )
-        except Exception as exc:
-            return None, "", f"写作大纲模型调用失败：{exc}"
-        self.report_usage(response, usage_callback)
-
-        raw_model_output = str(getattr(response, "content", "") or "")
-        if not getattr(response, "ok", False):
-            reason = raw_model_output or str(getattr(response, "error_kind", "") or "写作大纲模型调用失败")
-            return None, raw_model_output, reason
-
-        parsed = _extract_json_object(raw_model_output)
-        if parsed is None:
-            return None, raw_model_output, "模型没有返回可解析的 JSON 大纲"
-        return _normalize_outline(parsed), raw_model_output, "ok"
-
-
-def load_writing_outline_agent_llm(
-    agent_name: str | None = None,
-    model_config_path: str | Path = "config/model.json",
-    system_config_path: str | Path = "config/system.yaml",
-    *,
-    client: Any | None = None,
-) -> ProviderSnapshot | None:
-    """从本地模型配置里装配写作大纲 Agent 使用的模型。"""
-
-    model_path = Path(model_config_path)
-    if not model_path.exists():
-        return None
+    if llm is None:
+        return None, "", "未配置可用的写作大纲模型"
     try:
-        data = json.loads(model_path.read_text(encoding="utf-8"))
-        system = SystemConfig.load(system_config_path)
-        config = ModelConfig.from_dict(data, system)
-        resolved_agent_name = agent_name or WritingOutlineAgent.spec.llm_profile
-        return make_provider(config, resolved_agent_name, client=client)
-    except Exception:
-        # 中文说明：配置读取失败时返回 None，让图节点生成一个保守的大纲，而不是让流程直接崩掉。
-        return None
+        response = await llm.provider.chat(
+            _outline_messages(topic=topic, analysis_report=analysis_report),
+            temperature=0.2,
+            reasoning_effort="medium",
+        )
+    except Exception as exc:
+        return None, "", f"写作大纲模型调用失败：{exc}"
+    _report_usage(response, usage_callback)
 
+    raw_model_output = str(getattr(response, "content", "") or "")
+    if not getattr(response, "ok", False):
+        reason = raw_model_output or str(getattr(response, "error_kind", "") or "写作大纲模型调用失败")
+        return None, raw_model_output, reason
 
-def build_writing_outline_agent(llm: ProviderSnapshot | None | str = "auto", usage_callback: Any | None = None) -> WritingOutlineAgent:
-    """构建一个可直接使用的 WritingOutlineAgent。"""
-
-    resolved_llm = load_writing_outline_agent_llm() if llm == "auto" else llm
-    context = AgentContext(spec=WritingOutlineAgent.spec, llm=resolved_llm, usage_callback=usage_callback)
-    return WritingOutlineAgent(context)
+    parsed = _extract_json_object(raw_model_output)
+    if parsed is None:
+        return None, raw_model_output, "模型没有返回可解析的 JSON 大纲"
+    return _normalize_outline(parsed), raw_model_output, "ok"
 
 
 def _outline_messages(*, topic: str, analysis_report: JsonObject) -> list[JsonObject]:
