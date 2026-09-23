@@ -27,6 +27,9 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
+# 和启动器共用：构建前清掉旧产物，成功后再写下源码指纹。
+from frontend_build import clear_dist, completeness_problems, frontend_problems, write_stamp
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # 要放进包里的单个文件。
@@ -41,6 +44,7 @@ INCLUDE_FILES = [
     "config/system.yaml",
     "config/model.example.json",
     "scripts/launch.py",
+    "scripts/frontend_build.py",
     "tools/nougat_trial/pyproject.toml",
     "tools/nougat_trial/render_pdf.py",
 ]
@@ -91,23 +95,29 @@ def run_command(args: list[str], cwd: Path) -> None:
 
 
 def build_frontend() -> None:
-    """构建前端产物。
+    """按当前源码重新构建前端，并确认产物和源码一致。
 
-    这里必须检查退出码。构建脚本是 `vue-tsc --noEmit && vite build`，
-    类型检查不过就会失败；如果放任不管，打出来的包里会是上一次的旧产物，
-    而同事那边根本不知道为什么界面不对劲。
+    构建脚本是 `vue-tsc --noEmit && vite build`。类型检查不过就会失败；
+    如果这时还留着上一次的 front/dist，打出来的包里会是旧页面，
+    同事那边根本不知道为什么界面不对劲。所以构建前先删掉旧产物，
+    成功后再写下源码指纹。
     """
 
     print()
     print("[1/6] 构建前端产物")
+    log("先删掉旧的 front/dist，避免构建失败时包里还是上一版页面")
+    clear_dist(ROOT)
     run_command(["npm", "run", "front:install"], ROOT)
     run_command(["npm", "run", "front:build"], ROOT)
 
-    index_file = ROOT / "front" / "dist" / "index.html"
-    assets_dir = ROOT / "front" / "dist" / "assets"
-    if not index_file.is_file() or not assets_dir.is_dir():
-        raise RuntimeError("前端构建完成，但没有产出完整的 front/dist（缺 index.html 或 assets 目录）")
-    log("前端产物已就绪")
+    problems = completeness_problems(ROOT)
+    if problems:
+        raise RuntimeError("前端构建完成，但产物不完整：" + "；".join(problems))
+    write_stamp(ROOT)
+    problems = frontend_problems(ROOT)
+    if problems:
+        raise RuntimeError("前端构建完成，但和当前源码对不上：" + "；".join(problems))
+    log("前端产物已就绪，且与当前源码一致")
 
 
 def copy_tree(source: Path, target: Path) -> int:

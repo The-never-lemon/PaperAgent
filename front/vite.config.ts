@@ -3,6 +3,11 @@ import vue from "@vitejs/plugin-vue";
 
 export default defineConfig({
   plugins: [vue()],
+  build: {
+    // 每次构建先清空输出目录。不然上一版带哈希的脚本还会留在里面，
+    // 浏览器如果还记着旧首页，就会继续加载旧页面。
+    emptyOutDir: true,
+  },
   server: {
     // 默认只监听本机地址，避免 Windows 上 localhost 先走 ::1，
     // 刚好又有别的进程占着同一个端口时，浏览器打开出来是 404。

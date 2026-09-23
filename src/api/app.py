@@ -200,11 +200,20 @@ def _mount_frontend(app: FastAPI) -> None:
         logger.warning("未发现前端构建产物，SPA 静态页面不会被挂载", extra={"dist_dir": str(dist_dir)})
         return
 
+    def index_response() -> FileResponse:
+        """返回首页，并告诉浏览器不要一直用缓存里的旧首页。
+
+        首页里写着这一次构建出来的脚本文件名。浏览器如果还记着上一份首页，
+        就会继续去加载旧脚本，看到的还是旧界面。
+        """
+
+        return FileResponse(index_file, headers={"Cache-Control": "no-cache"})
+
     @app.get("/", include_in_schema=False)
     async def front_index() -> FileResponse:
         """返回前端首页。"""
 
-        return FileResponse(index_file)
+        return index_response()
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def front_routes(full_path: str) -> FileResponse:
@@ -214,7 +223,7 @@ def _mount_frontend(app: FastAPI) -> None:
         if full_path and candidate.is_file():
             return FileResponse(candidate)
         # 中文注释：未知前端路径统一回退到 index.html，由前端路由系统接管。
-        return FileResponse(index_file)
+        return index_response()
 
 
 def _prepare_windows_asyncio() -> None:

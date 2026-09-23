@@ -7,11 +7,13 @@
 这个脚本要解决的是「同事解压之后双击就能用」，所以它负责把之前那串手工步骤
 （建环境、建前端、配模型、起服务、开浏览器）全部串起来。
 
-有两条容易踩坑的地方，代码里都做了处理，看注释即可：
+有三处容易踩坑的地方，代码里都做了处理，看注释即可：
 1. 项目里所有运行时路径（front/dist、config/、data/、logs/）都是相对当前工作目录
    找的，不是相对项目根。所以启动前必须先把工作目录切到项目根。
 2. 前端产物不完整时（有 index.html 但缺 assets 目录），后端会静默跳过静态资源挂载，
    表现为白屏而服务端一条错都不报。所以启动前必须把产物校验完整。
+3. 产物目录完整但过期时（拷贝或旧压缩包里带着上一版 front/dist），不能当成最新页面。
+   有源码时要和构建记录核对，对不上就先删掉再构建；构建失败就拒绝启动。
 """
 
 from __future__ import annotations
@@ -33,6 +35,9 @@ import webbrowser
 import zipfile
 from pathlib import Path
 
+# 前端产物是否齐、是否按当前源码打出来，启动和打包共用同一套判断。
+from frontend_build import clear_dist, frontend_problems, write_stamp
+
 # 本文件在 scripts/ 目录下，往上一级就是项目根。
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -48,9 +53,6 @@ BOOTSTRAP_MARKER = "paper_agent_workspace"
 # 判断密钥的两个特征，用于打包和播种前的自检。
 API_KEY_PATTERN = re.compile(r"sk-[A-Za-z0-9_\-]{16,}")
 API_KEY_FIELD_PATTERN = re.compile(r'"api_key"\s*:\s*"[^"]+"')
-
-# 前端 index.html 里对静态资源的引用，例如 src="/assets/index-xxxx.js"。
-ASSET_REF_PATTERN = re.compile(r"""["'](/assets/[^"']+)["']""")
 
 # 绿色版 Node 的下载来源与落地位置。
 # 中文注释：构建前端需要 npm。这里不要求使用者先去装一遍 Node，而是按需下载一份
@@ -77,40 +79,15 @@ def _enter_project_root() -> None:
 
 
 def check_frontend() -> list[str]:
-    """检查前端构建产物是否完整，返回问题清单（空列表表示没问题）。
+    """检查前端构建产物能不能用，返回问题清单（空列表表示没问题）。
 
-    这里特意检查得比较细。后端的逻辑是「assets 目录存在才挂载 /assets」，
-    如果产物里只有 index.html 而没有 assets，浏览器请求 JS 时会落进后端的
-    单页应用兜底、拿到一份 HTML，结果就是白屏，而且服务端日志干干净净——
-    这种问题排查起来极其费劲，所以在启动前就必须拦住。
+    有两层。第一层看文件齐不齐：后端是「assets 目录存在才挂载 /assets」，
+    如果只有首页没有静态资源，浏览器要 JS 时会拿到一份 HTML，结果就是白屏，
+    服务端日志还干干净净。第二层在有源码时核对构建记录：记录缺失或和源码对不上，
+    说明这是一份旧页面，不能直接打开。发给同事的压缩包没有源码，只做第一层。
     """
 
-    problems: list[str] = []
-    dist = ROOT / "front" / "dist"
-    index_file = dist / "index.html"
-    assets_dir = dist / "assets"
-
-    if not index_file.is_file():
-        problems.append(f"找不到前端首页：{index_file}")
-        return problems
-    if not assets_dir.is_dir():
-        problems.append(f"找不到前端静态资源目录：{assets_dir}")
-        return problems
-
-    # 中文注释：显式用 utf-8 读。Windows 上按系统默认编码读会解出乱码甚至直接报错。
-    html = index_file.read_text(encoding="utf-8")
-
-    if "/src/main.ts" in html:
-        problems.append(
-            "front/dist/index.html 引用的是 /src/main.ts，说明放进去的是未构建的源文件，"
-            "而不是真正的构建产物"
-        )
-
-    for ref in sorted({match for match in ASSET_REF_PATTERN.findall(html)}):
-        if not (dist / ref.lstrip("/")).is_file():
-            problems.append(f"index.html 引用了并不存在的资源：{ref}")
-
-    return problems
+    return frontend_problems(ROOT)
 
 
 def example_seed_problems() -> list[str]:
@@ -484,7 +461,7 @@ def run_check() -> int:
     seed_problems = example_seed_problems()
     has_model_config = (ROOT / "config" / "model.json").exists()
 
-    print(f"  前端构建产物：{'完整' if not frontend_problems else '有问题'}")
+    print(f"  前端构建产物：{'可用' if not frontend_problems else '有问题'}")
     print(f"  示例配置模板：{'可安全使用' if not seed_problems else '有问题'}")
     print(f"  已有模型配置：{'是（首次运行不会覆盖）' if has_model_config else '否（首次运行会播种）'}")
     print("-" * 62)
@@ -668,7 +645,14 @@ def build_frontend_in_place() -> bool:
             "PATH": str(Path(vendor_npm).parent) + os.pathsep + os.environ.get("PATH", ""),
         }
     print()
-    print("  没有找到前端构建产物，正在就地构建（第一次会比较慢，请耐心等）")
+    print("  前端页面要按当前源码重新构建（第一次或源码有变动时会比较慢）")
+    print("  先删掉旧的构建结果，避免构建失败后还打开上一版页面")
+    try:
+        clear_dist(ROOT)
+    except OSError as exc:
+        print(f"    [!] 删不掉旧的前端产物：{exc}")
+        print("    [!] 请先关掉正在运行的服务，再重新启动")
+        return False
     for script in ("front:install", "front:build"):
         print(f"    > npm run {script}")
         # 中文注释：Windows 上的 npm 其实是个 .cmd 批处理文件，不能当普通可执行文件
@@ -679,7 +663,9 @@ def build_frontend_in_place() -> bool:
         )
         if result.returncode != 0:
             print(f"    [!] 这条命令失败了（退出码 {result.returncode}），上面的输出里有原因")
+            print("    [!] 旧页面已经删掉，本次不会再用上一版界面启动")
             return False
+    write_stamp(ROOT)
     print("    前端构建完成")
     return True
 
@@ -736,9 +722,9 @@ def main() -> int:
 
     port = resolve_port(args.port)
 
-    # 第一步：确认前端产物完整。缺产物就先试着就地构建一次——从 git 仓库克隆出来的
-    # 目录天生没有 front/dist（构建产物不入库），不补这一步的话 clone 之后根本起不来。
-    # 本机没有 npm、或者构建仍然失败，才拒绝启动并给出提示。
+    # 第一步：确认前端产物和当前源码一致。缺产物、产物坏了、或产物是按旧源码打的，
+    # 都先删掉再构建。git 克隆出来的目录没有 front/dist；拷走的目录常常带着一份旧的。
+    # 构建失败就拒绝启动，不能继续打开旧页面。压缩包里没有前端源码，只检查产物齐不齐。
     problems = check_frontend()
     if problems and not has_npm():
         # 中文注释：构建前端要 npm。没有就先问一句要不要自动装一份绿色版 Node。
@@ -751,7 +737,7 @@ def main() -> int:
             problems = check_frontend()
     if problems:
         print()
-        print("  无法启动：前端构建产物不完整。")
+        print("  无法启动：前端页面还不能用。")
         for problem in problems:
             print(f"    - {problem}")
         for hint in frontend_build_hint(problems):
