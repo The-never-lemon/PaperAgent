@@ -10,6 +10,7 @@ from typing import Any
 
 from src.paper_retrieval.models import PaperDocument
 from src.utils import get_logger
+from src.utils.read_utils.pdf_parsers import PageBlock
 
 
 logger = get_logger(__name__)
@@ -20,7 +21,10 @@ JsonObject = dict[str, Any]
 
 # 中文注释：分块规则的版本号。只要这个数字变了，说明"切分方式"改了，之前存下来的
 # chunk.json 就不再可信，必须重新切一次。判断缓存能不能复用时全靠它。
-CHUNKER_VERSION = 7
+# 7 -> 8：不再把 Markdown 按字数切开，改成按标题、段落、公式、表格、图整块装箱。
+# 8 -> 9：只升转换器版本不够。旧的 chunk.json 版本仍是 8，会继续被拿来用。
+# 行内上下标和 TABLE I 改的是抽出来的文字，片段必须跟着重切。
+CHUNKER_VERSION = 9
 
 # 中文注释：下面这几条正则干的是"认路"的活。分块时要靠它们认出哪些行是表格、
 # 哪些是公式、哪些是图片引用，只有这样才知道刀该落在哪儿。
@@ -115,72 +119,116 @@ class PageChunker(BaseChunker):
     max_atomic_characters = 4000
 
     def chunk(self, paper: PaperDocument, markdown: str) -> list[TextChunk]:
-        """按 `<!-- page: N -->` 标记切分正文。
+        """没有现成的块时，先把 Markdown 认成块，再装箱。"""
 
-        中文注释：read_fulltext.py 转 PDF 时会把页码标记写进 Markdown。这里优先
-        使用这些标记；如果遇到 HTML 或没有页码的文本，就退回成一个普通片段。
-        """
+        body = preprocess_markdown_body(markdown)
+        return self.pack(paper, _blocks_for_reading(blocks_from_markdown(body)))
+
+    def pack(self, paper: PaperDocument, blocks: list[PageBlock]) -> list[TextChunk]:
+        """按阅读顺序把整块装进片段。装不下就换下一段，不把一块从中间劈开。"""
 
         paper_id = str(paper.paperId or paper.id)
-        parts = _split_by_page_marker(markdown)
-        if not parts:
-            parts = [{"page": None, "content": _remove_front_matter(markdown)}]
         chunks: list[TextChunk] = []
-        # 中文注释：跨页的长表格，转换器不一定会把表头在续页再写一遍。这里记住上一页
-        # 最后那张表的表头两行（标题行 + |---| 分隔行），下一页接着写的时候补回去，
-        # 免得第二页的片段一开头就是一堆没有表头的数据行，下游不知道哪列是哪列。
+        buffer: list[PageBlock] = []
+        buffer_length = 0
+        has_body = False
         last_table_header: list[str] = []
-        for index, part in enumerate(parts):
-            content = str(part.get("content") or "").strip()
-            if not content:
-                continue
-            if last_table_header and _starts_with_headerless_table(content):
-                # 中文注释：补表头这件事必须放在"这一页超没超过 1200 字"的判断之前，
-                # 因为超长和不超长走的是两条不同的切分路径，两条都得能拿到表头。
-                # 注意是用一个换行接上，不能空行——空行会把表格拦腰断开。
-                content = "\n".join(last_table_header) + "\n" + content
-            last_table_header = _trailing_table_header(content)
-            page = part.get("page")
-            page_number = int(page) if isinstance(page, int) else None
-            if len(content) > self.max_chunk_characters:
-                segments = _split_long_content(content, self.max_chunk_characters, self.max_atomic_characters)
-                for segment_index, page_chunk in enumerate(segments, start=1):
-                    if _is_junk_content(page_chunk):
-                        _log_dropped_junk(paper_id, page_number, page_chunk)
-                        continue
-                    page_prefix = f"{paper_id}:p{page_number:04d}" if page_number is not None else f"{paper_id}:c{index:04d}"
-                    # 中文注释：这一行的章节名以前写的是乱码"姝ｆ枃"——它是"正文"两个字
-                    # 在编码弄错之后变成的样子，会原样写进 chunk.json 给后面的模型和用户看。
-                    # 现已改成正确的"正文"，和下面"整页不切分"分支的写法保持一致。
-                    chunks.append(
-                        TextChunk(
-                            chunk_id=f"{page_prefix}:s{segment_index:04d}",
-                            paperId=paper_id,
-                            chunk_index=len(chunks),
-                            content=page_chunk,
-                            page_start=page_number,
-                            page_end=page_number,
-                            section=f"page_{page_number}" if page_number is not None else "正文",
-                            metadata=_chunk_metadata(self.name, page_chunk),
-                        )
-                    )
-                continue
-            if _is_junk_content(content):
-                _log_dropped_junk(paper_id, page_number, content)
-                continue
-            chunk_id = f"{paper_id}:p{page_number:04d}" if page_number is not None else f"{paper_id}:c{index:04d}"
+        segment_on_page: dict[int, int] = {}
+
+        def flush() -> None:
+            """把已经装好的几块收成一个片段。"""
+
+            nonlocal buffer, buffer_length, has_body
+            if not buffer:
+                return
+            content = "\n\n".join(block.text.strip() for block in buffer if block.text.strip()).strip()
+            pages = [block.page_number for block in buffer if block.page_number]
+            page_start = pages[0] if pages else None
+            page_end = pages[-1] if pages else None
+            heading = next((block.text.strip() for block in buffer if block.kind == "heading"), "")
+            buffer = []
+            buffer_length = 0
+            has_body = False
+            if not content or _is_junk_content(content):
+                if content:
+                    _log_dropped_junk(paper_id, page_start, content)
+                return
+            page_key = page_start or 0
+            segment_on_page[page_key] = segment_on_page.get(page_key, 0) + 1
+            segment = segment_on_page[page_key]
+            if page_start:
+                chunk_id = f"{paper_id}:p{page_start:04d}:s{segment:04d}"
+                section = heading.splitlines()[0][:80] if heading else f"page_{page_start}"
+            else:
+                chunk_id = f"{paper_id}:c{len(chunks):04d}"
+                section = heading.splitlines()[0][:80] if heading else "正文"
             chunks.append(
                 TextChunk(
                     chunk_id=chunk_id,
                     paperId=paper_id,
                     chunk_index=len(chunks),
                     content=content,
-                    page_start=page_number,
-                    page_end=page_number,
-                    section=f"page_{page_number}" if page_number is not None else "正文",
+                    page_start=page_start,
+                    page_end=page_end,
+                    section=section,
                     metadata=_chunk_metadata(self.name, content),
                 )
             )
+
+        def append_block(kind: str, text: str, page_number: int, *, counts_as_body: bool) -> None:
+            """往当前片段里放一块。放不下就先把已有的收起来。"""
+
+            nonlocal buffer_length, has_body, last_table_header
+            piece = text.strip()
+            if not piece:
+                return
+            if buffer and buffer_length + len(piece) + 2 > self.max_chunk_characters:
+                flush()
+            buffer.append(PageBlock(kind=kind, page_number=page_number, text=piece))
+            buffer_length += len(piece) + 2
+            if counts_as_body:
+                has_body = True
+            if kind == "table":
+                last_table_header = _trailing_table_header(piece)
+
+        for block in blocks:
+            text = block.text.strip()
+            if not text:
+                continue
+            # 中文注释：新的一级标题到来时，前面已经有正文，就从这里另起一段。
+            if block.kind == "heading" and has_body:
+                flush()
+            if block.kind == "table" and last_table_header and _starts_with_headerless_table(text):
+                text = "\n".join(last_table_header) + "\n" + text
+            if block.kind == "table" and len(text) > self.max_atomic_characters:
+                flush()
+                pieces = _split_long_table(text.splitlines(), self.max_chunk_characters, self.max_atomic_characters)
+                for piece in pieces:
+                    append_block("table", piece, block.page_number, counts_as_body=True)
+                    flush()
+                continue
+            if block.kind == "display_formula" and len(text) > self.max_atomic_characters:
+                flush()
+                pieces = _split_long_math(text.splitlines(), self.max_chunk_characters, self.max_atomic_characters)
+                for piece in pieces:
+                    append_block("display_formula", piece, block.page_number, counts_as_body=True)
+                    flush()
+                continue
+            # 中文注释：没超过整块上限的段落、公式、图都整块装着，哪怕已经超过 1200 字。
+            # 只有单块大过整块上限时才切开，否则切完的片段下次读缓存会被当成坏结果丢掉。
+            if len(text) > self.max_atomic_characters:
+                flush()
+                for piece in _split_long_paragraph(text.splitlines(), self.max_atomic_characters):
+                    append_block(block.kind, piece, block.page_number, counts_as_body=block.kind != "heading")
+                    flush()
+                continue
+            append_block(
+                block.kind,
+                text,
+                block.page_number,
+                counts_as_body=block.kind != "heading",
+            )
+        flush()
         _attach_neighbors(chunks)
         return chunks
 
@@ -252,12 +300,103 @@ def _trailing_table_header(content: str) -> list[str]:
     return header if len(header) == 2 else []
 
 
+def blocks_from_markdown(markdown: str) -> list[PageBlock]:
+    """没有解析块时，按空行把 Markdown 认回一块一块。
+
+    中文注释：公式块、表格、图片引用各自是一整块。普通段落也是一整块。
+    这样装箱时不会再从 $$ 中间下刀。
+    """
+
+    blocks: list[PageBlock] = []
+    page_number = 0
+    for part in re.split(r"(<!--\s*page:\s*\d+\s*-->)", markdown):
+        marker = re.fullmatch(r"<!--\s*page:\s*(\d+)\s*-->", part.strip())
+        if marker:
+            page_number = int(marker.group(1))
+            continue
+        for piece in part.split("\n\n"):
+            text = piece.strip()
+            if not text:
+                continue
+            blocks.append(PageBlock(kind=_kind_of_text(text), page_number=page_number, text=text))
+    return blocks
+
+
+def _kind_of_text(text: str) -> str:
+    """看一小段文字是标题、公式、表格、图，还是普通段落。"""
+
+    if text.startswith("$$"):
+        return "display_formula"
+    if text.startswith("|"):
+        return "table"
+    if text.startswith("!["):
+        return "figure"
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) == 1 and re.match(r"^(?:[IVXLC]{1,8}\.\s+\S|\d+\.\s+[A-Z])", lines[0]):
+        return "heading"
+    if re.fullmatch(r"\$[^$\n]+\$", text):
+        return "inline_formula"
+    return "paragraph"
+
+
+def _first_content_line(text: str) -> str:
+    """取出一段里第一行有字的内容。"""
+
+    return next((line.strip() for line in text.splitlines() if line.strip()), "")
+
+
+def _blocks_for_reading(blocks: list[PageBlock]) -> list[PageBlock]:
+    """去掉摘要和参考文献，只留下要精读的正文块。"""
+
+    reference_index = next(
+        (
+            index
+            for index, block in enumerate(blocks)
+            if block.kind not in {"display_formula", "inline_formula", "table", "figure"}
+            and _is_references_heading(_first_content_line(block.text))
+        ),
+        len(blocks),
+    )
+    kept = blocks[:reference_index]
+    abstract_index = next(
+        (
+            index
+            for index, block in enumerate(kept)
+            if block.kind not in {"display_formula", "inline_formula", "table", "figure"}
+            and _is_abstract_heading(_first_content_line(block.text))
+        ),
+        None,
+    )
+    if abstract_index is None:
+        return kept
+    body_start = next(
+        (
+            index
+            for index in range(abstract_index + 1, len(kept))
+            if block_is_body_start(kept[index])
+        ),
+        None,
+    )
+    if body_start is None:
+        return kept
+    return kept[:abstract_index] + kept[body_start:]
+
+
+def block_is_body_start(block: PageBlock) -> bool:
+    """这一块是不是摘要后面的引言标题。"""
+
+    if block.kind in {"display_formula", "inline_formula", "table", "figure"}:
+        return False
+    return _is_body_start_heading(_first_content_line(block.text))
+
+
 def build_chunks_file(
     paper: PaperDocument,
     *,
     markdown_path: Path,
     chunks_path: Path | None = None,
     chunker: BaseChunker | None = None,
+    blocks: list[PageBlock] | None = None,
 ) -> ChunkBuildResult:
     """读取 Markdown，清理非正文内容后切分，并写入 chunk.json。
 
@@ -277,12 +416,13 @@ def build_chunks_file(
         and all(len(chunk.content) <= PageChunker.max_atomic_characters for chunk in cached)
     ):
         return ChunkBuildResult(chunks_path=output_path, chunks=cached)
-    markdown = markdown_path.read_text(encoding="utf-8")
     resolved_chunker = chunker or PageChunker()
-    # 中文注释：PDF 转换出的 Markdown 往往混有每页重复的页眉、页脚、摘要和参考文献。
-    # 这些内容会干扰模型判断，所以切分前先只留下论文正文。
-    body_markdown = preprocess_markdown_body(markdown)
-    chunks = resolved_chunker.chunk(paper, body_markdown)
+    if blocks and isinstance(resolved_chunker, PageChunker):
+        # 中文注释：解析时已经有块，直接装箱。不要再把 Markdown 按字数切开。
+        chunks = resolved_chunker.pack(paper, _blocks_for_reading(blocks))
+    else:
+        markdown = markdown_path.read_text(encoding="utf-8")
+        chunks = resolved_chunker.chunk(paper, markdown)
     payload = {
         "paperId": paper.paperId or paper.id,
         "chunker": resolved_chunker.name,
@@ -331,169 +471,6 @@ def _content_flags(content: str) -> JsonObject:
         "has_math": bool(_MATH_BLOCK_RE.search(content) or _MATH_INLINE_RE.search(content)),
         "has_figure": bool(_FIGURE_RE.search(content)),
     }
-
-
-def _split_long_content(content: str, max_characters: int, max_atomic_characters: int) -> list[str]:
-    """把过长的正文切成若干小段，同时保证表格和公式不被拦腰截断。
-
-    中文注释（为什么要这么麻烦）：以前的做法是每 1200 个字硬切一刀，一刀下去
-    表格被切成两半、公式只剩半截，模型读到的就是一堆看不懂的乱码。现在改成：
-    先尽量在空行（段落分界）处下刀；碰到 Markdown 表格或者 $$ 公式块时，只要
-    整块没超过 max_atomic_characters，就保证"这一块绝不被切开"——但它不一定
-    要独占一段，能跟前后正文挤进同一段就一起放着，这样才不至于把一页正文切得
-    七零八落（一页里有几十个公式块时，让每个公式块都独占一段会切出上百个碎片，
-    精读时要多跑上百次模型）。只有连整块都超过 max_atomic_characters 时，才按
-    表格的行边界切开，并且给后面每一段都补上表头，保证下游不会读到"半张表"。
-    """
-
-    pieces: list[str] = []
-    buffer: list[str] = []  # 正在攒的这一段的若干行
-    buffer_length = 0
-
-    def flush() -> None:
-        """把攒在 buffer 里的内容打包成一个片段。"""
-
-        nonlocal buffer, buffer_length
-        text = "\n".join(buffer).strip()
-        if text:
-            pieces.append(text)
-        buffer = []
-        buffer_length = 0
-
-    def put(line: str) -> None:
-        """往 buffer 里加一行普通正文，放不下就先把已有的打包。"""
-
-        nonlocal buffer_length
-        if buffer and buffer_length + len(line) + 1 > max_characters:
-            flush()
-        buffer.append(line)
-        buffer_length += len(line) + 1
-
-    def append_block(lines: list[str]) -> None:
-        """把一整个表格/公式块原样塞进 buffer，不切开它。
-
-        中文注释：只在块的前面补一个空行。Markdown 里表格和 $$ 公式块紧贴着上一段
-        正文时可能渲染不出来，留白是让下游看到的内容仍然是一张完整的表、一个完整的公式。
-        块后面不补空行——片段末尾的空行最后会被 strip 去掉，补了也留不住，与其写个
-        和实际不符的注释，不如就说清楚只补前面这一个。
-        """
-
-        nonlocal buffer_length
-        if buffer:
-            buffer.append("")
-            buffer_length += 1
-        buffer.extend(lines)
-        buffer_length += sum(len(line) + 1 for line in lines)
-
-    for kind, block_lines in _iter_content_blocks(content, max_atomic_characters):
-        if kind == "plain":
-            for paragraph in _split_blank_lines(block_lines):
-                paragraph_length = len("\n".join(paragraph))
-                if paragraph_length <= max_characters:
-                    if buffer and buffer_length + paragraph_length + 2 > max_characters:
-                        flush()
-                    for line in paragraph:
-                        put(line)
-                    continue
-                # 中文注释：这一整段本来就超长，只能先打包掉手头的文字，再单独处理它。
-                flush()
-                pieces.extend(_split_long_paragraph(paragraph, max_characters))
-            continue
-
-        block_text = "\n".join(block_lines).strip()
-        if not block_text:
-            continue
-        if len(block_text) <= max_atomic_characters:
-            # 中文注释：整块没超上限，就保证不切开。装得下当前这段就一起装，
-            # 装不下就先把当前这段打包，让它从这里另起一段。
-            if buffer and buffer_length + len(block_text) + 2 > max_characters:
-                flush()
-            append_block(block_lines)
-            continue
-
-        # 中文注释：整块连 4000 字都超了，只能切开，这时才不得不打断它。
-        # 表格块走 _split_long_table；公式块走 _split_long_math——它自己会先用
-        # _TABLE_LINE_RE 扫一遍，块里其实夹着表格的话，也会按表格的规矩切、每片补表头。
-        flush()
-        if kind == "math":
-            pieces.extend(_split_long_math(block_lines, max_characters, max_atomic_characters))
-        else:
-            pieces.extend(_split_long_table(block_lines, max_characters, max_atomic_characters))
-    flush()
-    return [piece for piece in pieces if piece]
-
-
-def _iter_content_blocks(content: str, max_atomic_characters: int) -> list[tuple[str, list[str]]]:
-    """把正文按"表格 / 公式 / 普通文字"切成一段一段。
-
-    中文注释：返回的每一项是 (类型, 行列表)，类型只会是 table、math、plain 三种。
-    先分清每一行归谁管，后面才知道刀能落在哪儿——绝不能在表格行或者 $$ 公式块
-    之间下刀。
-    """
-
-    lines = content.splitlines()
-    blocks: list[tuple[str, list[str]]] = []
-    index = 0
-    while index < len(lines):
-        stripped = lines[index].strip()
-        if _TABLE_LINE_RE.match(lines[index]):
-            # 连续的表格行算作同一张表
-            start = index
-            while index < len(lines) and _TABLE_LINE_RE.match(lines[index]):
-                index += 1
-            blocks.append(("table", lines[start:index]))
-            continue
-        if stripped.startswith("$$"):
-            start = index
-            index += 1
-            if stripped.count("$$") < 2:
-                # 中文注释：这一行只是公式的开头，要往下找配对的结束 $$。往下找多远
-                # 才放弃？放宽到"整块保留上限"的 10 倍（4 万字）——不能就卡在 4000，
-                # 因为一个长公式块本身完全可能超过 4000 字，那种块是要切开、每片补回
-                # $$ 处理的（见 _split_long_math），卡在 4000 就再也认不出它们。
-                # 真正兜底的是"扫到底也没找到配对的 $$，就只把这一行当公式"这条规则。
-                scan_limit = max_atomic_characters * 10
-                scanned = len(lines[start]) + 1
-                probe = index
-                close_index = -1
-                while probe < len(lines) and scanned <= scan_limit:
-                    if "$$" in lines[probe]:
-                        close_index = probe
-                        break
-                    scanned += len(lines[probe]) + 1
-                    probe += 1
-                if close_index >= 0:
-                    index = close_index + 1  # 把写着结束 $$ 的那一行也算进公式块
-                # 中文注释：扫到底都没找到配对的 $$，index 就停在 start + 1，
-                # 也就是"只把这一行当公式"。后面的内容一点都不会少——绝不能从这里
-                # 把这一页后面所有东西一口吞掉：那样后面的表格会被当成"超长的公式"
-                # 按行切碎，每一段都没有表头，全变成半张表。
-            blocks.append(("math", lines[start:index]))
-            continue
-        start = index
-        while index < len(lines):
-            current = lines[index]
-            if _TABLE_LINE_RE.match(current) or current.strip().startswith("$$"):
-                break
-            index += 1
-        blocks.append(("plain", lines[start:index]))
-    return blocks
-
-
-def _split_blank_lines(lines: list[str]) -> list[list[str]]:
-    """按空行把若干行文字切成一个个段落（空行 = 只用来分段，本身不保留）。"""
-
-    paragraphs: list[list[str]] = []
-    current: list[str] = []
-    for line in lines:
-        if line.strip():
-            current.append(line)
-        elif current:
-            paragraphs.append(current)
-            current = []
-    if current:
-        paragraphs.append(current)
-    return paragraphs
 
 
 def _split_long_paragraph(lines: list[str], max_characters: int) -> list[str]:
@@ -686,6 +663,7 @@ async def async_build_chunks_file(
     markdown_path: Path,
     chunks_path: Path | None = None,
     chunker: BaseChunker | None = None,
+    blocks: list[PageBlock] | None = None,
 ) -> ChunkBuildResult:
     """异步流程里的分块入口，把本地文件读写放到线程里执行。"""
 
@@ -695,6 +673,7 @@ async def async_build_chunks_file(
         markdown_path=markdown_path,
         chunks_path=chunks_path,
         chunker=chunker,
+        blocks=blocks,
     )
 
 

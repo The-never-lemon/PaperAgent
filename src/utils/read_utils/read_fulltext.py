@@ -16,7 +16,7 @@ from src.paper_retrieval.models import PaperDocument
 # 排查问题时能看到"哪一篇论文的全文被判为不合格、原因是什么"。
 from src.utils import get_logger
 from src.utils.read_utils.formula_ocr import transcribe_formula_regions
-from src.utils.read_utils.pdf_parsers import PdfFormulaRegion, PdfTableRegion, get_pdf_parser
+from src.utils.read_utils.pdf_parsers import PageBlock, PdfFormulaRegion, PdfTableRegion, get_pdf_parser
 from src.utils.read_utils.table_ocr import transcribe_table_regions
 
 
@@ -35,7 +35,11 @@ _UNSUPPORTED_FULLTEXT_WARNING = "暂不支持该全文文件格式"
 # 图片引用的说明文字从"Figure 3"改成论文自己的图注原文，图里的文字不再混进正文。
 # 5 -> 6：有图注的表格改成"截图交给模型重排表头"再写回正文，替掉以前那份表头被
 # 糊成一格、列名对不上指标的 Markdown 表。
-CONVERTER_VERSION = 6
+# 6 -> 7：正文先按块抽出（标题、段落、公式、表格、图），再渲染成 Markdown。
+# 旧缓存是先揉成一篇长文再切的，公式经常被切碎，必须作废重转。
+# 7 -> 8：行内公式按字号和高低收成上下标；TABLE I 这种罗马数字表注改走表格截图。
+# 旧缓存里还是 $WQ$ 和竖着排的一列数字，必须作废重转。
+CONVERTER_VERSION = 8
 
 # 中文注释：正文质量闸的两个阈值——
 # 1) 转换出来的正文（去掉首尾空白后）不足 3000 字符，就认为"不是正文"：
@@ -60,6 +64,9 @@ class MarkdownConversion:
     # 不然后台看到的用量会比真实花的少。没开公式识别、或者一篇论文没有公式时都是 0。
     input_tokens: int = 0
     output_tokens: int = 0
+    # 中文注释：这次转换用的块。分片和插图清单都从这里来。
+    # 命中旧文件缓存时没有块，调用方再从 Markdown 里认。
+    blocks: list[PageBlock] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -76,6 +83,7 @@ class _PdfMarkdownDraft:
     page_count: int | None = None
     # 中文注释：这一篇认出来的公式，连位置一起带着，转写那一步要用。
     formulas: list[PdfFormulaRegion] = field(default_factory=list)
+    blocks: list[PageBlock] = field(default_factory=list)
     # 中文注释：有图注的表格，同样要交给模型重排表头。
     tables: list[PdfTableRegion] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -122,6 +130,7 @@ async def async_convert_fulltext_to_markdown(
             pdf_path=source_path,
             regions=draft.formulas,
             markdown_text=draft.markdown,
+            blocks=draft.blocks,
             # 中文注释：开关关掉时传空值进去，转写那一步就不调模型，
             # 但占位符照样会被换成展平的兜底内容，正文不会留下记号。
             llm=llm if _formula_ocr_enabled() else None,
@@ -134,6 +143,7 @@ async def async_convert_fulltext_to_markdown(
             pdf_path=source_path,
             regions=draft.tables,
             markdown_text=markdown_text,
+            blocks=draft.blocks,
             llm=llm,
             on_progress=on_progress,
             raise_if_cancelled=raise_if_cancelled,
@@ -321,7 +331,12 @@ def _convert_html(paper: PaperDocument, source_path: Path, source_url: str | Non
     )
 
 
-def _markdown_header(paper: PaperDocument, source_url: str | None, page_count: int | None) -> str:
+def _markdown_header(
+    paper: PaperDocument,
+    source_url: str | None,
+    page_count: int | None,
+    figures: list[dict[str, Any]] | None = None,
+) -> str:
     """生成 Markdown 开头的论文基本信息，避免正文和来源信息分散保存。"""
 
     header = {
@@ -334,7 +349,26 @@ def _markdown_header(paper: PaperDocument, source_url: str | None, page_count: i
         "source_url": source_url or paper.url,
         "page_count": page_count,
     }
+    # 中文注释：PDF 会带上从图块里抄出来的插图清单。没有这张清单时不写这个字段，
+    # 网页全文仍然按正文里的图片引用去认。
+    if figures is not None:
+        header["figures"] = figures
     return "---\n" + json.dumps(header, ensure_ascii=False, indent=2) + "\n---"
+
+
+def _figure_records(blocks: list[PageBlock]) -> list[dict[str, Any]]:
+    """从图块里抄出插图清单：第几页、文件名、图注。"""
+
+    records: list[dict[str, Any]] = []
+    for block in blocks:
+        if block.kind != "figure" or not block.asset_name:
+            continue
+        caption = ""
+        match = re.search(r"!\[([^\]]*)\]", block.text)
+        if match:
+            caption = match.group(1).replace("\\]", "]")
+        records.append({"page": block.page_number, "file": block.asset_name, "caption": caption})
+    return records
 
 
 def _read_page_count(markdown_path: Path) -> int | None:
@@ -369,7 +403,7 @@ def _parse_pdf_markdown(
         return _PdfMarkdownDraft(warnings=parsed.warnings)
     if not parsed.pages:
         return _PdfMarkdownDraft(warnings=["PDF 中没有可读取的正文"])
-    body: list[str] = [_markdown_header(paper, source_url, len(parsed.pages))]
+    body: list[str] = [_markdown_header(paper, source_url, len(parsed.pages), _figure_records(parsed.blocks))]
     for page in parsed.pages:
         body.extend([f"<!-- page: {page.page_number} -->", page.text])
     return _PdfMarkdownDraft(
@@ -377,6 +411,7 @@ def _parse_pdf_markdown(
         page_count=len(parsed.pages),
         formulas=parsed.formulas,
         tables=parsed.tables,
+        blocks=parsed.blocks,
     )
 
 
@@ -410,6 +445,7 @@ def _finalize_markdown(
         assets_dir=_existing_assets_dir(markdown_path),
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        blocks=draft.blocks,
     )
 
 

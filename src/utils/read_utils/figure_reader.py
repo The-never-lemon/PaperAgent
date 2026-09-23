@@ -15,13 +15,14 @@
 from __future__ import annotations
 
 import asyncio
-import base64
+import json
 import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from src.llm.base import vision_image_block
 from src.utils.llm_json import parse_llm_json
 
 logger = logging.getLogger(__name__)
@@ -95,12 +96,15 @@ class PaperFigure:
     context: str
 
 
-def collect_paper_figures(markdown_text: str, assets_dir: Path | None) -> list[PaperFigure]:
-    """从正文里把图片引用挑出来，还原成一份插图清单。
+def collect_paper_figures(
+    markdown_text: str,
+    assets_dir: Path | None,
+    blocks: list[Any] | None = None,
+) -> list[PaperFigure]:
+    """整理插图清单。优先用解析时的图块，其次用正文开头记下的清单。
 
-    中文注释：为什么从正文里挑、而不是直接列 assets 目录里的文件——正文里的图片引用
-    带着图注原文，而目录里只有一个文件名，光看名字不知道这张图画的是什么。
-    页码从文件名里取（fig_p2_1.png 就是第 2 页），这是落盘时就定好的规则。
+    中文注释：图块上有页码、文件名和图注，比从 Markdown 图片链接里反查更稳。
+    网页全文没有图块，也没有这份清单，才退回正文里的图片引用。
 
     同时给每张图配一段正文上下文。脱离了正文，图是读不准的：一张画着"coverage rate"
     的图，光看图注不知道这个指标在本篇论文里怎么定义、哪条线是基线；而正文里通常
@@ -112,20 +116,28 @@ def collect_paper_figures(markdown_text: str, assets_dir: Path | None) -> list[P
     page_texts = _split_by_page(markdown_text)
     body_paragraphs = _body_paragraphs(markdown_text)
     body_text = "\n".join(body_paragraphs)
+    records = _figure_records(blocks, markdown_text)
+    if records is None:
+        records = [
+            {"page": None, "file": file_name, "caption": caption}
+            for caption, file_name in _IMAGE_REFERENCE_PATTERN.findall(markdown_text)
+        ]
 
     figures: list[PaperFigure] = []
     seen: set[str] = set()
-    for caption, file_name in _IMAGE_REFERENCE_PATTERN.findall(markdown_text):
-        if file_name in seen:
-            # 中文注释：按内容去重之后，同一张图可能被多处引用、指向同一个文件。
-            # 同一张图只读一次就够了。
+    for record in records:
+        file_name = str(record.get("file") or "")
+        caption = str(record.get("caption") or "")
+        if not file_name or file_name in seen:
             continue
         path = assets_dir / file_name
         if not path.is_file():
             continue
         seen.add(file_name)
-        match = _PAGE_IN_FILE_NAME_PATTERN.search(file_name)
-        page_number = int(match.group(1)) if match else 0
+        page_number = record.get("page")
+        if not isinstance(page_number, int):
+            match = _PAGE_IN_FILE_NAME_PATTERN.search(file_name)
+            page_number = int(match.group(1)) if match else 0
         figures.append(
             PaperFigure(
                 page_number=page_number,
@@ -135,6 +147,40 @@ def collect_paper_figures(markdown_text: str, assets_dir: Path | None) -> list[P
             )
         )
     return figures
+
+
+def _figure_records(blocks: list[Any] | None, markdown_text: str) -> list[dict[str, Any]] | None:
+    """取出插图清单。有图块就用图块；正文开头写了 figures 就用那份；都没有就返回空值。"""
+
+    if blocks:
+        records: list[dict[str, Any]] = []
+        for block in blocks:
+            if getattr(block, "kind", "") != "figure":
+                continue
+            file_name = str(getattr(block, "asset_name", "") or "")
+            if not file_name:
+                continue
+            caption = str(getattr(block, "text", "") or "")
+            match = _IMAGE_REFERENCE_PATTERN.search(caption)
+            if match:
+                caption = match.group(1)
+            records.append(
+                {"page": getattr(block, "page_number", None), "file": file_name, "caption": caption}
+            )
+        return records
+    if not markdown_text.startswith("---"):
+        return None
+    end = markdown_text.find("\n---", 3)
+    if end < 0:
+        return None
+    try:
+        header = json.loads(markdown_text[3:end].strip())
+    except json.JSONDecodeError:
+        return None
+    listed = header.get("figures") if isinstance(header, dict) else None
+    if not isinstance(listed, list):
+        return None
+    return [item for item in listed if isinstance(item, dict)]
 
 
 def _split_by_page(markdown_text: str) -> dict[int, str]:
@@ -305,7 +351,7 @@ async def _read_one(
 
     try:
         response = await llm.provider.chat(
-            _build_messages(batch, payload, focus),
+            _build_messages(batch, payload, focus, llm),
             temperature=0,
             max_tokens=FIGURE_READING_MAX_TOKENS,
         )
@@ -355,13 +401,9 @@ def _load_batch_images(batch: list[PaperFigure]) -> list[bytes]:
 
 
 def _build_messages(
-    batch: list[PaperFigure], payloads: list[bytes], focus: str
+    batch: list[PaperFigure], payloads: list[bytes], focus: str, llm: Any
 ) -> list[dict[str, Any]]:
-    """拼出这一次请求的消息。
-
-    中文注释：图片用 Anthropic 那套原生格式，项目里发消息那条链路对它是原样透传的。
-    不要写成 OpenAI 的 image_url，项目里没有做那种格式的转换。
-    """
+    """拼出这一次请求的消息。图片格式按模型实际走的接口来。"""
 
     content: list[dict[str, Any]] = []
     for position, (figure, payload) in enumerate(zip(batch, payloads), start=1):
@@ -373,16 +415,7 @@ def _build_messages(
             # 中文注释：正文放在图片前面。模型是先读文字再看图，带着"这篇论文里
             # 这个指标是什么意思、哪条线是基线"去看，比先看图再补文字准得多。
             content.append({"type": "text", "text": f"论文正文里的相关段落：\n{figure.context}"})
-        content.append(
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": _media_type(figure.path.name),
-                    "data": base64.b64encode(payload).decode("ascii"),
-                },
-            }
-        )
+        content.append(vision_image_block(llm, payload, _media_type(figure.path.name)))
     instruction = "请只输出一个 JSON 对象：{\"figures\":[{\"index\":1,\"note\":\"...\"}]}。index 用上面给出的图编号。"
     if focus:
         instruction += f"\n用户关注的角度是「{focus}」，图里能看出和它相关的内容就优先写出来。"

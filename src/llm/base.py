@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import inspect
 import json
 import random
@@ -666,3 +667,20 @@ def _json_error_field(body: str, field: str) -> str | None:
         return error.get(field)
     except Exception:
         return None
+
+
+def vision_image_block(model: Any, payload: bytes, media_type: str = "image/png") -> dict[str, Any]:
+    """把一张图拼成当前模型能看见的那一块。
+
+    中文注释：OpenAI 兼容接口认 image_url 这种写法。Anthropic 认 type=image。
+    送错了接口往往仍返回成功，但图根本没被看，公式转写就会被留成空的。
+    """
+
+    encoded = base64.b64encode(payload).decode("ascii")
+    provider = getattr(model, "provider", model)
+    if type(provider).__name__ == "AnthropicProvider":
+        return {
+            "type": "image",
+            "source": {"type": "base64", "media_type": media_type, "data": encoded},
+        }
+    return {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{encoded}"}}

@@ -14,12 +14,12 @@ PDF 里表格是"排"出来的，程序只能靠"框线在哪"去猜哪个格子
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 import re
 from pathlib import Path
 from typing import Any, Callable
 
+from src.llm.base import vision_image_block
 from src.utils.llm_json import parse_llm_json
 from src.utils.read_utils.pdf_parsers import PdfTableRegion
 
@@ -74,6 +74,7 @@ async def transcribe_table_regions(
     llm: Any | None,
     on_progress: Callable[[str], None] | None = None,
     raise_if_cancelled: Callable[[], None] | None = None,
+    blocks: list[Any] | None = None,
 ) -> tuple[str, int, int]:
     """把正文里的表格占位符换成重排好的 Markdown 表，返回 (换好的正文, 输入 token, 输出 token)。
 
@@ -104,9 +105,12 @@ async def transcribe_table_regions(
 
     for region in regions:
         markdown = replacements.get(region.placeholder)
-        markdown_text = markdown_text.replace(
-            region.placeholder, markdown if markdown else region.fallback
-        )
+        replacement = markdown if markdown else region.fallback
+        markdown_text = markdown_text.replace(region.placeholder, replacement)
+        if blocks:
+            for block in blocks:
+                if region.placeholder in block.text:
+                    block.text = block.text.replace(region.placeholder, replacement)
     return markdown_text, total_input, total_output
 
 
@@ -187,7 +191,7 @@ async def _transcribe_one(
 
     try:
         response = await llm.provider.chat(
-            _build_messages(batch, crops), temperature=0, max_tokens=TABLE_OCR_MAX_TOKENS
+            _build_messages(batch, crops, llm), temperature=0, max_tokens=TABLE_OCR_MAX_TOKENS
         )
     except Exception as exc:
         logger.warning("表格转写请求异常，这一批退回原有表格", extra={"reason": str(exc)})
@@ -231,13 +235,9 @@ async def _transcribe_one(
 
 
 def _build_messages(
-    batch: list[PdfTableRegion], crops: dict[str, bytes]
+    batch: list[PdfTableRegion], crops: dict[str, bytes], llm: Any
 ) -> list[dict[str, Any]]:
-    """拼出这一次请求的消息。
-
-    中文注释：图片用 Anthropic 那套原生格式，项目里发消息那条链路对它是原样透传的。
-    图注也一起给，模型看到"Table 1: 在 StreamingBench 上的性能对比"就知道表头大概该写什么。
-    """
+    """拼出这一次请求的消息。图注也一起给，模型才知道表头大概该写什么。"""
 
     content: list[dict[str, Any]] = []
     for position, region in enumerate(batch, start=1):
@@ -245,16 +245,7 @@ def _build_messages(
         if region.caption:
             label += f"，图注：{region.caption}"
         content.append({"type": "text", "text": f"{label}："})
-        content.append(
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/png",
-                    "data": base64.b64encode(crops[region.placeholder]).decode("ascii"),
-                },
-            }
-        )
+        content.append(vision_image_block(llm, crops[region.placeholder]))
     content.append(
         {
             "type": "text",

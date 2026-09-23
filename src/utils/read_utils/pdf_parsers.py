@@ -98,6 +98,14 @@ _MIN_MATH_LINE_CHARS = 2
 # "哪些行是公式"之后，还要把这些行按位置粘回一块，才能截出一张完整的公式图。
 _REGION_VERTICAL_GAP = 6.0  # 两行上下相距不超过这么多点，就算挨在一起
 _REGION_HORIZONTAL_GAP = 8.0  # 两行左右相距不超过这么多点，就算挨在一起
+# 中文注释：分子和分母经常隔得比上面这条更开，但仍是同一条公式。
+_STACK_VERTICAL_GAP = 16.0
+# 中文注释：公式左边常是普通字体的函数名，离数学符号有一小段空。
+# 栏和栏之间的空白比这更大，超过就不收，免得把另一栏的字卷进来。
+_ABSORB_HORIZONTAL_GAP = 28.0
+# 中文注释：同一条公式中间偶尔隔着一个大符号。这个空当要很小。
+# 再大就多半是另一栏的公式，中间那几个字只是编号，不能把两栏粘成一块。
+_BRIDGE_MAX_GAP = 36.0
 _REGION_PADDING_X = 10.0  # 截图时左右各多留一点，避免把分数线、根号切掉
 _REGION_PADDING_Y = 4.0  # 截图时上下各多留一点
 _MAX_REGION_AREA_RATIO = 0.5  # 一块区域要是占了半个页面，那肯定是认错了
@@ -138,14 +146,17 @@ _VECTOR_FIGURE_OVERLAP_LIMIT = 0.3
 # 中文注释：一张候选插图有一半以上压在表格范围里，就当它是表格的一部分，不再当插图收。
 _TABLE_REGION_OVERLAP_LIMIT = 0.5
 
+# 图注、表注的编号：阿拉伯数字，或 TABLE I 这种罗马数字。
+# 中文注释：编号后面必须是空格、冒号或句号。不然 "TABLE Information" 会被认成第 I 张表。
+_CAPTION_INDEX = r"(?:\d+|[IVXLC]{1,8})(?=\s|:|：|\.|$)"
 # 图注的样子：以 Figure / Fig. / TABLE / Table 加一个编号开头。
-_CAPTION_PATTERN = re.compile(r"^(Figure|Fig\.?|TABLE|Table)\s*\d+")
+_CAPTION_PATTERN = re.compile(rf"^(Figure|Fig\.?|TABLE|Table)\s*{_CAPTION_INDEX}")
 # 从图注里把编号抠出来。中文注释：必须紧跟在 Figure/TABLE 这类词后面才算数，
 # 不能"在整句里随便找一个数字"——否则 "Figure 2: accuracy at 50% coverage"
-# 这种图注会被当成第 50 张图。
-_CAPTION_NUMBER = re.compile(r"^(?:Figure|Fig\.?|TABLE|Table)\s*(\d+)")
-# 表注的样子：以 TABLE / Table 加编号开头。
-_TABLE_CAPTION_PATTERN = re.compile(r"^(?:TABLE|Table)\s*(\d+)")
+# 这种图注会被当成第 50 张图。罗马数字留给表注，不当成插图的序号。
+_CAPTION_NUMBER = re.compile(rf"^(?:Figure|Fig\.?|TABLE|Table)\s*({_CAPTION_INDEX})")
+# 表注的样子：以 TABLE / Table 加编号开头。IEEE 论文常写 TABLE I，不是 Table 1。
+_TABLE_CAPTION_PATTERN = re.compile(rf"^(?:TABLE|Table)\s*({_CAPTION_INDEX})")
 # 中文注释：图注/表注的"正文部分"至少要这么长才算真的。加这条是因为"Table 1"这种
 # 三个字也可能只是正文里的一句引用，不是表注——真表注后面一定还跟着说明这张表在讲什么。
 _MIN_CAPTION_BODY_CHARS = 10
@@ -161,6 +172,35 @@ _MIN_TABLE_CELLS = 2
 _MAX_TABLE_HEADER_CHARS = 200
 # 表格矩形被图片盖住的比例超过这个值，就认为它是图的地盘而不是表格。
 _MAX_TABLE_IMAGE_COVERAGE = 0.5
+
+
+@dataclass(slots=True)
+class PageBlock:
+    """页面上的一块内容。后面的正文和分片都从这里来，不再从一篇长文里倒切。
+
+    kind 只会是这几种：heading 标题、paragraph 段落、display_formula 单独成行的公式、
+    inline_formula 夹在句子里的公式、table 表格、figure 图。
+    """
+
+    kind: str
+    page_number: int
+    text: str
+    rect: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    asset_name: str = ""
+
+
+# 一级标题：罗马数字开头（I. INTRODUCTION），或 "1. Introduction" 这种编号。
+# 字母小节（A. ...）不算，分片时只有一级标题才另起一段。
+_H1_PATTERN = re.compile(r"^(?:[IVXLC]{1,8}\.\s+\S.{0,140}|\d+\.\s+[A-Z].{0,140})$")
+
+
+def _looks_like_heading(text: str) -> bool:
+    """这一小段是不是一级标题。只认单独一行、又不太长的那种。"""
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) != 1 or len(lines[0]) > 160:
+        return False
+    return _H1_PATTERN.match(lines[0]) is not None
 
 
 @dataclass(slots=True)
@@ -253,6 +293,9 @@ class PdfParseResult:
 
     pages: list[ParsedPdfPage] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # 中文注释：按阅读顺序排好的块。Markdown 和后面的分片都从这份列表渲染，
+    # 不再拿渲染完的长文倒过来切。pypdf 那条退路没有块，这里就是空的。
+    blocks: list[PageBlock] = field(default_factory=list)
     formulas: list[PdfFormulaRegion] = field(default_factory=list)
     # 中文注释：有图注、需要交给模型重排的表格。没有图注的表走原来的 Markdown 转换，
     # 不进这个清单。
@@ -355,7 +398,7 @@ class PyMuPdfParser(BasePdfParser):
         # （比如第 11 张图配到了写着 "Fig. 11" 的图注，第 12 张图没配到图注、
         # 兜底计数恰好也是 11），撞号之后正文里就会出现两张 "Figure 11"，分不清谁是谁。
         used_figure_numbers: set[int] = set()
-        page_texts: list[str] = []
+        page_block_lists: list[list[PageBlock]] = []
         page_metadatas: list[dict[str, Any]] = []
         # 中文注释：把每页认出的公式攒到一起。上层拿到这份清单后，才能照着它去截图转写。
         formulas: list[PdfFormulaRegion] = []
@@ -363,7 +406,7 @@ class PyMuPdfParser(BasePdfParser):
         tables: list[PdfTableRegion] = []
         for page_index in range(doc.page_count):
             page = doc[page_index]
-            text, table_count, figure_count, page_formulas, page_tables = self._render_page(
+            page_blocks, table_count, figure_count, page_formulas, page_tables = self._render_page(
                 pymupdf,
                 doc,
                 page,
@@ -377,21 +420,27 @@ class PyMuPdfParser(BasePdfParser):
             figure_counter += figure_count
             formulas.extend(page_formulas)
             tables.extend(page_tables)
-            page_texts.append(text)
+            page_block_lists.append(page_blocks)
             page_metadatas.append(
                 {"parser": self.name, "table_count": table_count, "figure_count": figure_count}
             )
-        cleaned_pages = _remove_repeated_headers_and_footers(page_texts)
-        cleaned_pages = _remove_references_at_end(cleaned_pages)
+        # 中文注释：页眉页脚和文末参考文献直接从块里拿掉，再渲染每一页的文字。
+        # 这样正文和分片用的是同一份块，不会出现"文字删了、块还在"对不上的情况。
+        page_block_lists = _drop_repeated_margin_blocks(page_block_lists)
+        page_block_lists = _drop_reference_blocks(page_block_lists)
         pages: list[ParsedPdfPage] = []
-        for index, text in enumerate(cleaned_pages):
-            normalised = _normalise_text(text)
-            if not normalised.strip():
+        blocks: list[PageBlock] = []
+        for page_number, page_blocks in enumerate(page_block_lists, start=1):
+            text = _normalise_text("\n\n".join(block.text for block in page_blocks if block.text.strip()))
+            if not text.strip():
                 continue
-            pages.append(ParsedPdfPage(page_number=index + 1, text=normalised, metadata=page_metadatas[index]))
+            pages.append(
+                ParsedPdfPage(page_number=page_number, text=text, metadata=page_metadatas[page_number - 1])
+            )
+            blocks.extend(page_blocks)
         if not pages:
             return PdfParseResult(warnings=["PDF 中没有可读取的文字，可能是扫描文件"])
-        return PdfParseResult(pages=pages, formulas=formulas, tables=tables)
+        return PdfParseResult(pages=pages, blocks=blocks, formulas=formulas, tables=tables)
 
     def _render_page(
         self,
@@ -404,8 +453,8 @@ class PyMuPdfParser(BasePdfParser):
         written_digests: dict[str, str],
         figure_offset: int,
         used_figure_numbers: set[int],
-    ) -> tuple[str, int, int, list[PdfFormulaRegion], list[PdfTableRegion]]:
-        """把一页内容拼成 Markdown，返回 (正文, 表格数, 写出的图片数, 认出的公式)。"""
+    ) -> tuple[list[PageBlock], int, int, list[PdfFormulaRegion], list[PdfTableRegion]]:
+        """把一页收成按阅读顺序排好的块。"""
 
         table_rects, table_markdowns = _collect_tables(page)
         blocks = [block for block in page.get_text("dict")["blocks"] if block.get("type") == 0]
@@ -453,9 +502,11 @@ class PyMuPdfParser(BasePdfParser):
         # 这里先记下"哪一块文字的第几行属于哪个公式"，待会儿按行号去查。
         # 夹在句子里的公式不进这张表，它们照旧留在正文段落里。
         display_region_of_line: dict[tuple[int, int], PdfFormulaRegion] = {}
+        display_rects: list[tuple[float, float, float, float]] = []
         for region in page_regions:
             if not region.is_display:
                 continue
+            display_rects.append(region.rect)
             for member in region.members:
                 display_region_of_line[member] = region
 
@@ -471,12 +522,14 @@ class PyMuPdfParser(BasePdfParser):
             里面那些行只是"排版换行"，不是真的段落。以前每一行都单独输出成一个段落，
             结果是 Markdown 里每一行之间都空一行，一段话被拆成十几段。所以这里要把
             同一个块里的行拼回一段（用单个换行连起来，不把换行去掉——那是原文的断行）。
+            单独一行、又像章节标题的，标成标题，分片时好从这里另起一段。
             """
 
             text = "\n".join(lines).strip()
             if not text:
                 return
-            item = _PageItem(text, y)
+            kind = "heading" if _looks_like_heading(text) else "paragraph"
+            item = _PageItem(text, y, kind=kind, rect=_rect_tuple(block["bbox"]))
             items.append(item)
             # 中文注释：记住每个文字块产出的第一项。图片引用要插在图注前面，
             # 所以需要拿到"图注那个块的第一个项"作为插入位置。
@@ -494,18 +547,28 @@ class PyMuPdfParser(BasePdfParser):
                     # 等转写完了再换成真正的 Markdown 表。
                     if id(region) not in emitted_regions:
                         emitted_regions.add(id(region))
-                        items.append(_PageItem(region.placeholder, region.rect[1]))
+                        items.append(
+                            _PageItem(region.placeholder, region.rect[1], kind="table", rect=region.rect)
+                        )
                     continue
                 if table_index not in emitted_tables:
                     emitted_tables.add(table_index)
-                    items.append(_PageItem(table_markdowns[table_index], float(table_rects[table_index][1])))
+                    items.append(
+                        _PageItem(
+                            table_markdowns[table_index],
+                            float(table_rects[table_index][1]),
+                            kind="table",
+                            rect=table_rects[table_index],
+                        )
+                    )
                 continue
             plain_lines: list[str] = []
             for line_index, line in enumerate(block["lines"]):
                 line_text = "".join(span["text"] for span in line["spans"])
                 if not line_text.strip():
                     continue
-                if _inside_any(_rect_tuple(line["bbox"]), figure_internal_rects):
+                line_rect = _rect_tuple(line["bbox"])
+                if _inside_any(line_rect, figure_internal_rects):
                     # 中文注释：这行是插图肚子里的字——坐标轴刻度、图例、框里的说明。
                     # 图本身已经整块截出来交给模型看了，这些散落的词再当正文输出一遍，
                     # 只会让模型读到一堆没头没尾的名词。实测一篇论文的方法框架图被这样
@@ -519,10 +582,27 @@ class PyMuPdfParser(BasePdfParser):
                     plain_lines = []
                     if id(region) not in emitted_regions:
                         emitted_regions.add(id(region))
-                        items.append(_PageItem(region.placeholder, region.rect[1]))
+                        items.append(
+                            _PageItem(region.placeholder, region.rect[1], kind="display_formula", rect=region.rect)
+                        )
                     continue
-                # 中文注释：其余的行都留在段落里。行内公式不再被整行抽走，
-                # 只是在它那几个数学字符外面包一层 $，方便下游和前端认出来。
+                if _center_inside_any(line_rect, display_rects):
+                    # 中文注释：这几个字落在某条独立公式的框里，但没被记成公式行。
+                    # 多半是公式左边的函数名。框已经把它们截进去了，再写成正文里的 $...$
+                    # 就会和公式各写一遍，分片时也被切碎。
+                    flush_plain(plain_lines, block_top, block)
+                    plain_lines = []
+                    continue
+                if _is_math_line(line):
+                    # 中文注释：整行都是公式、但又和旁边的句子挤在一起，不当独立公式截图。
+                    # 单独成一块，分片时不会从它中间切开。
+                    flush_plain(plain_lines, block_top, block)
+                    plain_lines = []
+                    wrapped = _with_inline_math(line).strip()
+                    if wrapped:
+                        items.append(_PageItem(wrapped, line_rect[1], kind="inline_formula", rect=line_rect))
+                    continue
+                # 中文注释：其余的行都留在段落里。更小、更靠下的收成下标，更靠上的收成上标。
                 plain_lines.append(_with_inline_math(line))
             flush_plain(plain_lines, block_top, block)
 
@@ -531,7 +611,17 @@ class PyMuPdfParser(BasePdfParser):
         for figure in figures:
             caption_block = figure["caption_block"]
             anchor = first_item_of_block.get(id(caption_block)) if caption_block is not None else None
-            figure_item = _PageItem(figure["markdown"], figure["y"])
+            # 中文注释：图注写着 TABLE I 的，折进表格之后正文里放的是表格记号。
+            # 这一块按表装箱，不再进插图清单，也不再把格子里的数字竖着排一遍。
+            is_table = str(figure["markdown"]).startswith("<!-- table:")
+            file_match = re.search(r"assets/([^)]+)", str(figure["markdown"]))
+            figure_item = _PageItem(
+                figure["markdown"],
+                figure["y"],
+                kind="table" if is_table else "figure",
+                rect=figure["rect"],
+                asset_name="" if is_table else (file_match.group(1) if file_match else ""),
+            )
             if anchor is None:
                 _insert_by_position(items, figure_item)
             else:
@@ -542,7 +632,21 @@ class PyMuPdfParser(BasePdfParser):
         # find_tables 报的数量会虚高，有两种情况：一是把一张表里套着的小表也单独找出来
         # （实测一篇论文的第一页报了 3 张，其实那 3 个矩形是层层嵌套的同一个区域）；
         # 二是把图的标注区当成表格（_looks_like_table 会把它筛掉）。所以按检测数报不准。
-        return "\n\n".join(item.text for item in items), len(emitted_tables), figure_count, page_regions, page_tables
+        # 中文注释：下标经常被排成单独一行，和上一行叠在一起。
+        # 不接回去的话，正文里会出现 "$m,in$" 这种单独一小段。
+        items = _join_same_line_items(items)
+        page_blocks = [
+            PageBlock(
+                kind=item.kind,
+                page_number=page_number,
+                text=item.text,
+                rect=item.rect,
+                asset_name=item.asset_name,
+            )
+            for item in items
+            if item.text.strip()
+        ]
+        return page_blocks, len(emitted_tables), figure_count, page_regions, page_tables
 
 
 def get_pdf_parser(name: str = "pypdf") -> BasePdfParser:
@@ -578,11 +682,21 @@ class _PageItem:
     下面要靠这个来定位图注该插在哪，按内容比较会认错人。
     """
 
-    __slots__ = ("text", "y")
+    __slots__ = ("text", "y", "kind", "rect", "asset_name")
 
-    def __init__(self, text: str, y: float) -> None:
+    def __init__(
+        self,
+        text: str,
+        y: float,
+        kind: str = "paragraph",
+        rect: tuple[float, float, float, float] | None = None,
+        asset_name: str = "",
+    ) -> None:
         self.text = text
         self.y = y
+        self.kind = kind
+        self.rect = rect if rect is not None else (0.0, y, 0.0, y)
+        self.asset_name = asset_name
 
 
 def _collect_tables(page: Any) -> tuple[list[tuple[float, float, float, float]], list[str]]:
@@ -1252,7 +1366,7 @@ def _figure_number(caption_text: str, fallback: int, used: set[int]) -> int:
 
     if caption_text:
         match = _CAPTION_NUMBER.match(caption_text)
-        if match:
+        if match and match.group(1).isdigit():
             number = int(match.group(1))
             if number not in used:
                 return number
@@ -1260,6 +1374,46 @@ def _figure_number(caption_text: str, fallback: int, used: set[int]) -> int:
     while number in used:
         number += 1
     return number
+
+
+def _join_same_line_items(items: list[_PageItem]) -> list[_PageItem]:
+    """把上下叠在一起的两段普通文字接成一段。
+
+    中文注释：PDF 常把下标单独排一行，这一行又和上一行叠着。
+    看起来是同一句话，抽出来却变成下一段，开头只剩 "$m,in$"。
+    下一行正文是另起一行的，上下不重叠，这里不会去接。
+    """
+
+    if not items:
+        return items
+    joined = [items[0]]
+    for item in items[1:]:
+        previous = joined[-1]
+        if previous.kind != "paragraph" or item.kind != "paragraph":
+            joined.append(item)
+            continue
+        # 中文注释：上一段可能有好几行，下标只和最后一行叠在一起。
+        # 所以只拿上一段最底下那一截来比，不能拿整段的高度。
+        tail_top = max(previous.rect[1], previous.rect[3] - 14.0)
+        overlap = min(previous.rect[3], item.rect[3]) - max(tail_top, item.rect[1])
+        shorter = min(previous.rect[3] - tail_top, item.rect[3] - item.rect[1])
+        if shorter <= 0 or overlap < shorter * 0.45:
+            joined.append(item)
+            continue
+        # 中文注释：下一行开头是一小截下标或上标，就接进上一截公式，
+        # 不再单独留下 "$_{m,in}$" 这种碎片。
+        attached = _attach_leading_script(previous.text, item.text)
+        if attached is not None:
+            previous.text = attached
+        else:
+            previous.text = previous.text.rstrip() + " " + item.text.lstrip()
+        previous.rect = (
+            min(previous.rect[0], item.rect[0]),
+            min(previous.rect[1], item.rect[1]),
+            max(previous.rect[2], item.rect[2]),
+            max(previous.rect[3], item.rect[3]),
+        )
+    return joined
 
 
 def _insert_by_position(items: list[_PageItem], item: _PageItem) -> None:
@@ -1328,57 +1482,307 @@ def _is_math_line(line: Any) -> bool:
     return math_characters / total >= _MATH_CHARACTER_RATIO
 
 
-def _with_inline_math(line: Any) -> str:
-    """把一行文字里的数学字符片段用 $ 包起来，其余部分原样保留。
+# 中文注释：PDF 里这些符号抽出来是单个字符。放进 $ 里时换成 LaTeX 写法，后面才读得懂。
+_LATEX_SYMBOLS = {
+    "∈": r"\in ",
+    "×": r"\times ",
+    "≤": r"\le ",
+    "≥": r"\ge ",
+    "−": "-",
+    "–": "-",
+    "·": r"\cdot ",
+    "ˆ": r"\hat ",
+}
 
-    中文注释：夹在句子里的公式以前有两种坏结果——要么被整行抽走变成独立的 $$ 块
-    （句子被拦腰截断），要么原样散在文字里、下游看不出来。现在改成只把连续的数学
-    字符挑出来包一层 $，句子其余的字一个不动，两头都顾上了。
+
+def _with_inline_math(line: Any) -> str:
+    """把一行里的公式收成带上下标的 $...$。
+
+    中文注释：下标比正文字小、位置更靠下，上标更小、更靠上。以前只看是不是数学字符，
+    W 和下标 Q 被拼成 $WQ$。现在按字号和高低写成 W_{Q}。公式中间夹着很少几个普通单词
+    （比如 ghost nodes）时仍放在同一对 $ 里，避免 $ 把式子从中间切开。
     """
 
+    spans = [span for span in line.get("spans", []) if span.get("text")]
+    if not spans:
+        return ""
+    sized = [float(span["size"]) for span in spans if str(span["text"]).strip()]
+    max_size = max(sized) if sized else 0.0
+    normal_centers = [
+        _span_center_y(span)
+        for span in spans
+        if str(span["text"]).strip() and max_size > 0 and float(span["size"]) > max_size * 0.85
+    ]
+    line_base_y = sum(normal_centers) / len(normal_centers) if normal_centers else None
+
     pieces: list[str] = []
-    math_run: list[str] = []
-    for span in line["spans"]:
-        font_is_math = _is_math_font(span["font"])
-        for character in span["text"]:
-            if font_is_math or _is_math_character(character):
-                math_run.append(character)
+    tokens: list[tuple[str, str]] = []
+    last_base: dict[str, Any] | None = None
+
+    def flush_math() -> None:
+        """把攒着的公式写成一对 $，没有上下标的单个字母就原样留下。"""
+
+        nonlocal last_base
+        if not tokens:
+            return
+        pieces.append(_emit_inline_math(tokens))
+        tokens.clear()
+        last_base = None
+
+    for index, span in enumerate(spans):
+        text = str(span["text"])
+        if not text.strip():
+            # 中文注释：后面还有公式时，空格留在公式里面。后面是普通句子就把公式先收尾。
+            if tokens and _has_later_math(spans, index):
+                tokens.append(("base", text))
+            else:
+                flush_math()
+                pieces.append(text)
+            continue
+        if _span_is_math(span) or _is_small_punct(span, max_size):
+            role = _script_role(last_base, span) if last_base is not None else None
+            if role is None and last_base is None and _span_is_math(span):
+                role = _script_role_against_line(span, max_size, line_base_y)
+            if role in {"sub", "sup"}:
+                body = text.strip()
+                if tokens and tokens[-1][0] == role:
+                    tokens[-1] = (role, tokens[-1][1] + body)
+                elif body:
+                    tokens.append((role, body))
                 continue
-            if math_run:
-                pieces.append(_wrap_math_run(math_run))
-                math_run = []
-            pieces.append(character)
-    if math_run:
-        pieces.append(_wrap_math_run(math_run))
+            if not _span_is_math(span):
+                flush_math()
+                pieces.append(text)
+                continue
+            last_base = span
+            tokens.append(("base", text))
+            continue
+        accent = _leading_accent(span, spans, index)
+        if accent is not None:
+            # 中文注释：波浪号和字母一样大，只是位置更高，是盖在字母上的重音，不是单独一个字。
+            tokens.append(("accent", accent))
+            continue
+        # 中文注释：只把“下一个公式之前、总共不超过三个小写单词”收进式子。
+        # 每个单词往往单独占一截，不能看见后面还有公式就把整句都吞进去。
+        gap = _text_before_next_math(spans, index)
+        if tokens and gap is not None and _short_lowercase_gap(gap):
+            if _has_letter(text):
+                tokens.append(("text", text.strip()))
+            else:
+                tokens.append(("base", text))
+            continue
+        flush_math()
+        pieces.append(text)
+    flush_math()
     return "".join(pieces)
 
 
-def _wrap_math_run(characters: list[str]) -> str:
-    """给一段连续的数学字符套上 $。
+def _span_center_y(span: dict[str, Any]) -> float:
+    """这一小截字的纵向中心。PDF 里越靠下，这个数越大。"""
 
-    中文注释：首尾的空格要留在 $ 外面，不然会写成 "$ X $" 这种夹着空格的形状，
-    排版时容易多出不该有的间距。整段都是空格就原样返回，不套 $。
+    bbox = span["bbox"]
+    return (float(bbox[1]) + float(bbox[3])) / 2
 
-    中文注释：下面两种情况也不套 $，原样留着：
 
-    一是片段里连一个字母都没有。作者行那种 "Haowei Zhang1,∗Shudong Yang1,2,∗"
-    的角标用的是符号字体，会被判成"数学字符"，但它只有逗号和星号、没有变量名，
-    套上 $ 只会把作者行切得七零八落，对读懂论文毫无帮助。
+def _span_is_math(span: dict[str, Any]) -> bool:
+    """这一小截是不是公式字形，而不是普通单词。"""
 
-    二是片段只有一个字符。孤零零一个符号套不套 $ 都一样，不套更干净。
+    text = str(span["text"])
+    chars = [character for character in text if not character.isspace()]
+    if not chars:
+        return False
+    if _is_math_font(str(span.get("font") or "")):
+        return True
+    return all(_is_math_character(character) for character in chars)
 
-    不套的损失很小——下游看到的还是同一个字符，只是少了一层定界符。
+
+def _script_role(base: dict[str, Any] | None, span: dict[str, Any]) -> str | None:
+    """更小、更靠下的是下标，更小、更靠上的是上标。字号差不多就不是上下标。"""
+
+    if base is None:
+        return None
+    base_size = float(base["size"])
+    size = float(span["size"])
+    if base_size <= 0 or size > base_size * 0.85:
+        return None
+    base_y = _span_center_y(base)
+    center_y = _span_center_y(span)
+    if center_y > base_y + 1.0:
+        return "sub"
+    if center_y < base_y - 1.0:
+        return "sup"
+    return None
+
+
+def _script_role_against_line(span: dict[str, Any], max_size: float, line_base_y: float | None) -> str | None:
+    """这一行开头没有主体、只有一小截更小的字时，按整行正文的位置判断上下标。"""
+
+    if line_base_y is None or max_size <= 0 or float(span["size"]) > max_size * 0.85:
+        return None
+    center_y = _span_center_y(span)
+    if center_y > line_base_y + 1.0:
+        return "sub"
+    if center_y < line_base_y - 1.0:
+        return "sup"
+    return None
+
+
+def _is_small_punct(span: dict[str, Any], max_size: float) -> bool:
+    """比正文小一号、又没有字母的符号，多半是上下标外面的括号。"""
+
+    text = str(span["text"]).strip()
+    if not text or _has_letter(text) or max_size <= 0:
+        return False
+    return float(span["size"]) <= max_size * 0.85
+
+
+def _has_later_math(spans: list[dict[str, Any]], index: int) -> bool:
+    """这一截后面，这一行里还有没有公式字形。"""
+
+    for span in spans[index + 1 :]:
+        if str(span.get("text") or "").strip() and _span_is_math(span):
+            return True
+    return False
+
+
+def _text_before_next_math(spans: list[dict[str, Any]], index: int) -> str | None:
+    """从这里到下一个公式字形之间的普通文字。后面没有公式就返回空。"""
+
+    chunks: list[str] = []
+    for span in spans[index:]:
+        if str(span.get("text") or "").strip() and _span_is_math(span):
+            return "".join(chunks)
+        chunks.append(str(span.get("text") or ""))
+    return None
+
+
+def _short_lowercase_gap(text: str) -> bool:
+    """中间这几个字是不是还能算在同一条公式里。
+
+    中文注释：ghost nodes 这种小写短语可以。出现句号，或者 Note 这种大写开头，
+    就是下一句了，不能再吞进公式。
     """
 
-    text = "".join(characters)
-    stripped = text.strip()
-    if len(stripped) < 2:
-        return text
-    if not any(unicodedata.category(character).startswith("L") for character in stripped):
-        return text
-    leading = text[: len(text) - len(text.lstrip())]
-    trailing = text[len(text.rstrip()):]
-    return f"{leading}${stripped}${trailing}"
+    words = text.split()
+    if not words or len(words) > 3:
+        return False
+    if any(mark in text for mark in ".?!"):
+        return False
+    return not any(word[:1].isupper() for word in words)
+
+
+_ACCENT_COMMANDS = {
+    "˜": "tilde",
+    "~": "tilde",
+    "ˆ": "hat",
+    "¯": "bar",
+}
+
+
+def _leading_accent(span: dict[str, Any], spans: list[dict[str, Any]], index: int) -> str | None:
+    """盖在下一个字母上方、字号却一样大的重音，收成 \\tilde 这类写法。"""
+
+    command = _ACCENT_COMMANDS.get(str(span["text"]).strip())
+    if command is None:
+        return None
+    for later in spans[index + 1 :]:
+        if not str(later.get("text") or "").strip():
+            continue
+        if not _span_is_math(later):
+            return None
+        if _span_center_y(span) < _span_center_y(later) - 1.0:
+            return command
+        return None
+    return None
+
+
+def _has_letter(text: str) -> bool:
+    """这段里有没有字母。只有标点的话不当成单词。"""
+
+    return any(unicodedata.category(character).startswith("L") for character in text)
+
+
+def _latex_plain(text: str) -> str:
+    """把抽出来的公式字符换成 LaTeX 里安全的写法。"""
+
+    pieces: list[str] = []
+    for character in text:
+        if character in _LATEX_SYMBOLS:
+            pieces.append(_LATEX_SYMBOLS[character])
+            continue
+        if character in "\\{}_%&#^":
+            pieces.append("\\" + character)
+            continue
+        pieces.append(character)
+    return "".join(pieces)
+
+
+def _emit_inline_math(tokens: list[tuple[str, str]]) -> str:
+    """把主体、下标、上标拼成一对 $。没有上下标的单个字母不套 $。"""
+
+    has_script = any(kind != "base" and kind != "text" for kind, _ in tokens)
+    latex_parts: list[str] = []
+    plain_parts: list[str] = []
+    accent = ""
+    for index, (kind, text) in enumerate(tokens):
+        if kind == "accent":
+            accent = text
+            continue
+        if kind == "sub":
+            latex_parts.append("_{" + _latex_plain(text) + "}")
+            continue
+        if kind == "sup":
+            latex_parts.append("^{" + _latex_plain(text) + "}")
+            continue
+        # 中文注释：主体和下标之间有时会抽到一个空格。空格留在 ^ 或 _ 前面，上下标会对不齐。
+        if kind == "base" and index + 1 < len(tokens) and tokens[index + 1][0] in {"sub", "sup"}:
+            text = text.rstrip()
+        if kind == "text":
+            latex_parts.append(r"\text{" + text.replace("}", r"\}") + "}")
+            plain_parts.append(text)
+            accent = ""
+            continue
+        body = _latex_plain(text)
+        if accent and body.strip():
+            prefix = body[: len(body) - len(body.lstrip())]
+            body = prefix + "\\" + accent + "{" + body.strip() + "}"
+            accent = ""
+        latex_parts.append(body)
+        plain_parts.append(text)
+    latex = "".join(latex_parts)
+    plain = "".join(plain_parts)
+    if not latex.strip():
+        return plain
+    if not has_script:
+        stripped = plain.strip()
+        if len(stripped) < 2 or not _has_letter(stripped):
+            return plain
+    leading = latex[: len(latex) - len(latex.lstrip())]
+    trailing = latex[len(latex.rstrip()) :]
+    return f"{leading}${latex.strip()}${trailing}"
+
+
+_LEADING_SCRIPT = re.compile(r"^\$([_^])\{([^{}]*)\}\$")
+
+
+def _attach_leading_script(previous: str, following: str) -> str | None:
+    """下一行开头的 $_{...}$ 或 $^{...}$ 接进上一行最后一对公式。接不上就返回空。"""
+
+    match = _LEADING_SCRIPT.match(following.lstrip())
+    if match is None:
+        return None
+    formulas = list(re.finditer(r"\$([^$]+)\$", previous))
+    if not formulas:
+        return None
+    last = formulas[-1]
+    inner = last.group(1) + match.group(1) + "{" + match.group(2) + "}"
+    rest = following.lstrip()[match.end() :]
+    merged = previous[: last.start()] + f"${inner}$" + previous[last.end() :]
+    if rest.startswith((",", ".", ";", ":", ")", "]", "}")):
+        return merged.rstrip() + rest
+    if rest:
+        return merged.rstrip() + rest
+    return merged.rstrip()
 
 
 def _collect_formula_regions(
@@ -1417,11 +1821,6 @@ def _collect_formula_regions(
     if not math_lines:
         return []
     all_rects = [entry.rect for entry in page_lines]
-    other_lines = [
-        entry.rect
-        for entry in page_lines
-        if not entry.is_math and len(re.sub(r"\s+", "", entry.text)) >= _MIN_INLINE_NEIGHBOR_CHARS
-    ]
 
     # 第二步：从上到下、从左到右排一遍，再把挨在一起的行并成一块。
     ordered = sorted(math_lines, key=lambda entry: (entry.rect[1], entry.rect[0]))
@@ -1434,15 +1833,26 @@ def _collect_formula_regions(
             continue
         groups.append([entry])
         current_rect = entry.rect
+    # 中文注释：上面是顺着往下扫的，扫到右边另一栏的公式就会把左边这条放下。
+    # 左边公式的尾巴如果排得更低，就会被落成单独一块。这里再把挨在一起的块并回去。
+    groups = _merge_close_groups(groups)
     groups = _merge_bridged_groups(groups, all_rects)
+    # 中文注释：分子分母上下离得开一点，先按"左右重叠、上下不远"再并一次。
+    groups = _merge_stacked_groups(groups)
+    used_lines = {(entry.block_index, entry.line_index) for group in groups for entry in group}
+    absorbed: list[list[_FormulaLine]] = []
+    for group in groups:
+        widened = _absorb_left_companions(group, page_lines, used_lines)
+        absorbed.append(widened)
+    groups = absorbed
+    groups.sort(key=lambda group: (_group_rect(group)[1], _group_rect(group)[0]))
 
     page_area = float(page.rect.width) * float(page.rect.height)
     regions: list[PdfFormulaRegion] = []
     for group in groups:
-        rect = group[0].rect
-        for entry in group[1:]:
-            rect = _union_rect(rect, entry.rect)
-        text = "\n".join(entry.text for entry in group)
+        ordered = sorted(group, key=lambda entry: (round(entry.rect[1], 1), entry.rect[0]))
+        rect = _group_rect(ordered)
+        text = "\n".join(entry.text for entry in ordered)
         # 中文注释：三道闸门，任何一条不过就当"认错了"直接丢掉，宁缺勿滥。
         # 一是区域占了大半页——那是把整段正文认成公式了。
         if page_area > 0 and (rect[2] - rect[0]) * (rect[3] - rect[1]) / page_area > _MAX_REGION_AREA_RATIO:
@@ -1457,7 +1867,17 @@ def _collect_formula_regions(
         # 中文注释：先判断这是不是"自己占一行"的公式，再去扩编号。
         # 顺序不能反——扩编号会把编号那一行圈进矩形里，而编号本身是一段不带数学符号的
         # 短文字，先扩再判的话它就会把公式"认成"夹在句子里的行内公式，白白漏掉转写。
-        is_display = _region_is_display(rect, other_lines)
+        member_keys = {(entry.block_index, entry.line_index) for entry in ordered}
+        # 中文注释：已经收进公式里的字不能再拿来判断"旁边还有句子"。
+        # 否则函数名被收进来之后，又被当成旁边的正文，整条公式就不送去转写了。
+        neighbors = [
+            entry.rect
+            for entry in page_lines
+            if (entry.block_index, entry.line_index) not in member_keys
+            and not entry.is_math
+            and len(re.sub(r"\s+", "", entry.text)) >= _MIN_INLINE_NEIGHBOR_CHARS
+        ]
+        is_display = _region_is_display(rect, neighbors)
 
         # 中文注释：公式编号（形如 (2)）一般单独排在页边，离公式主体有一段距离，
         # 上面的聚合够不着它。这里单独找一次，找到就把截图范围往右扩到编号，
@@ -1479,7 +1899,7 @@ def _collect_formula_regions(
                 is_display=is_display,
                 text=text,
                 number=number,
-                members=[(entry.block_index, entry.line_index) for entry in group],
+                members=[(entry.block_index, entry.line_index) for entry in ordered],
             )
         )
     return regions
@@ -1498,6 +1918,29 @@ def _rects_are_close(
         return False
     horizontal_gap = max(0.0, max(first[0], second[0]) - min(first[2], second[2]))
     return horizontal_gap <= _REGION_HORIZONTAL_GAP
+
+
+def _merge_close_groups(groups: list[list["_FormulaLine"]]) -> list[list["_FormulaLine"]]:
+    """把上下左右都挨着的几块并成一块。
+
+    中文注释：从左到右扫的时候，右边另一条公式可能先被扫到，
+    左边公式更低的那截尾巴就被单独留下。只要两块还挨着，就并回去。
+    """
+
+    changed = True
+    while changed:
+        changed = False
+        for left_index in range(len(groups)):
+            for right_index in range(left_index + 1, len(groups)):
+                if not _rects_are_close(_group_rect(groups[left_index]), _group_rect(groups[right_index])):
+                    continue
+                groups[left_index] = groups[left_index] + groups[right_index]
+                del groups[right_index]
+                changed = True
+                break
+            if changed:
+                break
+    return groups
 
 
 def _merge_bridged_groups(
@@ -1532,6 +1975,91 @@ def _merge_bridged_groups(
     return groups
 
 
+def _merge_stacked_groups(groups: list[list["_FormulaLine"]]) -> list[list["_FormulaLine"]]:
+    """把上下叠着、左右又对得上的几块并成一条公式。
+
+    中文注释：分数的分子和分母经常不在同一行，中间还隔着分数线。
+    只按"挨得很近"去并，它们会变成两条残缺的公式。
+    """
+
+    changed = True
+    while changed:
+        changed = False
+        for left_index in range(len(groups)):
+            for right_index in range(left_index + 1, len(groups)):
+                left_rect = _group_rect(groups[left_index])
+                right_rect = _group_rect(groups[right_index])
+                vertical_gap = max(0.0, max(left_rect[1], right_rect[1]) - min(left_rect[3], right_rect[3]))
+                if vertical_gap > _STACK_VERTICAL_GAP:
+                    continue
+                overlap = min(left_rect[2], right_rect[2]) - max(left_rect[0], right_rect[0])
+                narrower = min(left_rect[2] - left_rect[0], right_rect[2] - right_rect[0])
+                if narrower <= 0 or overlap < narrower * 0.35:
+                    continue
+                if len(groups[left_index]) + len(groups[right_index]) > _MAX_REGION_ROWS:
+                    continue
+                groups[left_index] = groups[left_index] + groups[right_index]
+                del groups[right_index]
+                changed = True
+                break
+            if changed:
+                break
+    return groups
+
+
+def _absorb_left_companions(
+    group: list["_FormulaLine"],
+    page_lines: list["_FormulaLine"],
+    used_lines: set[tuple[int, int]],
+) -> list["_FormulaLine"]:
+    """把公式同一行左边还没被收进来的字补进这块。
+
+    中文注释：有的公式右边是数学符号，左边是普通字体的函数名。
+    只认数学符号的话，截图就只剩尾巴。这里沿着同一行往左收，
+    碰到一整句普通文字或者栏间的大空白就停下。
+    """
+
+    members = list(group)
+    rect = _group_rect(members)
+    changed = True
+    while changed:
+        changed = False
+        for entry in page_lines:
+            key = (entry.block_index, entry.line_index)
+            if key in used_lines:
+                continue
+            overlap = min(rect[3], entry.rect[3]) - max(rect[1], entry.rect[1])
+            shorter = min(rect[3] - rect[1], entry.rect[3] - entry.rect[1])
+            if shorter <= 0 or overlap < shorter * 0.45:
+                continue
+            if entry.rect[0] >= rect[2]:
+                continue
+            gap = rect[0] - entry.rect[2]
+            if gap > _ABSORB_HORIZONTAL_GAP:
+                continue
+            if not entry.is_math and len(entry.text) > 60:
+                continue
+            members.append(entry)
+            used_lines.add(key)
+            rect = _union_rect(rect, entry.rect)
+            changed = True
+    return members
+
+
+def _center_inside_any(
+    line_rect: tuple[float, float, float, float],
+    regions: list[tuple[float, float, float, float]],
+) -> bool:
+    """这一行的中心是不是落在某条独立公式的框里。"""
+
+    center_x = (line_rect[0] + line_rect[2]) / 2
+    center_y = (line_rect[1] + line_rect[3]) / 2
+    for rect in regions:
+        if rect[0] <= center_x <= rect[2] and rect[1] <= center_y <= rect[3]:
+            return True
+    return False
+
+
 def _group_rect(group: list["_FormulaLine"]) -> tuple[float, float, float, float]:
     """一组行的整体外框。"""
 
@@ -1555,6 +2083,9 @@ def _same_line_bridged(
     overlap = min(first[3], second[3]) - max(first[1], second[1])
     shorter = min(first[3] - first[1], second[3] - second[1])
     if shorter <= 0 or overlap < shorter * 0.5:
+        return False
+    left, right = (first, second) if first[0] <= second[0] else (second, first)
+    if right[0] - left[2] > _BRIDGE_MAX_GAP:
         return False
     return _gap_contains_text(first, second, all_rects)
 
@@ -1709,6 +2240,64 @@ def _covered_by_table(
         if overlap_width * overlap_height / area >= 0.5:
             return index
     return None
+
+
+def _drop_repeated_margin_blocks(page_blocks: list[list[PageBlock]]) -> list[list[PageBlock]]:
+    """拿掉每一页开头、结尾反复出现的那一行。
+
+    中文注释：期刊名、页码会印在每一页的顶上或底下。只看每页第一块和最后一块，
+    同一句话出现了至少三次，就把它拿掉。公式、表格、图不动。
+    """
+
+    if len(page_blocks) < 3:
+        return page_blocks
+
+    def edge_key(blocks: list[PageBlock], *, first: bool) -> str:
+        ordered = blocks if first else list(reversed(blocks))
+        for block in ordered:
+            if block.kind in {"display_formula", "inline_formula", "table", "figure"}:
+                return ""
+            line = next((item.strip() for item in block.text.splitlines() if item.strip()), "")
+            if not line or line.startswith(("$$", "|", "![")):
+                return ""
+            return _compact_line(line)
+        return ""
+
+    first_keys = [edge_key(blocks, first=True) for blocks in page_blocks]
+    last_keys = [edge_key(blocks, first=False) for blocks in page_blocks]
+    pool = [*first_keys, *last_keys]
+    repeated = {key for key in pool if key and pool.count(key) >= 3}
+    if not repeated:
+        return page_blocks
+    cleaned: list[list[PageBlock]] = []
+    for blocks, first_key, last_key in zip(page_blocks, first_keys, last_keys, strict=True):
+        result = list(blocks)
+        if result and first_key in repeated:
+            result = result[1:]
+        if result and last_key in repeated and not (first_key in repeated and len(blocks) == 1):
+            result = result[:-1]
+        cleaned.append(result)
+    return cleaned
+
+
+_REFERENCES_HEADING = re.compile(r"(?i)^\s*(references|bibliography|参考文献)\s*$")
+
+
+def _drop_reference_blocks(page_blocks: list[list[PageBlock]]) -> list[list[PageBlock]]:
+    """从后半篇里找到"参考文献"标题，把它和后面的块都丢掉。"""
+
+    if not page_blocks:
+        return page_blocks
+    start_page = max(0, len(page_blocks) // 2)
+    for page_index in range(start_page, len(page_blocks)):
+        for block_index, block in enumerate(page_blocks[page_index]):
+            if block.kind in {"display_formula", "inline_formula", "table", "figure"}:
+                continue
+            first_line = next((line.strip() for line in block.text.splitlines() if line.strip()), "")
+            if _REFERENCES_HEADING.match(first_line):
+                kept = page_blocks[page_index][:block_index]
+                return [*page_blocks[:page_index], kept]
+    return page_blocks
 
 
 def _remove_repeated_headers_and_footers(pages: list[str]) -> list[str]:

@@ -237,6 +237,9 @@ async def _run_deep_read_impl(*, paper_id: str, focus: str, force: bool, deps: D
     payload: JsonObject | None = None
     chunks: list[Any] | None = None
     assets_dir: Path | None = None
+    # 中文注释：刚转出来的论文带着页面块。插图清单从这些块来。
+    # 复用已经切好的正文时没有块，插图清单改从正文开头记下的那份来。
+    layout_blocks: list[Any] | None = None
 
     reused = await asyncio.to_thread(_load_existing_slices, doc, read_cfg.paper_cache_dir)
     if reused is not None:
@@ -287,7 +290,12 @@ async def _run_deep_read_impl(*, paper_id: str, focus: str, force: bool, deps: D
             if conversion.markdown_path is not None:
                 _check_cancellation(deps)
                 deps.reporter.progress("正在切分全文", stage=DEEP_READ_STAGE, event_key=deps.event_key)
-                chunk_result = await async_build_chunks_file(doc, markdown_path=conversion.markdown_path)
+                layout_blocks = conversion.blocks
+                chunk_result = await async_build_chunks_file(
+                    doc,
+                    markdown_path=conversion.markdown_path,
+                    blocks=layout_blocks,
+                )
                 if chunk_result.chunks:
                     markdown_text = await asyncio.to_thread(
                         conversion.markdown_path.read_text, encoding="utf-8"
@@ -328,7 +336,7 @@ async def _run_deep_read_impl(*, paper_id: str, focus: str, force: bool, deps: D
         # 限制，也不会被"每段笔记最多 500 字"那条上限压掉。
         _check_cancellation(deps)
         figure_notes, figure_input, figure_output = await read_figure_notes(
-            figures=collect_paper_figures(markdown_text, assets_dir),
+            figures=collect_paper_figures(markdown_text, assets_dir, blocks=layout_blocks),
             focus=focus,
             llm=deps.llm,
             on_progress=lambda message: deps.reporter.progress(

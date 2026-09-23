@@ -13,12 +13,12 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 import re
 from pathlib import Path
 from typing import Any, Callable
 
+from src.llm.base import vision_image_block
 from src.utils.llm_json import parse_llm_json
 from src.utils.read_utils.pdf_parsers import PdfFormulaRegion
 
@@ -77,6 +77,7 @@ async def transcribe_formula_regions(
     llm: Any | None,
     on_progress: Callable[[str], None] | None = None,
     raise_if_cancelled: Callable[[], None] | None = None,
+    blocks: list[Any] | None = None,
 ) -> tuple[str, int, int]:
     """把正文里的公式占位符换成真 LaTeX，返回 (换好的正文, 输入 token, 输出 token)。
 
@@ -113,10 +114,9 @@ async def transcribe_formula_regions(
         # 中文注释：转写成功的用 LaTeX，没成功的用兜底。两个都写成"$$ 独占一行"的样子，
         # 这样切分那一步的公式保护逻辑（靠成对的 $$ 判断）才认得出来。
         latex = replacements.get(region.placeholder)
-        if latex:
-            markdown_text = markdown_text.replace(region.placeholder, f"$$\n{latex}\n$$")
-        else:
-            markdown_text = markdown_text.replace(region.placeholder, region.fallback)
+        replacement = f"$$\n{latex}\n$$" if latex else region.fallback
+        markdown_text = markdown_text.replace(region.placeholder, replacement)
+        _replace_in_blocks(blocks, region.placeholder, replacement)
     return markdown_text, total_input, total_output
 
 
@@ -220,7 +220,7 @@ async def _transcribe_one(
 
     try:
         response = await llm.provider.chat(
-            _build_messages(batch, crops), temperature=0, max_tokens=FORMULA_OCR_MAX_TOKENS
+            _build_messages(batch, crops, llm), temperature=0, max_tokens=FORMULA_OCR_MAX_TOKENS
         )
     except Exception as exc:
         logger.warning("公式转写请求异常，这一批退回展平文本", extra={"reason": str(exc)})
@@ -271,15 +271,21 @@ async def _transcribe_one(
     return outcome, usage[0], usage[1]
 
 
-def _build_messages(
-    batch: list[PdfFormulaRegion], crops: dict[str, bytes]
-) -> list[dict[str, Any]]:
-    """拼出这一次请求的消息。
+def _replace_in_blocks(blocks: list[Any] | None, placeholder: str, replacement: str) -> None:
+    """占位符换成成品时，块上的文字一起换，分片才不会留下记号。"""
 
-    中文注释：图片用的是 Anthropic 那套原生格式（{"type": "image", ...}），
-    项目里发消息那条链路对它是原样透传的。不要写成 OpenAI 的 image_url，
-    项目里没有做那种格式的转换，写了模型收不到图。
-    """
+    if not blocks:
+        return
+    for block in blocks:
+        text = getattr(block, "text", "")
+        if placeholder in text:
+            block.text = text.replace(placeholder, replacement)
+
+
+def _build_messages(
+    batch: list[PdfFormulaRegion], crops: dict[str, bytes], llm: Any
+) -> list[dict[str, Any]]:
+    """拼出这一次请求的消息。图片格式按模型实际走的接口来，OpenAI 兼容接口认 image_url。"""
 
     content: list[dict[str, Any]] = []
     for position, region in enumerate(batch, start=1):
@@ -287,16 +293,7 @@ def _build_messages(
         if region.number:
             label += f"，论文里编号是 ({region.number})"
         content.append({"type": "text", "text": f"{label}："})
-        content.append(
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/png",
-                    "data": base64.b64encode(crops[region.placeholder]).decode("ascii"),
-                },
-            }
-        )
+        content.append(vision_image_block(llm, crops[region.placeholder]))
     content.append(
         {
             "type": "text",
