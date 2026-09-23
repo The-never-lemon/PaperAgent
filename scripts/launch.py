@@ -259,50 +259,182 @@ def nougat_ready() -> bool:
     return result.returncode == 0
 
 
-def ensure_nougat_env() -> int:
-    """没有 Nougat 环境时用阿里云装一份。装好了就直接返回。"""
+def _nougat_weight_dir() -> Path:
+    """权重放在仓库里的这个目录。不提交，第一次启动时再下载。"""
 
-    if nougat_ready():
+    return _NOUGAT_DIR / "weights"
+
+
+def _cached_nougat_weight_dir() -> Path:
+    """以前下到用户缓存里的那份。仓库里还没有时，可以先从这里拷过来。"""
+
+    torch_home = (os.environ.get("TORCH_HOME") or "").strip()
+    base = Path(torch_home) if torch_home else Path.home() / ".cache" / "torch"
+    return base / "hub" / "nougat-0.1.0-small"
+
+
+# 中文注释：主文件大约 1GB。太小说明上次下到一半，不能当成已经有了。
+_NOUGAT_WEIGHTS = {
+    "config.json": 100,
+    "pytorch_model.bin": 900_000_000,
+    "special_tokens_map.json": 20,
+    "tokenizer.json": 100_000,
+    "tokenizer_config.json": 20,
+}
+_NOUGAT_WEIGHT_URLS = [
+    "https://github.com/facebookresearch/nougat/releases/download/0.1.0-small/{name}",
+    "https://huggingface.co/facebook/nougat-small/resolve/main/{name}",
+]
+
+
+def nougat_weights_ready() -> bool:
+    """五个权重文件都在，并且主文件不是半截的，才算下完。"""
+
+    folder = _nougat_weight_dir()
+    for name, minimum in _NOUGAT_WEIGHTS.items():
+        path = folder / name
+        if not path.is_file() or path.stat().st_size < minimum:
+            return False
+    return True
+
+
+def _copy_cached_weights() -> bool:
+    """仓库里还没有权重时，如果用户缓存里已经有完整的一份，就拷过来。"""
+
+    source = _cached_nougat_weight_dir()
+    target = _nougat_weight_dir()
+    if not source.is_dir():
+        return False
+    target.mkdir(parents=True, exist_ok=True)
+    copied = False
+    for name, minimum in _NOUGAT_WEIGHTS.items():
+        src = source / name
+        dest = target / name
+        if dest.is_file() and dest.stat().st_size >= minimum:
+            continue
+        if not src.is_file() or src.stat().st_size < minimum:
+            return False
+        shutil.copyfile(src, dest)
+        copied = True
+    return copied
+
+
+def _download_file(url: str, dest: Path) -> None:
+    """把一个文件下到临时名字，下完再换过去，避免留下半截文件。"""
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    partial = dest.with_name(dest.name + ".part")
+    request = urllib.request.Request(url, headers={"User-Agent": "paper-agent"})
+    with urllib.request.urlopen(request, timeout=60) as response, partial.open("wb") as handle:
+        total = int(response.headers.get("Content-Length") or 0)
+        got = 0
+        last_report = 0
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            handle.write(chunk)
+            got += len(chunk)
+            if got - last_report >= 50 * 1024 * 1024:
+                if total:
+                    print(f"    {dest.name}  {got // (1024 * 1024)} / {total // (1024 * 1024)} MB")
+                else:
+                    print(f"    {dest.name}  {got // (1024 * 1024)} MB")
+                last_report = got
+    if not partial.is_file() or partial.stat().st_size < _NOUGAT_WEIGHTS.get(dest.name, 1):
+        partial.unlink(missing_ok=True)
+        raise RuntimeError(f"{dest.name} 没有下完整")
+    partial.replace(dest)
+
+
+def ensure_nougat_weights() -> int:
+    """缺权重就下载到仓库目录。已经齐了就什么都不做，也不提交这些文件。"""
+
+    if nougat_weights_ready():
         return 0
-    if os.name != "nt":
-        print("  [!] 自动准备 Nougat 目前只支持 Windows。全文阅读需要先手动装好 tools/nougat_trial。")
-        return 1
+    copied = _copy_cached_weights()
+    if copied and nougat_weights_ready():
+        print("  已把本机缓存里的 Nougat 权重放到项目目录。")
+        return 0
     print()
     print("=" * 62)
-    print("  正在准备全文阅读环境（Nougat）。")
-    print("  其中显卡版 PyTorch 大约 2.6GB，从阿里云下载，请不要关闭窗口。")
+    print("  正在下载 Nougat 模型权重（大约 1GB）。")
+    print("  文件放在 tools/nougat_trial/weights，下完之前请不要关闭窗口。")
     print("=" * 62)
     print()
-    uv = _uv_executable()
-    python = _nougat_python()
-    steps = [
-        [uv, "venv", "--python", "3.12", str(_NOUGAT_DIR / ".venv")],
-        [
-            uv, "pip", "install", "--python", str(python),
-            "--index-url", _ALIYUN_INDEX,
-            "nougat-ocr==0.1.17",
-            "transformers==4.38.2",
-            "albumentations==1.4.24",
-            "pypdfium2==4.30.0",
-            "requests",
-        ],
-        [
-            uv, "pip", "install", "--python", str(python),
-            "--index-url", _ALIYUN_INDEX,
-            _TORCH_WHEEL,
-            _TORCHVISION_WHEEL,
-        ],
-    ]
-    for command in steps:
-        result = subprocess.run(command, cwd=ROOT)
-        if result.returncode != 0:
-            print("  [!] Nougat 环境没有装完。全文阅读会失败，请看上面的报错。")
-            return result.returncode
-    if not nougat_ready():
-        print("  [!] Nougat 装完后仍然导入失败。")
+    folder = _nougat_weight_dir()
+    for name, minimum in _NOUGAT_WEIGHTS.items():
+        dest = folder / name
+        if dest.is_file() and dest.stat().st_size >= minimum:
+            continue
+        last_error = ""
+        for pattern in _NOUGAT_WEIGHT_URLS:
+            url = pattern.format(name=name)
+            print(f"  下载 {name}")
+            try:
+                _download_file(url, dest)
+                last_error = ""
+                break
+            except Exception as exc:
+                last_error = str(exc)
+                print(f"    这个地址失败：{last_error}")
+        if not dest.is_file() or dest.stat().st_size < minimum:
+            print(f"  [!] {name} 没有下完。{last_error}")
+            return 1
+    if not nougat_weights_ready():
+        print("  [!] 权重文件不完整。")
         return 1
-    print("  Nougat 环境已就绪。")
+    print("  Nougat 权重已就绪。")
     return 0
+
+
+def ensure_nougat_env() -> int:
+    """没有 Nougat 环境时用阿里云装一份，并确认权重也在。都齐了就直接返回。"""
+
+    packages_ok = nougat_ready()
+    weights_ok = nougat_weights_ready()
+    if packages_ok and weights_ok:
+        return 0
+    if not packages_ok:
+        if os.name != "nt":
+            print("  [!] 自动准备 Nougat 目前只支持 Windows。全文阅读需要先手动装好 tools/nougat_trial。")
+            return 1
+        print()
+        print("=" * 62)
+        print("  正在准备全文阅读环境（Nougat）。")
+        print("  其中显卡版 PyTorch 大约 2.6GB，从阿里云下载，请不要关闭窗口。")
+        print("=" * 62)
+        print()
+        uv = _uv_executable()
+        python = _nougat_python()
+        steps = [
+            [uv, "venv", "--python", "3.12", str(_NOUGAT_DIR / ".venv")],
+            [
+                uv, "pip", "install", "--python", str(python),
+                "--index-url", _ALIYUN_INDEX,
+                "nougat-ocr==0.1.17",
+                "transformers==4.38.2",
+                "albumentations==1.4.24",
+                "pypdfium2==4.30.0",
+                "requests",
+            ],
+            [
+                uv, "pip", "install", "--python", str(python),
+                "--index-url", _ALIYUN_INDEX,
+                _TORCH_WHEEL,
+                _TORCHVISION_WHEEL,
+            ],
+        ]
+        for command in steps:
+            result = subprocess.run(command, cwd=ROOT)
+            if result.returncode != 0:
+                print("  [!] Nougat 环境没有装完。全文阅读会失败，请看上面的报错。")
+                return result.returncode
+        if not nougat_ready():
+            print("  [!] Nougat 装完后仍然导入失败。")
+            return 1
+        print("  Nougat 环境已就绪。")
+    return ensure_nougat_weights()
 
 
 def open_browser_when_ready(port: int, first_run: bool) -> None:

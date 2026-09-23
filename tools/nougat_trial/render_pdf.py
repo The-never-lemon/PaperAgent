@@ -40,7 +40,8 @@ def main() -> None:
 def render_pdf(pdf_path: Path) -> str:
     """把每一页交给 Nougat，拼成一份带页码的 Markdown。"""
 
-    checkpoint = get_checkpoint(None, model_tag="0.1.0-small")
+    # 中文注释：权重放在脚本旁边的 weights 目录，由 start.bat 第一次启动时下载，不提交。
+    checkpoint = get_checkpoint(Path(__file__).resolve().parent / "weights", model_tag="0.1.0-small")
     model = NougatModel.from_pretrained(checkpoint)
     use_gpu = torch.cuda.is_available()
     model = move_to_device(model, bf16=use_gpu, cuda=use_gpu)
