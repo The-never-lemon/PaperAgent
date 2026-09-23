@@ -223,6 +223,17 @@ npm run front:install
 
 如果你已经有可用的 Python 3.12 虚拟环境，也可以直接执行 `uv sync` 和 `npm run front:install`。
 
+全文阅读还要一个单独的 Nougat 环境（不要装进上面这个主环境）。双击 `start.bat` 时会自动装。
+想手动准备的话，在项目根目录执行：
+
+```powershell
+uv venv --python 3.12 tools/nougat_trial/.venv
+uv pip install --python tools/nougat_trial/.venv/Scripts/python.exe --index-url https://mirrors.aliyun.com/pypi/simple/ nougat-ocr==0.1.17 transformers==4.38.2 albumentations==1.4.24 pypdfium2==4.30.0 requests
+uv pip install --python tools/nougat_trial/.venv/Scripts/python.exe --index-url https://mirrors.aliyun.com/pypi/simple/ "https://mirrors.aliyun.com/pytorch-wheels/cu128/torch-2.11.0%2Bcu128-cp312-cp312-win_amd64.whl" "https://mirrors.aliyun.com/pytorch-wheels/cu128/torchvision-0.26.0%2Bcu128-cp312-cp312-win_amd64.whl"
+```
+
+最后一条里的 PyTorch 大约 2.6GB。不要改成 `uv sync --project tools/nougat_trial`，那个目录里的 CUDA 地址不是 uv 能解析的软件源。
+
 ### 2. 创建本地模型配置
 
 推荐通过 Web 工作台的「系统配置」页面修改和测试配置。也可以手动拷贝 `config/model.example.json` 为 `config/model.json`，至少确认：
@@ -344,7 +355,7 @@ PDF 正文由本机的 Nougat 按页写成 Markdown。它读的是整页，公�
 
 插图不交给 Nougat。仍用原来的办法在页面上找图、配图注、截到 `assets/`，再把 `![图注](assets/...)` 接到对应页的末尾。精读时的插图解读也不变。
 
-Nougat 装在 `tools/nougat_trial` 这个单独环境里，主程序用子进程调用。环境或权重不在时，这次转换直接失败，不再退回按字形抽正文。
+Nougat 装在 `tools/nougat_trial` 这个单独环境里。`start.bat` 启动时如果还没有这份环境，会从阿里云装上。主程序用子进程调用。环境或权重不在时，这次转换直接失败，不再退回按字形抽正文。
 
 分片顺着这些块的阅读顺序装箱，片段之间不重叠：
 

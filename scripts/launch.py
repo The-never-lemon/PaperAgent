@@ -207,6 +207,104 @@ def announce_first_run() -> None:
     print()
 
 
+# 中文注释：Nougat 和主程序不能装在同一个环境里，它要的旧版依赖会把现有的包拽乱。
+# 显卡版 PyTorch 也不在普通软件源里，所以这里按已经试通过的阿里云地址直接装。
+_NOUGAT_DIR = ROOT / "tools" / "nougat_trial"
+_ALIYUN_INDEX = "https://mirrors.aliyun.com/pypi/simple/"
+_TORCH_WHEEL = (
+    "https://mirrors.aliyun.com/pytorch-wheels/cu128/"
+    "torch-2.11.0%2Bcu128-cp312-cp312-win_amd64.whl"
+)
+_TORCHVISION_WHEEL = (
+    "https://mirrors.aliyun.com/pytorch-wheels/cu128/"
+    "torchvision-0.26.0%2Bcu128-cp312-cp312-win_amd64.whl"
+)
+
+
+def _nougat_python() -> Path:
+    """试验环境里的 Python。Windows 和其它系统的目录不一样。"""
+
+    folder = "Scripts" if os.name == "nt" else "bin"
+    name = "python.exe" if os.name == "nt" else "python"
+    return _NOUGAT_DIR / ".venv" / folder / name
+
+
+def _uv_executable() -> str:
+    """找 uv：启动脚本传进来的优先，其次是项目自带的，再看系统里有没有。"""
+
+    configured = (os.environ.get("UV") or "").strip().strip('"')
+    if configured and Path(configured).is_file():
+        return configured
+    bundled = ROOT / "tools" / "uv.exe"
+    if bundled.is_file():
+        return str(bundled)
+    return shutil.which("uv") or "uv"
+
+
+def nougat_ready() -> bool:
+    """已经装好、而且是 Nougat 能用的那几版依赖时，返回真。"""
+
+    python = _nougat_python()
+    if not python.is_file():
+        return False
+    # 中文注释：pypdfium2 太新、transformers 太新，Nougat 会在导入时直接失败。
+    # 显卡版 PyTorch 的版本号里带 +cu，普通源上的 CPU 包没有这段。
+    check = (
+        "import importlib.metadata as meta, nougat, torch; "
+        "assert meta.version('pypdfium2').startswith('4.'); "
+        "assert meta.version('transformers').startswith('4.38.'); "
+        "assert '+cu' in torch.__version__"
+    )
+    result = subprocess.run([str(python), "-c", check], capture_output=True, text=True)
+    return result.returncode == 0
+
+
+def ensure_nougat_env() -> int:
+    """没有 Nougat 环境时用阿里云装一份。装好了就直接返回。"""
+
+    if nougat_ready():
+        return 0
+    if os.name != "nt":
+        print("  [!] 自动准备 Nougat 目前只支持 Windows。全文阅读需要先手动装好 tools/nougat_trial。")
+        return 1
+    print()
+    print("=" * 62)
+    print("  正在准备全文阅读环境（Nougat）。")
+    print("  其中显卡版 PyTorch 大约 2.6GB，从阿里云下载，请不要关闭窗口。")
+    print("=" * 62)
+    print()
+    uv = _uv_executable()
+    python = _nougat_python()
+    steps = [
+        [uv, "venv", "--python", "3.12", str(_NOUGAT_DIR / ".venv")],
+        [
+            uv, "pip", "install", "--python", str(python),
+            "--index-url", _ALIYUN_INDEX,
+            "nougat-ocr==0.1.17",
+            "transformers==4.38.2",
+            "albumentations==1.4.24",
+            "pypdfium2==4.30.0",
+            "requests",
+        ],
+        [
+            uv, "pip", "install", "--python", str(python),
+            "--index-url", _ALIYUN_INDEX,
+            _TORCH_WHEEL,
+            _TORCHVISION_WHEEL,
+        ],
+    ]
+    for command in steps:
+        result = subprocess.run(command, cwd=ROOT)
+        if result.returncode != 0:
+            print("  [!] Nougat 环境没有装完。全文阅读会失败，请看上面的报错。")
+            return result.returncode
+    if not nougat_ready():
+        print("  [!] Nougat 装完后仍然导入失败。")
+        return 1
+    print("  Nougat 环境已就绪。")
+    return 0
+
+
 def open_browser_when_ready(port: int, first_run: bool) -> None:
     """在后台等端口真正就绪后再打开浏览器。
 
@@ -556,6 +654,11 @@ def main() -> int:
 
     if first_run:
         announce_first_run()
+
+    # 中文注释：全文阅读用的 Nougat 不在主程序的依赖里。没装过就在这里装上，
+    # 已经能导入就跳过，避免每次启动都重新下载那份很大的显卡版 PyTorch。
+    if ensure_nougat_env() != 0:
+        return 1
 
     print()
     print("=" * 62)

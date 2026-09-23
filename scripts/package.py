@@ -41,6 +41,8 @@ INCLUDE_FILES = [
     "config/system.yaml",
     "config/model.example.json",
     "scripts/launch.py",
+    "tools/nougat_trial/pyproject.toml",
+    "tools/nougat_trial/render_pdf.py",
 ]
 
 # 要递归放进包里的目录。

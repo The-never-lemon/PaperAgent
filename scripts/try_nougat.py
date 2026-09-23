@@ -6,10 +6,10 @@
 用法（在仓库根目录）：
     uv run python scripts/try_nougat.py
 
-环境还没建时，先在仓库根目录执行：
-    uv sync --project tools/nougat_trial
+环境由 start.bat 在启动时准备。还没有时，先在仓库根目录执行启动器里的同一套安装，
+不要用 uv sync：阿里云的 CUDA 目录不是 uv 能解析的软件源。
 
-第一次会下载模型权重。结果写在 data/nougat_trial/，不改精读用的公式转写。
+第一次运行 Nougat 会下载模型权重。结果写在 data/nougat_trial/。
 """
 
 from __future__ import annotations
@@ -44,8 +44,8 @@ def main() -> int:
     """跑完两篇试读，并把认出来的公式打在屏幕上。"""
 
     if not NOUGAT.exists():
-        print("还没有 Nougat 环境。请先在仓库根目录执行：")
-        print("    uv sync --project tools/nougat_trial")
+        print("还没有 Nougat 环境。请先双击 start.bat，或在仓库根目录执行：")
+        print("    uv run python scripts/launch.py")
         return 1
     OUT_ROOT.mkdir(parents=True, exist_ok=True)
     failed = False
