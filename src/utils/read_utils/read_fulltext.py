@@ -3,21 +3,22 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+import os
 import re
+import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urljoin, urlparse
 
-from src.llm.config import SystemConfig
 from src.paper_retrieval.models import PaperDocument
 # 中文注释：引入项目统一的日志工具。正文质量闸拦下坏内容时记一条日志，
 # 排查问题时能看到"哪一篇论文的全文被判为不合格、原因是什么"。
 from src.utils import get_logger
-from src.utils.read_utils.formula_ocr import transcribe_formula_regions
-from src.utils.read_utils.pdf_parsers import PageBlock, PdfFormulaRegion, PdfTableRegion, get_pdf_parser
-from src.utils.read_utils.table_ocr import transcribe_table_regions
+from src.utils.read_utils.chunkers import blocks_from_markdown
+from src.utils.read_utils.pdf_parsers import PageBlock, collect_pdf_figures
 
 
 logger = get_logger(__name__)
@@ -39,7 +40,9 @@ _UNSUPPORTED_FULLTEXT_WARNING = "暂不支持该全文文件格式"
 # 旧缓存是先揉成一篇长文再切的，公式经常被切碎，必须作废重转。
 # 7 -> 8：行内公式按字号和高低收成上下标；TABLE I 这种罗马数字表注改走表格截图。
 # 旧缓存里还是 $WQ$ 和竖着排的一列数字，必须作废重转。
-CONVERTER_VERSION = 8
+# 8 -> 9：正文整页改由 Nougat 写成 Markdown，不再把公式和表格截图交给精读模型。
+# 旧缓存是按字形抽的，必须作废重转。
+CONVERTER_VERSION = 9
 
 # 中文注释：正文质量闸的两个阈值——
 # 1) 转换出来的正文（去掉首尾空白后）不足 3000 字符，就认为"不是正文"：
@@ -60,8 +63,8 @@ class MarkdownConversion:
     # 这里记下目录位置，方便上层需要时找到图片文件。目录里没有写出任何图片时是空的。
     assets_dir: Path | None = None
     warnings: list[str] = field(default_factory=list)
-    # 中文注释：公式转写用掉的 token 数。上层要把它并进整篇精读的用量里一起上报，
-    # 不然后台看到的用量会比真实花的少。没开公式识别、或者一篇论文没有公式时都是 0。
+    # 中文注释：公式转写不再走精读模型，这里的 token 数保持 0。
+    # 插图解读在后面另算。
     input_tokens: int = 0
     output_tokens: int = 0
     # 中文注释：这次转换用的块。分片和插图清单都从这里来。
@@ -71,21 +74,14 @@ class MarkdownConversion:
 
 @dataclass(slots=True)
 class _PdfMarkdownDraft:
-    """PDF 刚解析完、但还没写进文件的 Markdown 草稿。
+    """PDF 刚转完、但还没写进文件的 Markdown。
 
-    中文注释：为什么不解析完就直接写文件——公式还要交给模型转写，而转写是异步的、
-    可能失败、也可能被用户中途取消。要是这时候就把带占位符的半成品写下去，
-    下次再读会命中这份残次品（缓存只比对版本号，不看内容），公式就永远换不回来了。
-    所以写文件统一放到最后一步，中途出任何意外磁盘上都干干净净。
+    中文注释：写文件统一放到最后一步。Nougat 中途失败时磁盘上不会留下半份正文。
     """
 
     markdown: str = ""
     page_count: int | None = None
-    # 中文注释：这一篇认出来的公式，连位置一起带着，转写那一步要用。
-    formulas: list[PdfFormulaRegion] = field(default_factory=list)
     blocks: list[PageBlock] = field(default_factory=list)
-    # 中文注释：有图注的表格，同样要交给模型重排表头。
-    tables: list[PdfTableRegion] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -103,10 +99,9 @@ async def async_convert_fulltext_to_markdown(
 ) -> MarkdownConversion:
     """异步全文转换入口，供后续 async 阅读流程直接调用。
 
-    中文注释：llm 是"用来把公式截图转成 LaTeX"的模型，可以不给——不给就跳过公式识别，
-    公式退回原来的展平写法。on_progress 用来在转写过程中报进度，
-    raise_if_cancelled 用来让长时间转写能中途停下。三个都是可选的，
-    不传调用方的行为和以前完全一样。
+    中文注释：PDF 正文由本机的 Nougat 按页写成，不再把公式和表格截图交给 llm。
+    llm 仍由调用方传来，留给后面的插图解读。on_progress 用来报进度，
+    raise_if_cancelled 用来让长时间转写能中途停下。
     """
 
     markdown_path = _markdown_output_path(source_path)
@@ -118,44 +113,16 @@ async def async_convert_fulltext_to_markdown(
 
     suffix = source_path.suffix.lower()
     if suffix == ".pdf":
-        # 中文注释：PDF 这一步分三段走，顺序不能变——
-        # ① 先解析成草稿（同步、重活、丢线程跑），这一步不写文件；
-        # ② 再把公式截图交给模型转写（异步）；
-        # ③ 最后才质量检查 + 写文件。
-        # 这样中途取消或转写崩溃，磁盘上不会留下一份"带着占位符的 paper.md"。
-        draft = await asyncio.to_thread(_parse_pdf_markdown, paper, source_path, source_url, markdown_path)
+        # 中文注释：先让 Nougat 把每一页写成文字，再把旧办法截好的插图接到对应页末尾。
+        # 写文件放在最后，中途失败不会留下半份 paper.md。
+        if raise_if_cancelled is not None:
+            raise_if_cancelled()
+        if on_progress is not None:
+            on_progress("正在用 Nougat 识别论文页面")
+        draft = await asyncio.to_thread(_nougat_pdf_markdown, paper, source_path, source_url, markdown_path)
         if draft.warnings:
             return MarkdownConversion(warnings=draft.warnings)
-        markdown_text, input_tokens, output_tokens = await transcribe_formula_regions(
-            pdf_path=source_path,
-            regions=draft.formulas,
-            markdown_text=draft.markdown,
-            blocks=draft.blocks,
-            # 中文注释：开关关掉时传空值进去，转写那一步就不调模型，
-            # 但占位符照样会被换成展平的兜底内容，正文不会留下记号。
-            llm=llm if _formula_ocr_enabled() else None,
-            on_progress=on_progress,
-            raise_if_cancelled=raise_if_cancelled,
-        )
-        # 中文注释：公式换完之后再重排表格。两步都要改写正文，串着做最省事——
-        # 各改各的占位符，互不干扰。
-        markdown_text, table_input, table_output = await transcribe_table_regions(
-            pdf_path=source_path,
-            regions=draft.tables,
-            markdown_text=markdown_text,
-            blocks=draft.blocks,
-            llm=llm,
-            on_progress=on_progress,
-            raise_if_cancelled=raise_if_cancelled,
-        )
-        return await asyncio.to_thread(
-            _finalize_markdown,
-            draft,
-            markdown_text,
-            markdown_path,
-            input_tokens + table_input,
-            output_tokens + table_output,
-        )
+        return await asyncio.to_thread(_finalize_markdown, draft, draft.markdown, markdown_path, 0, 0)
     if suffix in {".html", ".htm"}:
         # 中文注释：HTML 读取、正文提取、Markdown 落盘同样都是阻塞型本地操作。
         # 处理方式和 PDF 保持一致，边界清楚，后面接异步阅读流程会更稳。
@@ -163,17 +130,95 @@ async def async_convert_fulltext_to_markdown(
     return MarkdownConversion(warnings=[_UNSUPPORTED_FULLTEXT_WARNING])
 
 
-def _formula_ocr_enabled() -> bool:
-    """看配置里"公式识别"这个开关开没开。
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_NOUGAT_PYTHON = _REPO_ROOT / "tools" / "nougat_trial" / ".venv" / "Scripts" / "python.exe"
+_NOUGAT_SCRIPT = _REPO_ROOT / "tools" / "nougat_trial" / "render_pdf.py"
 
-    中文注释：读配置本身出了意外时按"开"处理——这个开关的默认值是开，
-    因为读不到配置就说"关"会让所有论文悄悄退回旧行为，反而更难发现。
-    """
 
-    try:
-        return SystemConfig.load().read.formula_ocr
-    except Exception:
-        return True
+def _nougat_pdf_markdown(
+    paper: PaperDocument, source_path: Path, source_url: str | None, markdown_path: Path
+) -> _PdfMarkdownDraft:
+    """用 Nougat 写出正文，再把插图接到每一页的末尾。"""
+
+    page_text, reason = _run_nougat(source_path)
+    if reason:
+        return _PdfMarkdownDraft(warnings=[reason])
+    assets_dir = markdown_path.parent / "assets"
+    figures = collect_pdf_figures(source_path, assets_dir)
+    by_page: dict[int, list[dict[str, Any]]] = {}
+    for figure in figures:
+        by_page.setdefault(int(figure["page_number"]), []).append(figure)
+    parts: list[str] = []
+    for index, text in enumerate(page_text, start=1):
+        extras = [str(figure["markdown"]) for figure in by_page.get(index, [])]
+        page_body = text.strip()
+        if extras:
+            page_body = (page_body + "\n\n" + "\n\n".join(extras)).strip()
+        parts.append(f"<!-- page: {index} -->\n\n{page_body}".rstrip())
+    body = "\n\n".join(parts).strip()
+    blocks = _with_figure_files(blocks_from_markdown(body))
+    header = _markdown_header(paper, source_url, len(page_text), _figure_records(blocks))
+    return _PdfMarkdownDraft(
+        markdown=header + "\n" + body + "\n",
+        page_count=len(page_text),
+        blocks=blocks,
+    )
+
+
+def _run_nougat(pdf_path: Path) -> tuple[list[str], str]:
+    """调用试验环境里的 Nougat。失败时返回原因，不再退回旧的抽字。"""
+
+    if not _NOUGAT_PYTHON.exists() or not _NOUGAT_SCRIPT.exists():
+        return [], "没有找到 Nougat 环境，正文无法转换。请先装好 tools/nougat_trial。"
+    with tempfile.TemporaryDirectory() as temporary:
+        output = Path(temporary) / "pages.md"
+        completed = subprocess.run(
+            [str(_NOUGAT_PYTHON), str(_NOUGAT_SCRIPT), str(pdf_path), "-o", str(output)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env={**os.environ, "NO_ALBUMENTATIONS_UPDATE": "1"},
+        )
+        if completed.returncode != 0 or not output.exists():
+            detail = (completed.stderr or completed.stdout or "Nougat 没有写出正文").strip()
+            return [], "Nougat 转换失败：" + detail[-800:]
+        text = output.read_text(encoding="utf-8")
+    pages = _split_nougat_pages(text)
+    if not pages:
+        return [], "Nougat 没有写出任何一页。"
+    return pages, ""
+
+
+def _split_nougat_pages(text: str) -> list[str]:
+    """按页码标记把 Nougat 的输出拆开。标记本身不要留在段落里。"""
+
+    pages: list[str] = []
+    current: list[str] = []
+    seen = False
+    for line in text.splitlines():
+        if re.fullmatch(r"<!--\s*page:\s*\d+\s*-->", line.strip()):
+            if seen:
+                pages.append("\n".join(current).strip())
+            seen = True
+            current = []
+            continue
+        current.append(line)
+    if seen:
+        pages.append("\n".join(current).strip())
+    return pages
+
+
+def _with_figure_files(blocks: list[PageBlock]) -> list[PageBlock]:
+    """从图片引用里取出文件名，插图清单才知道图在哪。"""
+
+    for block in blocks:
+        if block.kind != "figure":
+            continue
+        match = re.search(r"assets/([^)\s]+)", block.text)
+        if match:
+            block.asset_name = match.group(1)
+    return blocks
 
 
 def _markdown_output_path(source_path: Path) -> Path:
@@ -381,40 +426,6 @@ def _read_page_count(markdown_path: Path) -> int | None:
     return page_count if isinstance(page_count, int) else None
 
 
-def _parse_pdf_markdown(
-    paper: PaperDocument, source_path: Path, source_url: str | None, markdown_path: Path
-) -> _PdfMarkdownDraft:
-    """用可替换的 PDF 解析器把 PDF 读成 Markdown 草稿，但不写文件。
-
-    中文注释：阅读节点只需要 Markdown，不应该关心 PDF 到底是 pypdf、PyMuPDF
-    还是其它工具解析的。用哪个由配置里的 read.pdf_parser 决定，
-    auto 表示"装了 PyMuPDF 就用 PyMuPDF"，PyMuPDF 能多提取出表格、公式和图片。
-
-    为什么只是"草稿"、不在这里写文件——正文里的公式位置上留的是占位符，
-    还要等模型把它换成 LaTeX。写盘统一放到 _finalize_markdown。
-    """
-
-    parser = get_pdf_parser(SystemConfig.load().read.pdf_parser)
-    # 中文注释：PDF 里的图片不能塞进一个 Markdown 文件里，只能单独存成文件，
-    # 放在 paper.md 旁边的 assets 目录，正文里用 assets/xxx.png 这样的相对路径引用。
-    assets_dir = markdown_path.parent / "assets"
-    parsed = parser.parse(source_path, assets_dir=assets_dir)
-    if parsed.warnings:
-        return _PdfMarkdownDraft(warnings=parsed.warnings)
-    if not parsed.pages:
-        return _PdfMarkdownDraft(warnings=["PDF 中没有可读取的正文"])
-    body: list[str] = [_markdown_header(paper, source_url, len(parsed.pages), _figure_records(parsed.blocks))]
-    for page in parsed.pages:
-        body.extend([f"<!-- page: {page.page_number} -->", page.text])
-    return _PdfMarkdownDraft(
-        markdown="\n\n".join(body).strip() + "\n",
-        page_count=len(parsed.pages),
-        formulas=parsed.formulas,
-        tables=parsed.tables,
-        blocks=parsed.blocks,
-    )
-
-
 def _finalize_markdown(
     draft: _PdfMarkdownDraft,
     markdown_text: str,
@@ -424,8 +435,7 @@ def _finalize_markdown(
 ) -> MarkdownConversion:
     """把转写完成的正文过一遍质量闸，然后写进文件。
 
-    中文注释：这是整条链路上唯一写 paper.md 的地方。到这里公式该转的已经转完、
-    转不出来的也都换成了兜底内容，写下去的一定是一份完整成品。
+    中文注释：这是整条链路上唯一写 paper.md 的地方。
     """
 
     # 中文注释：和 HTML 分支一样，写文件之前先过正文质量闸。

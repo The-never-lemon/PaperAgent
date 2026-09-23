@@ -649,6 +649,71 @@ class PyMuPdfParser(BasePdfParser):
         return page_blocks, len(emitted_tables), figure_count, page_regions, page_tables
 
 
+def collect_pdf_figures(source_path: Path, assets_dir: Path) -> list[dict[str, Any]]:
+    """只把插图截下来并配上图注。正文不从这里来。
+
+    中文注释：正文已经改由 Nougat 按页写。插图仍用原来的办法：
+    在页面上找图、配最近的图注、截成文件。表注（TABLE I 这种）不是插图，这里跳过。
+    """
+
+    try:
+        import pymupdf
+    except Exception:
+        return []
+    figures_out: list[dict[str, Any]] = []
+    try:
+        document = pymupdf.open(str(source_path))
+    except Exception:
+        return []
+    written_xrefs: set[int] = set()
+    written_digests: dict[str, str] = {}
+    figure_counter = 0
+    used_figure_numbers: set[int] = set()
+    try:
+        for page_index in range(document.page_count):
+            page = document[page_index]
+            page_number = page_index + 1
+            table_rects, _markdowns = _collect_tables(page)
+            text_blocks: list[tuple[Any, str]] = []
+            for block in page.get_text("dict")["blocks"]:
+                if block.get("type") != 0:
+                    continue
+                if _covered_by_table(_rect_tuple(block["bbox"]), table_rects) is not None:
+                    continue
+                block_text = _block_text(block)
+                if block_text.strip():
+                    text_blocks.append((block, block_text))
+            figures, _internal, count = _collect_page_figures(
+                document,
+                page,
+                page_number,
+                assets_dir,
+                written_xrefs,
+                written_digests,
+                table_rects,
+                text_blocks,
+                figure_counter,
+                used_figure_numbers,
+            )
+            figure_counter += count
+            for figure in figures:
+                caption = str(figure.get("caption_text") or "")
+                if _is_table_caption(caption):
+                    continue
+                file_match = re.search(r"assets/([^)]+)", str(figure.get("markdown") or ""))
+                figures_out.append(
+                    {
+                        "page_number": page_number,
+                        "markdown": str(figure["markdown"]),
+                        "asset_name": file_match.group(1) if file_match else "",
+                        "caption": caption,
+                    }
+                )
+    finally:
+        document.close()
+    return figures_out
+
+
 def get_pdf_parser(name: str = "pypdf") -> BasePdfParser:
     """按名字返回 PDF 解析器。
 

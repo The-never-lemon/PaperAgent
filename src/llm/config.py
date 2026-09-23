@@ -58,12 +58,8 @@ class ReadDefaults:
     # 真正切分正文的是 PageChunker，它用的是自己类里的 1200 / 4000 两个常量。留着这种
     # "改了也不生效"的配置只会误导人，所以连同 _read_non_negative_int 一起删掉了。
     # 中文注释：用哪个工具把 PDF 转成 Markdown。可选 auto / pymupdf / pypdf。
-    # auto 的意思是"装了 PyMuPDF 就用它"，PyMuPDF 能多提取出表格、公式和图片。
+    # 正文已经改由 Nougat 写，这项只留给还在直接调用解析器的脚本。
     pdf_parser: str = "auto"
-    # 中文注释：要不要把论文里的公式截图交给模型转写成 LaTeX。
-    # 默认开着——转写之后公式才是模型能读懂的写法，关掉就退回"把公式字形原样
-    # 放进 $$ 块"的老做法。没配这一项算开，只有明确写 false 才关。
-    formula_ocr: bool = True
 
 
 @dataclass(slots=True)
@@ -117,9 +113,6 @@ class SystemConfig:
                 download_timeout_seconds=_read_positive_int(read.get("download_timeout_seconds"), 60),
                 max_file_size_mb=_read_positive_int(read.get("max_file_size_mb"), 50),
                 pdf_parser=_read_pdf_parser(read.get("pdf_parser")),
-                # 中文注释：这一项的默认值是"开"，所以只在配置里明确写了 false 时才关；
-                # 没写、或者写了个读不懂的值，都按开处理。
-                formula_ocr=_optional_bool(read.get("formula_ocr")) is not False,
             ),
         )
 

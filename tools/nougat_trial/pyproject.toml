@@ -1,0 +1,35 @@
+[project]
+name = "nougat-trial"
+version = "0.0.0"
+description = "单独环境，用 Nougat 试读几页论文。不要装进主程序。"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "nougat-ocr==0.1.17",
+    # 中文注释：再新的 transformers 把 PretrainedConfig 改名了，Nougat 还在用旧名字。
+    # albumentations 太新时，图像压缩那一行的参数对不上，导入会直接失败。
+    "transformers==4.38.2",
+    "albumentations==1.4.24",
+    # 中文注释：5.x 删掉了 pdf.render()，Nougat 还在用这个旧接口，页面会渲不出来。
+    "pypdfium2==4.30.0",
+    "torch",
+    "torchvision",
+    "requests",
+]
+
+[tool.uv]
+package = false
+
+# 中文注释：普通包走阿里云 PyPI。显卡版 PyTorch 走阿里云的 cu128 镜像，
+# 不走刚才卡住的官方地址。只在这个试验环境里生效。
+[[tool.uv.index]]
+url = "https://mirrors.aliyun.com/pypi/simple/"
+default = true
+
+[[tool.uv.index]]
+name = "aliyun-cu128"
+url = "https://mirrors.aliyun.com/pytorch-wheels/cu128/"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "aliyun-cu128" }
+torchvision = { index = "aliyun-cu128" }
