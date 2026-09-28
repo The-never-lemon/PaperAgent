@@ -23,15 +23,15 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from src.agents.context_budget import (
+from src.agents.common.context_budget import (
     budget_tokens,
     estimate_messages_tokens,
 )
-from src.agents.deepReadAgent import (
+from src.agents.reading.deep_read import (
     REDUCE_INPUT_MAX_CHARS,
     _build_reduce_user_content,
 )
-from src.agents.paperQaAgent import (
+from src.agents.reading.paper_qa import (
     QA_MAX_TOOL_ROUNDS,
     PaperQaDeps,
     _handle_read_sections,
@@ -40,14 +40,14 @@ from src.agents.paperQaAgent import (
     _build_toc,
     run_paper_qa,
 )
-from src.agents.researchAgent import (
+from src.agents.research.agent import (
     KEEP_RECENT_TURNS_LITE,
     TOOL_RESULT_PLACEHOLDER,
     _repair_tool_call_pairing,
     _report_round_usage,
     build_llm_messages,
 )
-from src.agents.research_tools import _handle_get_history
+from src.agents.research.tools import _handle_get_history
 from src.models.workspace import SessionWorkspace
 
 
@@ -321,7 +321,7 @@ class BuildMessagesTests(unittest.TestCase):
             def progress(self, *args, **kwargs):
                 reporter_calls.append(kwargs)
 
-        from src.agents import researchAgent as ra
+        from src.agents.research import agent as ra
 
         old_rate = ra._RECENT_CHARS_PER_TOKEN
         try:

@@ -16,7 +16,7 @@ from .identity import paper_key
 from .models import PaperDocument, SearchRequest, SearchResponse
 
 if TYPE_CHECKING:
-    from src.graph.runtime_resources import WorkflowRuntimeResources
+    from src.runtime.resources import WorkflowRuntimeResources
 
 
 logger = get_logger(__name__)

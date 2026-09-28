@@ -1,6 +1,6 @@
 import unittest
 
-from src.agents.skill_loader import skill_section
+from src.agents.common.skill_loader import skill_section
 from src.models.deep_read import DEEP_READ_SOURCE_FULLTEXT, DeepReadReport, DimensionScore
 
 
@@ -185,7 +185,7 @@ class DeepReadSkillInjectionTest(unittest.TestCase):
     def test_report_prompts_include_narrative_and_drop_slot_templates(self):
         """汇总和摘要降级要带上叙述逻辑；旧的填空句式不能再出现。"""
 
-        from src.agents.Prompts import (
+        from src.agents.common.prompts import (
             DEEP_READ_ABSTRACT_SYSTEM_PROMPT,
             DEEP_READ_MAP_SYSTEM_PROMPT,
             DEEP_READ_REDUCE_SYSTEM_PROMPT,

@@ -14,10 +14,10 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from src.agents.research_tools import ResearchToolContext, build_research_tool_registry
-from src.agents.researchAgent import RESEARCH_LLM_PROFILE, run_conversation_agent
-from src.agents.reviewPipeline import ReviewDeps, resume_review
-from src.graph.runtime import (
+from src.agents.research.tools import ResearchToolContext, build_research_tool_registry
+from src.agents.research.agent import RESEARCH_LLM_PROFILE, run_conversation_agent
+from src.agents.review.pipeline import ReviewDeps, resume_review
+from src.runtime.workflow import (
     InlineWorkflowSyncPort,
     WorkflowCancellation,
     WorkflowNodeReporter,

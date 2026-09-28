@@ -29,19 +29,19 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.paper_retrieval.models import PaperDocument  # noqa: E402
-from src.utils.read_utils.cache import PRIMARY_PDF_NAME  # noqa: E402
-from src.utils.read_utils.chunkers import (  # noqa: E402
+from src.utils.fulltext.cache import PRIMARY_PDF_NAME  # noqa: E402
+from src.utils.fulltext.chunkers import (  # noqa: E402
     CHUNKER_VERSION,
     PageChunker,
     async_build_chunks_file,
 )
-from src.utils.read_utils.pdf_parsers import (  # noqa: E402
+from src.utils.fulltext.parsers import (  # noqa: E402
     PdfParseResult,
     PypdfParser,
     PyMuPdfParser,
     get_pdf_parser,
 )
-from src.utils.read_utils.read_fulltext import (  # noqa: E402
+from src.utils.fulltext.convert import (  # noqa: E402
     CONVERTER_VERSION,
     async_convert_fulltext_to_markdown,
     _ArticleHtmlParser,
@@ -226,7 +226,7 @@ def check_fallback() -> None:
     """验证 pymupdf 不可用时，auto 会退回 pypdf，正文照样读得出来。"""
 
     print("\n[3/5] 回退验证（pymupdf 不可用）")
-    import src.utils.read_utils.pdf_parsers as pdf_parsers
+    import src.utils.fulltext.parsers as pdf_parsers
 
     original = pdf_parsers._pymupdf_available
     pdf_parsers._pymupdf_available = lambda: False
@@ -292,8 +292,8 @@ async def main() -> int:
     import compileall
 
     ok = all(
-        compileall.compile_file(str(ROOT / "src" / "utils" / "read_utils" / name), quiet=1)
-        for name in ("pdf_parsers.py", "read_fulltext.py", "chunkers.py")
+        compileall.compile_file(str(ROOT / "src" / "utils" / "fulltext" / name), quiet=1)
+        for name in ("parsers.py", "convert.py", "chunkers.py")
     )
     check(bool(ok), "提取层三个模块语法检查通过")
 

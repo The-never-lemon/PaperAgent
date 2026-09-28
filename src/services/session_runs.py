@@ -8,8 +8,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.graph.runtime import InlineWorkflowSyncPort, WorkflowCancellation, WorkflowRuntimeContext, clone_runtime_event
-from src.graph.runtime_resources import WorkflowRuntimeResources
+from src.runtime.workflow import InlineWorkflowSyncPort, WorkflowCancellation, WorkflowRuntimeContext, clone_runtime_event
+from src.runtime.resources import WorkflowRuntimeResources
 from src.models.sessions import SESSION_STATUS_INTERRUPTED, SessionError, utc_now
 from src.repositories.sessions.base import SessionRepository
 from src.services.sessions import AssistantMessageBuffer, MessageHandler, invoke_message_handler_async

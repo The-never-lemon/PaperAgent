@@ -193,15 +193,20 @@ Paper-Agent/
 │   ├── src/views/                  # 会话工作台、系统配置页
 │   └── vite.config.ts              # 开发服务器、代理和端口配置
 ├── src/
-│   ├── agents/                     # Agent 定义、模型调用和写作工具
+│   ├── agents/                     # 智能体，按职责再分成四个包
+│   │   ├── common/                 # 共用骨架：基类、工具登记、提示词、技能文档
+│   │   ├── research/               # 主对话
+│   │   ├── reading/                # 摘要相关性、全文精读、追问
+│   │   └── review/                 # 综述流水线
 │   ├── api/                        # FastAPI 应用与路由
-│   ├── graph/                      # 运行期基础设施：运行上下文、取消控制、节点事件上报
+│   ├── runtime/                    # 一次运行的取消、进度上报和共用的网络资源
 │   ├── llm/                        # Provider 适配、配置解析和统一响应
 │   ├── models/                     # 会话、阅读与工作区领域模型
 │   ├── paper_retrieval/            # 论文模型、编号规则、检索服务和来源连接器
 │   ├── repositories/               # SQLite、JSON 与阶段产物持久化
 │   ├── services/                   # 会话、运行、设置、论文长期记忆和工作流服务
-│   └── utils/                      # 日志、缓存、全文解析和分块工具
+│   └── utils/                      # 日志、编号等小工具；全文处理在 fulltext/
+│       └── fulltext/               # PDF 转写、分块、缓存和插图
 ├── data/                           # 本地会话库、论文缓存与会话数据
 ├── logs/                           # 运行日志
 └── test/                           # unittest 测试与联调辅助代码

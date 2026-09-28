@@ -11,8 +11,8 @@ import json
 import sys
 
 sys.path.insert(0, ".")
-from src.agents.Prompts import RESEARCH_AGENT_SYSTEM_PROMPT
-from src.agents.research_tools import build_research_tool_registry
+from src.agents.common.prompts import RESEARCH_AGENT_SYSTEM_PROMPT
+from src.agents.research.tools import build_research_tool_registry
 from src.llm.config import ModelConfig, SystemConfig
 from src.llm.factory import make_provider
 
@@ -125,7 +125,7 @@ async def probe_real(tag):
     try:
         # 只是借用注册表里的工具定义（as_llm_tools），不真正执行任何工具，
         # handler 不会被调用，所以用一个空壳 context 即可。
-        from src.agents.research_tools import ResearchToolContext
+        from src.agents.research.tools import ResearchToolContext
         from src.models.workspace import SessionWorkspace
 
         class _Repo:

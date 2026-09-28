@@ -5,7 +5,7 @@
 1. 把文件边收边写到 data/paper_cache/{论文编号}/original.pdf —— 这个位置正是
    精读流程"找全文"时第一个会去看的地方（见 paper_retrieval/download.py 里的
    缓存查找），所以写完以后，精读、追问这些流程一行代码都不用改就能用上这篇论文；
-2. 从 PDF 第一页尽量认出标题、作者、年份、摘要（见 utils/read_utils/pdf_metadata.py），
+2. 从 PDF 第一页尽量认出标题、作者、年份、摘要（见 utils/fulltext/metadata.py），
    让这篇论文在列表里显示得像一篇正常论文，也能参与综述写作；
 3. 把这篇论文登记进会话工作区。
 
@@ -30,8 +30,8 @@ from src.models.workspace import SessionWorkspace
 from src.paper_retrieval.models import PaperDocument
 from src.services.paper_memory import ensure_bound
 from src.utils import get_logger
-from src.utils.read_utils.cache import PRIMARY_PDF_NAME, paper_cache_dir, write_metadata
-from src.utils.read_utils.pdf_metadata import PdfFirstPageInfo, extract_first_page_info
+from src.utils.fulltext.cache import PRIMARY_PDF_NAME, paper_cache_dir, write_metadata
+from src.utils.fulltext.metadata import PdfFirstPageInfo, extract_first_page_info
 
 
 logger = get_logger(__name__)

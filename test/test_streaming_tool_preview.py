@@ -1,6 +1,6 @@
 import unittest
 
-from src.agents.researchAgent import note_streaming_tool_call
+from src.agents.research.agent import note_streaming_tool_call
 
 
 class StreamingToolPreviewTest(unittest.TestCase):

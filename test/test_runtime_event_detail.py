@@ -4,7 +4,7 @@ import json
 import unittest
 from typing import Any
 
-from src.graph.runtime import InlineWorkflowSyncPort, WorkflowNodeReporter, clone_runtime_event
+from src.runtime.workflow import InlineWorkflowSyncPort, WorkflowNodeReporter, clone_runtime_event
 
 
 def _collecting_reporter() -> tuple[list[dict[str, Any]], WorkflowNodeReporter]:

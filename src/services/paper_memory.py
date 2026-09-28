@@ -34,8 +34,8 @@ from src.paper_retrieval.identity import (
     papers_match,
 )
 from src.utils import get_logger
-from src.utils.read_utils.cache import paper_cache_dir, safe_cache_name
-from src.utils.read_utils.chunkers import CHUNKER_VERSION, PageChunker, load_chunks_file
+from src.utils.fulltext.cache import paper_cache_dir, safe_cache_name
+from src.utils.fulltext.chunkers import CHUNKER_VERSION, PageChunker, load_chunks_file
 
 
 if TYPE_CHECKING:

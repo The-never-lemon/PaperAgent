@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 
 if TYPE_CHECKING:
-    from src.graph.runtime_resources import WorkflowRuntimeResources
+    from src.runtime.resources import WorkflowRuntimeResources
 from urllib.parse import urlparse
 
 import httpx
@@ -25,7 +25,7 @@ from src.paper_retrieval.models import PaperDocument
 # 出了问题（比如下回来的其实是 HTML 介绍页而不是全文）完全没法排查。
 # 现在下载成功、失败都会在日志里留下记录，方便定位问题。
 from src.utils import get_logger
-from src.utils.read_utils.cache import (
+from src.utils.fulltext.cache import (
     CACHED_FULLTEXT_NAMES,
     PRIMARY_PDF_NAME,
     read_cached_source_url,

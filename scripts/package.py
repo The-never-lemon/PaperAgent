@@ -273,7 +273,7 @@ def run_self_check(staging: Path) -> None:
 
     # 中文注释：上面的启动器自检只查环境（解释器、前端产物、目录结构），它**不导入
     # 应用本体**，所以拦不住另一类事故：应用在导入期就要读某个文件，而那个文件没被打进包。
-    # 现在就有这样的文件——src/agents/skills/ 下的技能文档。Prompts.py 一被导入
+    # 现在就有这样的文件——src/agents/common/skills/ 下的技能文档。prompts.py 一被导入
     # （也就是 uvicorn 一启动）就要读它，读不到当场抛异常、界面全无。这类"运行时依赖的
     # 非 .py 文件"以后只会更多，所以这里补一步：真的把应用导入一次。
     _run_import_smoke(staging)
