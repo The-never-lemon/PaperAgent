@@ -1,3 +1,5 @@
+/** 文件作用：封装会话创建、列表、消息、运行、取消和删除请求。 */
+
 import type {
   SessionCreatePayload,
   SessionListPayload,

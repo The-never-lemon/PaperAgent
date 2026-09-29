@@ -1,3 +1,5 @@
+<!-- 文件作用：显示左侧会话列表，并处理新建、切换、重命名和删除操作。 -->
+
 <script setup lang="ts">
 import {
   ChevronLeft,

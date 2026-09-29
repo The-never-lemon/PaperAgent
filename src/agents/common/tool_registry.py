@@ -1,4 +1,4 @@
-# 这个文件负责登记智能体能调用的工具，从 src/agents/tools.py 挪到这里。
+# 文件作用：登记每个智能体可以调用的工具、参数和执行方式。
 from __future__ import annotations
 
 import inspect

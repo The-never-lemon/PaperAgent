@@ -1,4 +1,4 @@
-# 这个文件是所有智能体共用的基类和规格声明，从 src/agents/base.py 挪到这里。
+# 文件作用：定义所有智能体共用的基类、规格信息和基础模型调用能力。
 from __future__ import annotations
 
 from abc import ABC, abstractmethod

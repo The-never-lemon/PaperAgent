@@ -1,3 +1,4 @@
+@REM 文件作用：供 Windows 用户双击启动项目，并调用一键启动脚本。
 @echo off
 cd /d "%~dp0."
 

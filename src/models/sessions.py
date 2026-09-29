@@ -1,3 +1,4 @@
+# 文件作用：定义会话记录、运行状态和通用时间字段。
 from __future__ import annotations
 
 import copy

@@ -1,3 +1,4 @@
+# 文件作用：使用 SQLite 保存会话、消息、事件、运行状态和产物文件。
 from __future__ import annotations
 
 import copy

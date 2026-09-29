@@ -1,3 +1,4 @@
+# 文件作用：提供命令行入口，生成运行可靠性和资源消耗统计。
 """
 CLI 入口：可靠性统计生成器
 用法：python eval/run_reliability_stats.py [选项]

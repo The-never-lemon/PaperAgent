@@ -1,3 +1,4 @@
+# 文件作用：管理会话工作区中的论文、精读报告、笔记和文件读写。
 from __future__ import annotations
 
 import json

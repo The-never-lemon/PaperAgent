@@ -1,4 +1,4 @@
-# 这个文件管一次运行的取消、进度上报和运行上下文，从 src/graph/runtime.py 挪到这里。
+# 文件作用：管理运行取消、进度上报、节点消息和运行上下文。
 from __future__ import annotations
 
 import copy

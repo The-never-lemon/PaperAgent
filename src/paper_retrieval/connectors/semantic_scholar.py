@@ -1,3 +1,4 @@
+# 文件作用：从 Semantic Scholar 检索论文，并整理统一格式的元数据。
 from __future__ import annotations
 
 import asyncio

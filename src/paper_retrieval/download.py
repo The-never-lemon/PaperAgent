@@ -1,3 +1,4 @@
+# 文件作用：按论文编号查找并下载 PDF 全文，记录缓存位置和失败原因。
 from __future__ import annotations
 
 import asyncio

@@ -1,3 +1,4 @@
+// 文件作用：配置浏览器端 Vue 和 TypeScript 代码的编译规则。
 {
   "extends": "./tsconfig.node.json",
   "compilerOptions": {

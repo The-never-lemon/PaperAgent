@@ -1,4 +1,4 @@
-# 这个文件生成综述大纲，从 src/agents/review_outline.py 挪到这里。
+# 文件作用：根据分析结果生成综述章节和每节写作任务。
 """综述的大纲步骤：把分析报告收成章节和小节任务。
 
 这里不是独立子 Agent。模型由综述流水线传入，本模块只负责提示词、
@@ -13,9 +13,18 @@ from typing import Any
 
 from src.llm import ProviderSnapshot
 from src.llm.base import normalize_token_usage
+from src.utils import get_logger
 
 from src.agents.common.contracts import JsonObject
 from src.agents.common.prompts import WRITING_OUTLINE_AGENT_SYSTEM_PROMPT
+
+
+logger = get_logger(__name__)
+
+# 大纲只排结构，长分析在提示词里收到这个字数。完整分析仍在综述状态里。
+OUTLINE_FIELD_MAX_CHARS = 1500
+OUTLINE_USER_MAX_CHARS = 12000
+_CLIP_NOTE = "……（原文更长，完整内容仍留在综述状态里）"
 
 
 # 中文说明：evidence-map 只能引用这八个全局分析字段。把字段集中放在这里，
@@ -87,46 +96,114 @@ def _outline_messages(*, topic: str, analysis_report: JsonObject) -> list[JsonOb
     overall_framework = str(analysis_report.get("overall_framework") or "").strip()
     overall_analysis = _compact_overall_analysis(dict(analysis_report.get("overall_analysis") or {}))
     subtopic_analyses = _compact_subtopic_analyses(list(analysis_report.get("subtopic_analyses") or []))
+    field_limit = OUTLINE_FIELD_MAX_CHARS
+    user_prompt = ""
+    clipped: list[str] = []
+    # 和综合分析一样：字段先收到 1500 字，整份材料仍超 12000 字就再缩短字段。
+    while True:
+        clipped_overall, overall_clipped = _clip_mapping(overall_analysis, field_limit)
+        clipped_subtopics, subtopic_clipped = _clip_subtopics(subtopic_analyses, field_limit)
+        clipped = overall_clipped + [name for name in subtopic_clipped if name not in overall_clipped]
+        framework, framework_clipped = _clip_text(overall_framework, field_limit)
+        if framework_clipped:
+            clipped.append("overall_framework")
+        user_prompt = json.dumps(
+            {
+                "用户综述主题": topic,
+                "任务": "根据 overall_framework 生成章节和小节级别的写作大纲",
+                "overall_framework": framework,
+                "综合分析节点输出": clipped_overall,
+                "可使用的子主题分析": clipped_subtopics,
+                "输出示例": {
+                    "Chapter1": {
+                        "title": "title1",
+                        "description": "description1",
+                        "Sections": {
+                            "section1": {
+                                "title": "title2",
+                                "task": "task1",
+                                "evidence-map": [],
+                                "ref-sections": [],
+                                "word-count": 600,
+                            }
+                        },
+                    }
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        if len(user_prompt) <= OUTLINE_USER_MAX_CHARS or field_limit <= 200:
+            break
+        field_limit = max(200, field_limit // 2)
+    logger.info(
+        "大纲提示词已装好",
+        extra={
+            "user_chars": len(user_prompt),
+            "field_limit": field_limit,
+            "clipped_fields": "、".join(clipped) if clipped else "无",
+        },
+    )
 
     # 中文说明：大纲约束集中管理，避免大纲格式与后续写作节点的输入约定不一致。
+    # 输出示例只用占位符，不要写具体章节名，否则会把提示词末尾的组织方法压住。
     system_prompt = WRITING_OUTLINE_AGENT_SYSTEM_PROMPT
-    user_prompt = json.dumps(
-        {
-            "用户综述主题": topic,
-            "任务": "根据 overall_framework 生成章节和小节级别的写作大纲",
-            "overall_framework": overall_framework,
-            "综合分析节点输出": overall_analysis,
-            "可使用的子主题分析": subtopic_analyses,
-            # 中文说明：这里只给结构，标题和说明一律用占位符，不要写具体的章节名。
-            # 以前这里写的是「相关研究现状」「主要研究方向」这种真实标题，等于在用户
-            # 消息里暗示了一套固定骨架；而系统提示词自己的示例用的是 title1 / task1
-            # 这样的占位符（见 src/agents/common/prompts.py 的 WRITING_OUTLINE_AGENT_SYSTEM_PROMPT），
-            # 两处口径不一致。另外系统提示词末尾还挂了一段「章节该按什么逻辑组织」
-            # 的方法论，如果这里继续递一个具体骨架，模型会照着这个骨架写，那段方法论
-            # 就等于被压住了——出了问题时也分不清是方法论没生效还是被这里的示例带偏。
-            "输出示例": {
-                "Chapter1": {
-                    "title": "title1",
-                    "description": "description1",
-                    "Sections": {
-                        "section1": {
-                            "title": "title2",
-                            "task": "task1",
-                            "evidence-map": [],
-                            "ref-sections": [],
-                            "word-count": 600,
-                        }
-                    },
-                }
-            },
-        },
-        ensure_ascii=False,
-        indent=2,
-    )
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
+
+
+def _clip_text(text: str, limit: int) -> tuple[str, bool]:
+    """超过上限就截断，并标明原文更长。"""
+
+    if len(text) <= limit:
+        return text, False
+    keep = max(0, limit - len(_CLIP_NOTE))
+    return text[:keep] + _CLIP_NOTE, True
+
+
+def _as_text(value: Any) -> str:
+    """把字段收成一段文字。"""
+
+    if isinstance(value, list):
+        return "\n".join(str(item).strip() for item in value if str(item).strip())
+    return str(value or "").strip()
+
+
+def _clip_mapping(payload: JsonObject, field_limit: int) -> tuple[JsonObject, list[str]]:
+    """截短一份字典里的长文本，短字段和列表编号保持原样。"""
+
+    clipped: list[str] = []
+    result: JsonObject = {}
+    for key, value in payload.items():
+        if isinstance(value, str) and len(value) > field_limit:
+            result[key], _ = _clip_text(value, field_limit)
+            clipped.append(str(key))
+        else:
+            result[key] = value
+    return result, clipped
+
+
+def _clip_subtopics(items: list[JsonObject], field_limit: int) -> tuple[list[JsonObject], list[str]]:
+    """截短子主题分析里的长字段。paperIds 保持全量。"""
+
+    clipped: list[str] = []
+    result: list[JsonObject] = []
+    for item in items:
+        compact, names = _clip_mapping(item, field_limit)
+        # 一致点在大纲材料里叫 consensus，可能是列表。收成文字后再截。
+        consensus = item.get("consensus")
+        if isinstance(consensus, list):
+            text, did_clip = _clip_text(_as_text(consensus), field_limit)
+            compact["consensus"] = text
+            if did_clip:
+                names.append("consensus")
+        result.append(compact)
+        for name in names:
+            if name not in clipped:
+                clipped.append(name)
+    return result, clipped
 
 
 def _compact_overall_analysis(overall_analysis: JsonObject) -> JsonObject:

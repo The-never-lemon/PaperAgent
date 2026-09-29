@@ -1,3 +1,4 @@
+# 文件作用：定义摘要阅读笔记、相关性结果和阅读状态结构。
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field

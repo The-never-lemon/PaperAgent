@@ -1,3 +1,4 @@
+# 文件作用：实验模型网关是否支持一次返回多个工具调用。
 # -*- coding: utf-8 -*-
 """一次性实测脚本：验证 OpenCode Go 网关对 parallel_tool_calls 的透传效果。
 

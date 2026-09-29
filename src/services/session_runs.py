@@ -1,3 +1,4 @@
+# 文件作用：管理一次后台运行的创建、状态、取消和事件队列。
 from __future__ import annotations
 
 import asyncio

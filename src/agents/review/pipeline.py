@@ -1,4 +1,4 @@
-# 这个文件把综述的分析、大纲和写作串成一条流水线，从 src/agents/reviewPipeline.py 挪到这里。
+# 文件作用：串起综述的分析、领域综合、大纲、逐节写作和终稿保存。
 """综述子 Agent（作为主对话的一个工具来用）。
 
 主 Agent 通过 generate_review 把写综述这件事交到这里。本模块按固定顺序往下走：
@@ -43,7 +43,7 @@ from src.models.sessions import utc_now
 from src.utils import get_logger
 
 from src.agents.common.contracts import JsonObject
-from src.agents.review.analyse import analyse_overall, analyse_subtopic
+from src.agents.review.analyse import analyse_overall, analyse_subtopic, split_subtopic_batches
 from src.agents.review.document import (
     _build_final_markdown,
     _build_references,
@@ -536,23 +536,50 @@ async def _node_prepare(state: ReviewState, deps: ReviewDeps) -> JsonObject:
     }
 
 async def _node_analyse_subtopic(state: ReviewState, deps: ReviewDeps) -> JsonObject:
-    """子主题分析：让模型读一遍论文集，产出研究现状、共识、争议、空白等。"""
+    """子主题分析：按批读论文卡片，再把各批结果接成一份完整分析。
+
+    中文说明：论文多的时候不能一次全塞给模型。这里按提示词字数分批，
+    每一批都要成功，再在本地接起来。论文卡片本身仍留在 analysis_inputs，不删。
+    """
 
     _check_cancellation(deps)
-    deps.reporter.progress("正在分析论文", stage=REVIEW_STAGE, event_key=deps.event_key)
-
     group = dict(state.get("group") or {})
+    topic = str(state.get("topic") or "")
+    subtopic = str(group.get("subtopic") or topic)
+    papers = [item for item in list(group.get("papers") or []) if isinstance(item, dict)]
+    batches = split_subtopic_batches(topic=topic, subtopic=subtopic, papers=papers)
     usage = _UsageCollector()
-    subtopic_result = await analyse_subtopic(
-        topic=str(state.get("topic") or ""),
-        group=group,
-        llm=deps.llm,
-        usage_callback=usage.collect,
+    analyses: list[JsonObject] = []
+    total = len(batches)
+    for index, batch in enumerate(batches, start=1):
+        _check_cancellation(deps)
+        deps.reporter.progress(
+            f"正在分析论文（第 {index}/{total} 批，本批 {len(batch)} 篇）",
+            stage=REVIEW_STAGE,
+            event_key=deps.event_key,
+        )
+        batch_group = {
+            **group,
+            "subtopic": subtopic,
+            "papers": batch,
+            "paper_count": len(batch),
+        }
+        subtopic_result = await analyse_subtopic(
+            topic=topic,
+            group=batch_group,
+            llm=deps.llm,
+            usage_callback=usage.collect,
+        )
+        if subtopic_result.parsed is None:
+            raise _ReviewFailed(f"子主题分析失败（第 {index}/{total} 批）：{subtopic_result.reason}")
+        analyses.append(_normalize_subtopic_analysis(subtopic_result.parsed, batch_group))
+    merged = _merge_subtopic_batches(analyses, group)
+    logger.info(
+        "子主题分析已合并",
+        extra={"batches": total, "paper_count": len(merged.get("paperIds") or [])},
     )
-    if subtopic_result.parsed is None:
-        raise _ReviewFailed(f"子主题分析失败：{subtopic_result.reason}")
     return {
-        "subtopic_analysis": _normalize_subtopic_analysis(subtopic_result.parsed, group),
+        "subtopic_analysis": merged,
         **_usage_update(state, usage),
     }
 
@@ -957,6 +984,49 @@ def _paper_analysis_input(paper_id: str, entry: "WorkspacePaperEntry") -> JsonOb
 # ---------------------------------------------------------------------------
 # 分析归一化与报告组装（移植自 analyse_node）
 # ---------------------------------------------------------------------------
+
+
+def _merge_subtopic_batches(analyses: list[JsonObject], group: JsonObject) -> JsonObject:
+    """把各批子主题分析接成一份，编号取并集，后一批不覆盖前一批。
+
+    中文说明：只有一批时原样返回。多批时每个长字段前面标明第几批，
+    方便后面综合时知道这段话来自哪一部分论文。
+    """
+
+    if len(analyses) == 1:
+        return analyses[0]
+    paper_ids: list[str] = []
+    for item in analyses:
+        for paper_id in item.get("paperIds") or []:
+            text = str(paper_id or "").strip()
+            if text and text not in paper_ids:
+                paper_ids.append(text)
+    merged: JsonObject = {
+        "subtopic": str(group.get("subtopic") or analyses[0].get("subtopic") or "综合分析"),
+        "search_keyword": str(group.get("search_keyword") or ""),
+        "paper_count": len(paper_ids),
+        "paperIds": paper_ids,
+    }
+    for field in ("研究现状", "矛盾点", "研究空白", "时间线演化", "技术方法栈演变"):
+        parts: list[str] = []
+        for index, item in enumerate(analyses, start=1):
+            text = str(item.get(field) or "").strip()
+            if text:
+                parts.append(f"【第{index}批】\n{text}")
+        merged[field] = "\n\n".join(parts)
+    points: list[str] = []
+    for index, item in enumerate(analyses, start=1):
+        values = item.get("一致点") or []
+        if isinstance(values, str):
+            values = [values]
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            text = str(value or "").strip()
+            if text:
+                points.append(f"【第{index}批】{text}")
+    merged["一致点"] = points
+    return merged
 
 
 def _normalize_subtopic_analysis(parsed: JsonObject, group: JsonObject) -> JsonObject:

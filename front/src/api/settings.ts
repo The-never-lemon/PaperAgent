@@ -1,3 +1,5 @@
+/** 文件作用：封装模型与系统设置的读取、保存和连通性测试请求。 */
+
 import type {
   ModelConnectivityPayload,
   ProviderModelsPayload,

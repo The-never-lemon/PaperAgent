@@ -1,3 +1,5 @@
+/** 文件作用：在浏览器无法生成随机编号时提供备用编号生成方式。 */
+
 let fallbackCounter = 0;
 const READABLE_ID_RANDOM_LENGTH = 12;
 const READABLE_ID_CHARACTERS = "abcdefghijklmnopqrstuvwxyz0123456789";

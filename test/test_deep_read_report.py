@@ -1,3 +1,4 @@
+# 文件作用：验证精读报告解析、Markdown 下载和维度评分。
 import unittest
 
 from src.agents.common.skill_loader import skill_section

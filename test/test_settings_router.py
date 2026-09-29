@@ -1,3 +1,4 @@
+# 文件作用：验证设置接口的读取、保存和参数校验。
 import unittest
 
 from fastapi.testclient import TestClient

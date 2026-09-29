@@ -1,4 +1,4 @@
-# 这个文件按大纲逐节写综述，从 src/agents/review_writing.py 挪到这里。
+# 文件作用：按大纲逐节取证、写正文、审查内容并生成综述摘要。
 """综述的写作步骤：按小节取证、写正文、审查，再写摘要。
 
 这里不是独立子 Agent，也没有自己的流程图。一节内部用普通循环完成
@@ -24,6 +24,19 @@ from src.agents.common.prompts import WRITING_ABSTRACT_SYSTEM_PROMPT, WRITING_AG
 
 
 logger = get_logger(__name__)
+
+# 写作提示词里这三样会越积越长。上限只作用在这一次发给模型的摘录上，
+# 完整小节、完整证据和已取回的资料仍留在这一节的状态里。
+WRITE_EVIDENCE_MAX_CHARS = 4000
+WRITE_PREVIOUS_MAX_CHARS = 4000
+WRITE_TOOL_RESULTS_MAX_CHARS = 6000
+# 更早的小节只留开头，最近两节多留一些，避免模型看不到刚写完的衔接。
+WRITE_EARLIER_SECTION_CHARS = 180
+WRITE_RECENT_SECTION_CHARS = 1200
+# 摘要只看每节开头一段，所有开头加起来大约不超过这个总长。终稿仍用完整小节。
+ABSTRACT_SECTION_CHARS = 800
+ABSTRACT_TOTAL_CHARS = 8000
+_CLIP_NOTE = "……（原文更长，完整内容仍留在综述状态里）"
 
 
 WritingAction = Literal["tool", "draft"]
@@ -642,15 +655,19 @@ def _write_messages(state: SectionLoopState) -> list[JsonObject]:
     """构造写作提示词，让模型用 JSON 表达下一步动作。"""
 
     # 中文说明：每轮写作都复用统一规则，确保工具调用和正文输出格式稳定。
+    # 证据、已写小节、工具结果只送摘录。论文编号保持全量，模型才能按编号再去取摘要和原文。
     system_prompt = WRITING_AGENT_SYSTEM_PROMPT
+    evidence, evidence_clipped = _clip_evidence(state.get("evidence_map") or [])
+    previous, previous_clipped = _clip_previous_sections(state.get("previous_sections") or [])
+    tool_results, tools_clipped = _clip_tool_results(state.get("tool_results") or [])
     user_prompt = json.dumps(
         {
             "section_id": state.get("section_id"),
             "小节任务": state.get("task"),
             "计划字数": state.get("word_count"),
-            "全局分析提供的证据": state.get("evidence_map") or [],
-            "已经写好的前置小节": state.get("previous_sections") or [],
-            "已调用工具得到的资料": state.get("tool_results") or [],
+            "全局分析提供的证据": evidence,
+            "已经写好的前置小节": previous,
+            "已调用工具得到的资料": tool_results,
             "允许引用的真实论文编号": state.get("available_paper_ids") or [],
             "当前草稿": state.get("draft") or "",
             "审查整改建议": state.get("revision_suggestions") or [],
@@ -663,6 +680,11 @@ def _write_messages(state: SectionLoopState) -> list[JsonObject]:
         ensure_ascii=False,
         indent=2,
     )
+    clipped = [name for name, flag in (("证据", evidence_clipped), ("已写小节", previous_clipped), ("工具结果", tools_clipped)) if flag]
+    logger.info(
+        "写作提示词已装好",
+        extra={"user_chars": len(user_prompt), "clipped": "、".join(clipped) if clipped else "无"},
+    )
     return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
 
 
@@ -671,20 +693,127 @@ def _abstract_messages(*, topic: str, sections: list[JsonObject], word_count: in
 
     # 中文说明：摘要只读取已完成的小节正文，系统提示词不在这里重复维护。
     system_prompt = WRITING_ABSTRACT_SYSTEM_PROMPT
-    body = [
-        {
-            "小节标题": str(section.get("section_title") or section.get("section_id") or ""),
-            "正文": str(section.get("content") or "").strip(),
-        }
-        for section in sections
-        if isinstance(section, dict) and str(section.get("content") or "").strip()
-    ]
+    body, clipped = _clip_abstract_sections(sections)
     user_prompt = json.dumps(
         {"用户主题": topic, "摘要建议字数": max(100, int(word_count or 300)), "已完成正文": body},
         ensure_ascii=False,
         indent=2,
     )
+    logger.info(
+        "摘要提示词已装好",
+        extra={"user_chars": len(user_prompt), "clipped": "是" if clipped else "否"},
+    )
     return [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+
+
+def _clip_text(text: str, limit: int) -> tuple[str, bool]:
+    """超过上限就截断，并标明原文更长。"""
+
+    if len(text) <= limit:
+        return text, False
+    keep = max(0, limit - len(_CLIP_NOTE))
+    return text[:keep] + _CLIP_NOTE, True
+
+
+def _clip_evidence(evidence: Any) -> tuple[Any, bool]:
+    """把全局分析摘录收进字数上限。字段都保留，超了就缩短每段内容。"""
+
+    if not isinstance(evidence, list):
+        return evidence, False
+    texts = [str(item.get("内容") or "") if isinstance(item, dict) else str(item) for item in evidence]
+    if sum(len(text) for text in texts) <= WRITE_EVIDENCE_MAX_CHARS:
+        return evidence, False
+    share = max(80, WRITE_EVIDENCE_MAX_CHARS // max(1, len(evidence)))
+    clipped: list[Any] = []
+    for item in evidence:
+        if not isinstance(item, dict):
+            text, _ = _clip_text(str(item), share)
+            clipped.append(text)
+            continue
+        text, _ = _clip_text(str(item.get("内容") or ""), share)
+        clipped.append({**item, "内容": text})
+    return clipped, True
+
+
+def _clip_previous_sections(sections: Any) -> tuple[list[JsonObject], bool]:
+    """更早的小节只留开头，最近两节多留一些，总长再卡一次上限。"""
+
+    if not isinstance(sections, list):
+        return [], False
+    items: list[JsonObject] = []
+    clipped = False
+    total = len(sections)
+    for index, section in enumerate(sections):
+        if not isinstance(section, dict):
+            continue
+        content = str(section.get("content") or "")
+        limit = WRITE_RECENT_SECTION_CHARS if index >= total - 2 else WRITE_EARLIER_SECTION_CHARS
+        shown, did_clip = _clip_text(content, limit)
+        clipped = clipped or did_clip
+        items.append(
+            {
+                "section_id": section.get("section_id"),
+                "content": shown,
+                "cited_paper_ids": list(section.get("cited_paper_ids") or []),
+            }
+        )
+    # 加起来仍超上限时，从最早的小节开始拿掉，最近写的尽量留下。
+    while (
+        sum(len(str(item.get("content") or "")) for item in items) > WRITE_PREVIOUS_MAX_CHARS
+        and len(items) > 1
+    ):
+        items.pop(0)
+        clipped = True
+    if items and sum(len(str(item.get("content") or "")) for item in items) > WRITE_PREVIOUS_MAX_CHARS:
+        items[-1]["content"], _ = _clip_text(str(items[-1].get("content") or ""), WRITE_PREVIOUS_MAX_CHARS)
+        clipped = True
+    if clipped and items and "notice" not in items[0]:
+        items.insert(0, {"notice": "更早小节的正文已从提示词缩短或拿掉，完整正文仍留在综述状态里。"})
+    return items, clipped
+
+
+def _clip_tool_results(results: Any) -> tuple[Any, bool]:
+    """工具结果太长时丢掉更早的几次，留下最近取回的资料。"""
+
+    if not isinstance(results, list):
+        return results, False
+    kept = list(results)
+    dropped = 0
+    while kept and len(json.dumps(kept, ensure_ascii=False)) > WRITE_TOOL_RESULTS_MAX_CHARS:
+        kept.pop(0)
+        dropped += 1
+    if dropped:
+        kept.insert(0, {"notice": f"更早的 {dropped} 次工具结果已从提示词拿掉，需要时可以再按论文编号取。"})
+        return kept, True
+    return results, False
+
+
+def _clip_abstract_sections(sections: list[JsonObject]) -> tuple[list[JsonObject], bool]:
+    """摘要只看每节开头一段，所有开头加起来不超过总上限。"""
+
+    body: list[JsonObject] = []
+    clipped = False
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        content = str(section.get("content") or "").strip()
+        if not content:
+            continue
+        opening = content.split("\n\n", 1)[0]
+        shown, did_clip = _clip_text(opening, ABSTRACT_SECTION_CHARS)
+        clipped = clipped or did_clip or len(opening) < len(content)
+        body.append(
+            {
+                "小节标题": str(section.get("section_title") or section.get("section_id") or ""),
+                "正文": shown,
+            }
+        )
+    while sum(len(str(item.get("正文") or "")) for item in body) > ABSTRACT_TOTAL_CHARS and body:
+        body[0]["正文"], _ = _clip_text(str(body[0].get("正文") or ""), 80)
+        if sum(len(str(item.get("正文") or "")) for item in body) > ABSTRACT_TOTAL_CHARS:
+            body.pop(0)
+        clipped = True
+    return body, clipped
 
 
 def _fallback_abstract(topic: str, sections: list[JsonObject]) -> str:

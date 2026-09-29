@@ -1,3 +1,5 @@
+/** 文件作用：定义会话、消息、运行状态和事件的数据结构。 */
+
 import type { ChatCardPayload } from "./chat";
 
 export type SessionStatus =

@@ -1,3 +1,4 @@
+// 文件作用：作为前端 TypeScript 配置入口，引用应用和构建工具两套配置。
 {
   "files": [],
   "references": [

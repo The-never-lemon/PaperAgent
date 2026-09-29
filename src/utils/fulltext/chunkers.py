@@ -1,4 +1,4 @@
-# 这个文件把全文切成一块一块方便阅读，从 src/utils/read_utils/chunkers.py 挪到这里。
+# 文件作用：把论文 Markdown 按标题和长度切成适合模型阅读的片段。
 from __future__ import annotations
 
 import asyncio

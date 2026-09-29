@@ -1,3 +1,4 @@
+# 文件作用：定义论文检索连接器和元数据整理器必须实现的共同接口。
 from __future__ import annotations
 
 import asyncio

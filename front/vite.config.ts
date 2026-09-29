@@ -1,3 +1,5 @@
+/** 文件作用：配置 Vue 插件、前端构建输出和本地开发服务器。 */
+
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 

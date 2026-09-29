@@ -1,3 +1,4 @@
+# 文件作用：创建 FastAPI 应用，注册路由、静态页面、生命周期和全局异常处理。
 from __future__ import annotations
 
 import asyncio

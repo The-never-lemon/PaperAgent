@@ -1,3 +1,4 @@
+# 文件作用：按配置文件检查各模型提供商当前能否正常连接。
 import json
 import os
 import unittest

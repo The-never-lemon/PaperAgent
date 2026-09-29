@@ -1,4 +1,4 @@
-# 这个文件负责把 PDF 页面拆成文字块，从 src/utils/read_utils/pdf_parsers.py 挪到这里。
+# 文件作用：定义并实现不同 PDF 解析方式，把页面整理成文字块。
 from __future__ import annotations
 
 import hashlib

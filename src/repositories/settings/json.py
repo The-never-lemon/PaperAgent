@@ -1,3 +1,4 @@
+# 文件作用：把模型和系统设置保存到 JSON 文件，并在启动时读回。
 from __future__ import annotations
 
 import copy

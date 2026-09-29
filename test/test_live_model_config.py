@@ -1,3 +1,4 @@
+# 文件作用：在配置真实模型时验证连接、流式输出和基本回答。
 import json
 import os
 import unittest

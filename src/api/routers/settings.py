@@ -1,3 +1,4 @@
+# 文件作用：提供模型、提供商和系统设置的读取、保存和测试接口。
 from __future__ import annotations
 
 from typing import Any

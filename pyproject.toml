@@ -1,3 +1,4 @@
+# 文件作用：声明项目信息、Python 版本、运行依赖和开发工具配置。
 [project]
 name = "papers-agents"
 version = "0.1.0"

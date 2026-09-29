@@ -1,3 +1,4 @@
+# 文件作用：验证不同模型适配器的请求格式和工具调用解析。
 import unittest
 
 from src.llm import ModelConfig, StreamCallbacks, make_provider

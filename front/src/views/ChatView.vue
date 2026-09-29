@@ -1,3 +1,5 @@
+<!-- 文件作用：作为主聊天页面，连接消息流、输入区和会话运行控制。 -->
+
 <script setup lang="ts">
 /**
  * 对话式调研主界面（实施方案第六节的 ChatView）。
@@ -30,6 +32,7 @@ import AssistantBubble from "../components/chat/AssistantBubble.vue";
 import MathText from "../components/chat/MathText.vue";
 import ChatComposer from "../components/chat/ChatComposer.vue";
 import DeepReadReportCard from "../components/chat/DeepReadReportCard.vue";
+import ReviewDrawer from "../components/chat/ReviewDrawer.vue";
 import DeepReadDrawer from "../components/chat/DeepReadDrawer.vue";
 import PaperCardGroup from "../components/chat/PaperCardGroup.vue";
 import PaperInfoDialog from "../components/chat/PaperInfoDialog.vue";
@@ -181,6 +184,9 @@ function resetPanelWidth() {
 // 精读报告抽屉状态
 const drawerVisible = ref(false);
 const drawerReport = ref<DeepReadReportPayload | null>(null);
+// 综述抽屉状态：卡片只带目录，点开后再去拉终稿 Markdown。
+const reviewDrawerVisible = ref(false);
+const reviewDrawerPayload = ref<ReviewCardPayload | null>(null);
 // 当前会话里已有精读报告的论文编号（论文卡片上的"报告"按钮靠它显示）
 const readablePaperIds = ref<Set<string>>(new Set());
 // 当前会话工作区里全部论文编号（助手回复里的 [paper_id] 引用按钮靠它判定）
@@ -396,6 +402,8 @@ async function selectSession(sessionKey: string) {
   cancelling.value = false;
   drawerVisible.value = false;
   drawerReport.value = null;
+  reviewDrawerVisible.value = false;
+  reviewDrawerPayload.value = null;
   selectedSessionKey.value = sessionKey;
   threadLoading.value = true;
   workspaceSnapshot.value = null;
@@ -454,6 +462,8 @@ function resetToBlankWorkspace() {
   showScrollToBottom.value = false;
   drawerVisible.value = false;
   drawerReport.value = null;
+  reviewDrawerVisible.value = false;
+  reviewDrawerPayload.value = null;
   readablePaperIds.value = new Set();
   workspacePaperIds.value = new Set();
   workspacePapers.value = new Map();
@@ -957,9 +967,22 @@ function requestDeepRead(paper: ChatPaperCard) {
   submitMessage(`${verb} [${paper.paper_id}]《${paper.title}》`);
 }
 
+/** 综述卡片：打开右侧抽屉阅读终稿。完整 Markdown 由抽屉自己去拉。 */
+function openReview(payload: ReviewCardPayload) {
+  if (!payload.artifact_id) return;
+  drawerVisible.value = false;
+  reviewDrawerPayload.value = payload;
+  reviewDrawerVisible.value = true;
+}
+
+function closeReviewDrawer() {
+  reviewDrawerVisible.value = false;
+}
+
 /** 卡片上的"报告"按钮：从工作区 REST 端点拉最新报告并打开抽屉。 */
 async function openReportForPaper(paper: ChatPaperCard) {
   if (!selectedSessionKey.value) return;
+  reviewDrawerVisible.value = false;
   drawerVisible.value = true;
   drawerReport.value = null;
   try {
@@ -996,6 +1019,7 @@ function requestDeepReadById(paperId: string) {
 /** 面板里的「报告」按钮：按 paper_id 打开精读报告抽屉。 */
 async function openReportById(paperId: string) {
   if (!selectedSessionKey.value) return;
+  reviewDrawerVisible.value = false;
   drawerVisible.value = true;
   drawerReport.value = null;
   try {
@@ -1259,7 +1283,7 @@ function handleError(error: unknown, title: string) {
                 <ReviewMessage
                   v-else-if="message.kind === 'review' && asReview(message)"
                   :payload="asReview(message)!"
-                  :session-key="selectedSessionKey"
+                  @open="openReview"
                 />
                 <div v-else-if="message.kind === 'error'" class="chat-system-line" data-tone="danger">
                   <MathText :text="message.content" />
@@ -1346,6 +1370,16 @@ function handleError(error: unknown, title: string) {
       :busy="isRunning || sending"
       @close="closeDrawer"
       @ask="askFromDrawer"
+    />
+
+    <ReviewDrawer
+      :visible="reviewDrawerVisible"
+      :payload="reviewDrawerPayload"
+      :session-key="selectedSessionKey"
+      :paper-ref-lookup="paperRefLookup"
+      :known-paper-ids="workspacePaperIds"
+      @close="closeReviewDrawer"
+      @paper-click="handlePaperClick"
     />
 
     <!-- 点击引用但该论文尚未精读时，用弹窗展示标题、摘要和原文链接 -->

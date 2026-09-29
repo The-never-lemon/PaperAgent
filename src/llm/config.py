@@ -1,3 +1,4 @@
+# 文件作用：读取模型和系统配置，并整理成运行时使用的数据对象。
 from __future__ import annotations
 
 import os

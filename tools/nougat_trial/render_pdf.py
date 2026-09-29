@@ -1,3 +1,4 @@
+# 文件作用：在独立环境里使用 Nougat 把 PDF 按页转换成 Markdown。
 """用已经装好的 Nougat 把一篇 PDF 按页写成 Markdown。
 
 这个脚本跑在 tools/nougat_trial 的单独环境里，主程序不要直接 import 它。

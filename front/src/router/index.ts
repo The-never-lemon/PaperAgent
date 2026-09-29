@@ -1,3 +1,5 @@
+/** 文件作用：配置聊天页面和系统设置页面之间的跳转规则。 */
+
 import { createRouter, createWebHistory } from "vue-router";
 
 import ChatView from "../views/ChatView.vue";

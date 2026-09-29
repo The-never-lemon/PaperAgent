@@ -1,3 +1,5 @@
+/* 文件作用：定义全站颜色、字号、布局、动画和通用控件样式。 */
+
 @import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Noto+Serif+SC:wght@600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap");
 
 /* ==========================================================================
@@ -4759,6 +4761,12 @@ a {
   gap: 10px;
   padding: 16px 18px 12px;
   border-bottom: 1px solid var(--line);
+}
+
+.review-drawer-meta {
+  margin: 4px 0 0;
+  color: var(--ink-3);
+  font-size: var(--fs-meta);
 }
 
 .deep-read-drawer-head h3 {

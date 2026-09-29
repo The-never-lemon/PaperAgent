@@ -1,3 +1,5 @@
+<!-- 文件作用：在聊天中展示精读摘要卡片和打开完整报告的按钮。 -->
+
 <script setup lang="ts">
 /**
  * 精读报告卡片（metadata.kind = "deep_read_report"）。

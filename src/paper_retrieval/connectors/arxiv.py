@@ -1,3 +1,4 @@
+# 文件作用：从 arXiv 检索论文，并把返回结果转换成统一论文结构。
 from __future__ import annotations
 
 from datetime import datetime

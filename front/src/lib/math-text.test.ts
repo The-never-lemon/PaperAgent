@@ -1,3 +1,5 @@
+/** 文件作用：检查普通文字与数学公式的拆分结果是否符合预期。 */
+
 import assert from "node:assert/strict";
 import { test } from "node:test";
 

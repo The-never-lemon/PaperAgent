@@ -1,3 +1,4 @@
+# 文件作用：说明智能体代码按 common、research、reading、review 四类职责分组。
 """智能体包。
 
 按职责分成四块，用的时候直接 import 具体模块：

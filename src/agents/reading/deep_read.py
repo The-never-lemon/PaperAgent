@@ -1,4 +1,4 @@
-# 这个文件负责全文精读，从 src/agents/deepReadAgent.py 挪到这里。
+# 文件作用：下载并切分论文全文，逐块精读、汇总报告并保存结果。
 """精读子 Agent（agent-as-tool 模式）。
 
 这个模块是精读链路的执行核心。主 Agent 通过 deep_read_paper 工具把精读任务

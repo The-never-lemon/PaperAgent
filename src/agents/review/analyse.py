@@ -1,4 +1,4 @@
-# 这个文件做综述前的论文分析，从 src/agents/review_analyse.py 挪到这里。
+# 文件作用：在写综述前阅读论文集，提炼共同主题、矛盾和可写方向。
 """综述的分析步骤：读论文集，再做一次领域综合。
 
 这里不是独立子 Agent。综述流水线把已经装配好的模型传进来，
@@ -30,6 +30,25 @@ ANALYSE_MAX_ATTEMPTS = 3
 # 重试时 max_tokens 翻倍的上限。设这个天花板，是为了避免模型反复不守格式时，
 # 上限被一路翻倍到离谱的数字（既浪费额度，也拖长一次综述的等待时间）。
 ANALYSE_MAX_TOKENS_CEILING = 32768
+
+# 子主题分析和全局综合要想完再写出长 JSON，60 秒常常不够。只把这两步的等待放宽，
+# 主对话和写作仍用原来的 60 秒。
+ANALYSE_CHAT_TIMEOUT_S = 180
+
+# 子主题分析一次送给模型的用户消息大约不超过这么多字。按这个数把论文分成几批，
+# 一张论文卡片不从中间切开，避免后半篇论文在这一步就丢失。
+SUBTOPIC_BATCH_MAX_CHARS = 12000
+
+# 全局综合不再把子主题分析的长文整段塞进去。每个长字段先收到这个字数，
+# 整份用户材料再卡一个总上限。完整分析仍留在综述状态里。
+OVERALL_FIELD_MAX_CHARS = 1500
+OVERALL_USER_MAX_CHARS = 12000
+
+# 截短时附在末尾，让模型知道后面还有原文，不要把截断当成已经写完。
+_CLIP_NOTE = "……（原文更长，完整内容仍留在综述状态里）"
+
+# 子主题分析里需要按批接起来的长文本字段。一致点是列表，合并时单独处理。
+_SUBTOPIC_TEXT_FIELDS = ("研究现状", "矛盾点", "研究空白", "时间线演化", "技术方法栈演变")
 
 
 @dataclass(slots=True)
@@ -80,6 +99,7 @@ async def analyse_subtopic(
         reasoning_effort="medium",
         usage_callback=usage_callback,
         stage="子主题分析",
+        timeout_s=ANALYSE_CHAT_TIMEOUT_S,
     )
 
 
@@ -106,6 +126,7 @@ async def analyse_overall(
         reasoning_effort="medium",
         usage_callback=usage_callback,
         stage="全局综合分析",
+        timeout_s=ANALYSE_CHAT_TIMEOUT_S,
     )
 
 
@@ -117,6 +138,7 @@ async def _chat_json_with_retry(
     reasoning_effort: str,
     usage_callback: Any | None,
     stage: str,
+    timeout_s: float | None = None,
 ) -> AnalyseModelResult:
     """要模型返回一段 JSON，失败时最多重试 ANALYSE_MAX_ATTEMPTS 次。
 
@@ -130,8 +152,16 @@ async def _chat_json_with_retry(
     解析错误一起还给模型，让它在看得见错误的前提下重写一遍，比原样重发有效。
 
     两种都失败到底时，把原始输出和最后一次的原因交回去，由上层决定怎么处理。
+
+    请求本身没成功（超时、断连）不走上面两种重试。那种失败重发只会再空等一轮，
+    把超时原文贴回去让模型「重写 JSON」也没有用。
     """
 
+    user_chars = sum(len(str(item.get("content") or "")) for item in messages if item.get("role") == "user")
+    logger.info(
+        "分析提示词已装好",
+        extra={"stage": stage, "user_chars": user_chars, "timeout_s": timeout_s or 60},
+    )
     attempts = ANALYSE_MAX_ATTEMPTS
     # 第一次用当前档位配的 max_tokens；后面每次重试都翻倍，给被截断的输出留出空间。
     # 同时设一个天花板，避免模型反复不守格式时限，上限被一路顶到离谱的数字。
@@ -148,6 +178,7 @@ async def _chat_json_with_retry(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 reasoning_effort=reasoning_effort,
+                timeout_s=timeout_s,
             )
         except Exception as exc:
             last_reason = f"分析模型调用失败：{exc}"
@@ -162,6 +193,18 @@ async def _chat_json_with_retry(
         last_raw = str(getattr(response, "content", "") or "")
         outcome = await _parse_response(response, max_tokens=max_tokens)
         if outcome.parsed is not None:
+            return outcome
+        # 超时、断连这类错误没有可解析的正文。再重试只会把 max_tokens 翻倍后空等。
+        if str(getattr(response, "finish_reason", "") or "") == "error":
+            logger.warning(
+                "分析请求没有成功，不再当成 JSON 写坏了去重试",
+                extra={
+                    "stage": stage,
+                    "attempt": attempt,
+                    "finish_reason": "error",
+                    "reason": outcome.reason[:200],
+                },
+            )
             return outcome
         last_reason = outcome.reason
         logger.warning(
@@ -333,42 +376,127 @@ def _subtopic_messages(*, topic: str, group: JsonObject) -> list[JsonObject]:
 
 
 def _overall_messages(*, topic: str, subtopic_analyses: list[JsonObject]) -> list[JsonObject]:
-    """为全局综合分析生成提示词。"""
+    """为全局综合分析生成提示词。
 
-    summaries = [
-        {
-            "subtopic": item.get("subtopic"),
-            "paper_count": item.get("paper_count"),
-            "paperIds": item.get("paperIds", []),
-            "研究现状": item.get("研究现状", ""),
-            "一致点": item.get("一致点", []),
-            "矛盾点": item.get("矛盾点", ""),
-            "研究空白": item.get("研究空白", ""),
-            "时间线演化": item.get("时间线演化", ""),
-            "技术方法栈演变": item.get("技术方法栈演变", ""),
-        }
-        for item in subtopic_analyses
-    ]
+    中文说明：子主题分析的全文已经在综述状态里。这里只把每个长字段收成摘录，
+    编号列表保持完整，这样模型仍能对上论文，又不会把整段分析一次塞爆。
+    """
+
+    field_limit = OVERALL_FIELD_MAX_CHARS
+    content = ""
+    clipped: list[str] = []
+    # 字段先按 1500 字收。若加上编号后整份材料仍超过总上限，就把字段上限减半再装，
+    # 直到装得下或字段已经短到 200 字。编号不砍。
+    while True:
+        summaries, clipped = _clip_subtopic_summaries(subtopic_analyses, field_limit)
+        content = json.dumps(
+            {
+                "任务": "根据各子主题分析摘要做全局综合分析",
+                "用户综述主题": topic,
+                "输出要求": _overall_analysis_schema_hint(),
+                "各子主题分析摘要": summaries,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        if len(content) <= OVERALL_USER_MAX_CHARS or field_limit <= 200:
+            break
+        field_limit = max(200, field_limit // 2)
+    logger.info(
+        "全局综合提示词已装好",
+        extra={
+            "user_chars": len(content),
+            "field_limit": field_limit,
+            "clipped_fields": "、".join(clipped) if clipped else "无",
+        },
+    )
     return [
         {
             "role": "system",
             # 中文说明：全局分析单独使用专门提示词，强调跨主题归纳和证据可追溯。
             "content": ANALYSE_OVERALL_SYSTEM_PROMPT,
         },
-        {
-            "role": "user",
-            "content": json.dumps(
-                {
-                    "任务": "根据各子主题分析摘要做全局综合分析",
-                    "用户综述主题": topic,
-                    "输出要求": _overall_analysis_schema_hint(),
-                    "各子主题分析摘要": summaries,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-        },
+        {"role": "user", "content": content},
     ]
+
+
+def split_subtopic_batches(
+    *,
+    topic: str,
+    subtopic: str,
+    papers: list[JsonObject],
+) -> list[list[JsonObject]]:
+    """按提示词字数把论文卡片分成几批。
+
+    中文说明：一批的用户消息大约不超过 SUBTOPIC_BATCH_MAX_CHARS。
+    一张卡片要么整张进入这一批，要么留到下一批，不从卡片中间切开。
+    单张卡片自己就已经超限时，仍单独成一批，避免它永远进不了任何一批。
+    """
+
+    if not papers:
+        return [[]]
+    batches: list[list[JsonObject]] = []
+    current: list[JsonObject] = []
+    for paper in papers:
+        trial = [*current, paper]
+        if current and _subtopic_user_chars(topic, subtopic, trial) > SUBTOPIC_BATCH_MAX_CHARS:
+            batches.append(current)
+            current = [paper]
+        else:
+            current = trial
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _subtopic_user_chars(topic: str, subtopic: str, papers: list[JsonObject]) -> int:
+    """算出这一批论文装进用户消息后有多少字。"""
+
+    messages = _subtopic_messages(
+        topic=topic,
+        group={"subtopic": subtopic, "papers": papers},
+    )
+    return len(str(messages[-1].get("content") or ""))
+
+
+def _clip_subtopic_summaries(
+    subtopic_analyses: list[JsonObject],
+    field_limit: int,
+) -> tuple[list[JsonObject], list[str]]:
+    """把子主题长字段收成摘录，返回摘录和被截短的字段名。"""
+
+    clipped: list[str] = []
+    summaries: list[JsonObject] = []
+    for item in subtopic_analyses:
+        summary: JsonObject = {
+            "subtopic": item.get("subtopic"),
+            "paper_count": item.get("paper_count"),
+            "paperIds": item.get("paperIds", []),
+        }
+        for field in (*_SUBTOPIC_TEXT_FIELDS, "一致点"):
+            text, did_clip = _clip_text(_field_as_text(item.get(field)), field_limit)
+            summary[field] = text
+            if did_clip and field not in clipped:
+                clipped.append(field)
+        summaries.append(summary)
+    return summaries, clipped
+
+
+def _field_as_text(value: Any) -> str:
+    """把字段收成一段文字。列表按行接起来，空值变成空字符串。"""
+
+    if isinstance(value, list):
+        return "\n".join(str(item).strip() for item in value if str(item).strip())
+    return str(value or "").strip()
+
+
+def _clip_text(text: str, limit: int) -> tuple[str, bool]:
+    """超过上限就截断，并标明原文更长。"""
+
+    if len(text) <= limit:
+        return text, False
+    keep = max(0, limit - len(_CLIP_NOTE))
+    return text[:keep] + _CLIP_NOTE, True
 
 
 def _analysis_schema_hint() -> JsonObject:

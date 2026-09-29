@@ -1,3 +1,5 @@
+<!-- 文件作用：作为前端外壳，管理左侧会话栏、页面路由、全局提示和启动数据。 -->
+
 <script setup lang="ts">
 import { AlertCircle, LoaderCircle } from "lucide-vue-next";
 import { computed, onMounted, ref, watch } from "vue";

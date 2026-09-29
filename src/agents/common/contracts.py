@@ -1,4 +1,4 @@
-# 这个文件放智能体之间共用的类型名字，从 src/agents/contracts.py 挪到这里。
+# 文件作用：定义智能体之间共享的类型名称和返回结构约束。
 from __future__ import annotations
 
 from typing import Any, Literal

@@ -1,3 +1,4 @@
+# 文件作用：汇总会话、设置和工作区三组 HTTP 接口。
 """API 路由包。"""
 
 from .sessions import create_sessions_router

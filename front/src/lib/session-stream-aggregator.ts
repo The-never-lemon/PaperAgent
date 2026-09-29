@@ -1,3 +1,5 @@
+/** 文件作用：把后端事件流整理成聊天消息、工具轨迹和各类结果卡片。 */
+
 import type { ChatCardKind, ChatCardPayload, DeepReadCardPayload } from "../types/chat";
 import type {
   RuntimeDetailContent,

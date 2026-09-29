@@ -1,3 +1,5 @@
+<!-- 文件作用：作为系统设置页面，管理模型、提供商和运行参数。 -->
+
 <script setup lang="ts">
 import {
   ArrowUpRight,

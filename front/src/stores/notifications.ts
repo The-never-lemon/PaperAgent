@@ -1,3 +1,5 @@
+/** 文件作用：保存并推送页面上的成功、失败和提醒消息。 */
+
 import { reactive } from "vue";
 
 export type ToastTone = "success" | "error" | "info";

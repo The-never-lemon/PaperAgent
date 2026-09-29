@@ -1,29 +1,27 @@
+<!-- 文件作用：展示综述生成进度、章节状态和最终产物。 -->
+
 <script setup lang="ts">
 /**
  * 综述产物卡片（metadata.kind = "review"）。
  *
  * 中文说明：
- * 综述生成完成后展示主题、字数和章节目录，并提供终稿 Markdown 的
- * 下载/预览链接（走会话产物端点）。
+ * 综述生成完成后展示主题、字数和章节目录。点「查看完整综述」打开右侧抽屉，
+ * 在抽屉里阅读全文并下载 Markdown。卡片本身不塞整篇终稿。
  */
-import { computed } from "vue";
-import { FileDown, ScrollText } from "lucide-vue-next";
+import { FileText, ScrollText } from "lucide-vue-next";
 
 import type { ReviewCardPayload } from "../../types/chat";
 import MathText from "./MathText.vue";
 
 defineOptions({ name: "ReviewMessage" });
 
-const props = defineProps<{
+defineProps<{
   payload: ReviewCardPayload;
-  sessionKey: string;
 }>();
 
-/** 拼接综述终稿的下载地址。 */
-const downloadUrl = computed(() => {
-  if (!props.sessionKey || !props.payload.artifact_id) return "#";
-  return `/api/sessions/${encodeURIComponent(props.sessionKey)}/artifacts/${encodeURIComponent(props.payload.artifact_id)}`;
-});
+const emit = defineEmits<{
+  open: [payload: ReviewCardPayload];
+}>();
 </script>
 
 <template>
@@ -40,9 +38,14 @@ const downloadUrl = computed(() => {
         </li>
       </ol>
       <footer class="review-card-actions">
-        <a class="paper-card-action review-download" :href="downloadUrl" target="_blank" rel="noreferrer">
-          <FileDown :size="14" /> 下载 / 预览 literature_review.md
-        </a>
+        <button
+          type="button"
+          class="paper-card-action"
+          :disabled="!payload.artifact_id"
+          @click="emit('open', payload)"
+        >
+          <FileText :size="14" /> 查看完整综述
+        </button>
       </footer>
     </section>
   </div>

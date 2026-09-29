@@ -1,4 +1,4 @@
-# 这个文件把全文 PDF 转成 Markdown，从 src/utils/read_utils/read_fulltext.py 挪到这里。
+# 文件作用：调用 PDF 解析器把全文转换成 Markdown 并写入缓存。
 from __future__ import annotations
 
 import asyncio

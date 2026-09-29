@@ -1,3 +1,4 @@
+# 文件作用：定义论文检索请求、论文详情和检索结果等公共数据。
 from __future__ import annotations
 
 from dataclasses import dataclass, field

@@ -1,3 +1,4 @@
+# 文件作用：从 OpenAlex 检索论文，并整理标题、作者和摘要等元数据。
 from __future__ import annotations
 
 import httpx

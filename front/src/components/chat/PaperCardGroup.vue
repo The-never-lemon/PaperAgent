@@ -1,3 +1,5 @@
+<!-- 文件作用：展示一次检索得到的论文卡片列表和批量操作。 -->
+
 <script setup lang="ts">
 /**
  * 论文卡片组（metadata.kind = "paper_list"）。

@@ -1,3 +1,4 @@
+# 文件作用：根据配置创建具体模型提供商，并提供可复用的模型快照。
 from __future__ import annotations
 
 import hashlib

@@ -1,3 +1,4 @@
+# 文件作用：保存项目运行时的默认参数、模型设置和论文处理配置。
 defaults:
   llm:
     temperature: null

@@ -1,3 +1,5 @@
+/** 文件作用：检查会话事件能否正确合并成消息、工具轨迹和结果卡片。 */
+
 import assert from "node:assert/strict";
 import { test } from "node:test";
 

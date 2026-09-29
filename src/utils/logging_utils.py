@@ -1,3 +1,4 @@
+# 文件作用：提供统一日志输出、请求编号和日志上下文信息。
 from __future__ import annotations
 
 import json

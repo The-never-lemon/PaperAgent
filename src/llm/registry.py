@@ -1,3 +1,4 @@
+# 文件作用：登记可用模型提供商及其默认地址、协议和能力信息。
 from __future__ import annotations
 
 from collections.abc import Mapping

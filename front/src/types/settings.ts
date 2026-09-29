@@ -1,3 +1,5 @@
+/** 文件作用：定义模型提供商、Agent 和设置表单的数据结构。 */
+
 export interface AgentItem {
   name: string;
   label: string;

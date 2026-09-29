@@ -1,3 +1,4 @@
+# 文件作用：整理会话消息、运行事件、产物和前端需要的展示数据。
 from __future__ import annotations
 
 import copy

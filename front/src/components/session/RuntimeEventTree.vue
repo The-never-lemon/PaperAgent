@@ -1,3 +1,5 @@
+<!-- 文件作用：按层级展示一次运行中的节点、工具、消息和错误事件。 -->
+
 <script setup lang="ts">
 import {
   CheckCircle2,

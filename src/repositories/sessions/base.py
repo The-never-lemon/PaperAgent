@@ -1,3 +1,4 @@
+# 文件作用：定义会话、消息、事件和产物读写的统一接口。
 from __future__ import annotations
 
 from abc import ABC, abstractmethod

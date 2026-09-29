@@ -1,3 +1,4 @@
+# 文件作用：验证运行事件中的工具参数按 JSON 对象展示。
 """运行事件详情展示：工具参数应是 JSON 对象本身，而不是套一层 arguments_summary 字符串。"""
 
 import json

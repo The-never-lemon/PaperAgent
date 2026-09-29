@@ -1,3 +1,4 @@
+# 文件作用：并行调用多个论文检索源，合并、去重并返回统一结果。
 from __future__ import annotations
 
 import asyncio

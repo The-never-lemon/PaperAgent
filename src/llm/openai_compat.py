@@ -1,3 +1,4 @@
+# 文件作用：适配 OpenAI 兼容接口的消息、流式输出和工具调用格式。
 from __future__ import annotations
 
 import inspect
@@ -50,12 +51,20 @@ class OpenAICompatProvider(LLMProvider):
         temperature: float | None = None,
         max_tokens: int | None = None,
         reasoning_effort: str | None = None,
+        timeout_s: float | None = None,
     ) -> LLMResponse:
         """发起一次非流式 Chat Completions 请求，并统一处理重试、限流和耗时日志。"""
 
         return await self._run_llm_call(
             "chat",
-            lambda: self._chat_once(messages, tools=tools, temperature=temperature, max_tokens=max_tokens, reasoning_effort=reasoning_effort),
+            lambda: self._chat_once(
+                messages,
+                tools=tools,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                reasoning_effort=reasoning_effort,
+                timeout_s=timeout_s,
+            ),
         )
 
     async def _chat_once(
@@ -66,13 +75,22 @@ class OpenAICompatProvider(LLMProvider):
         temperature: float | None = None,
         max_tokens: int | None = None,
         reasoning_effort: str | None = None,
+        timeout_s: float | None = None,
     ) -> LLMResponse:
         """只执行一次真实请求；是否重试由基类统一决定。"""
 
         try:
             response = await _maybe_await(
                 self.client.chat.completions.create(
-                    **self._build_kwargs(messages, tools, False, temperature, max_tokens, reasoning_effort)
+                    **self._build_kwargs(
+                        messages,
+                        tools,
+                        False,
+                        temperature,
+                        max_tokens,
+                        reasoning_effort,
+                        timeout_s=timeout_s,
+                    )
                 )
             )
             return self._parse_response(response)
@@ -195,6 +213,7 @@ class OpenAICompatProvider(LLMProvider):
         temperature: float | None,
         max_tokens: int | None,
         reasoning_effort: str | None,
+        timeout_s: float | None = None,
     ) -> JsonObject:
         """构造传给 OpenAI Python SDK 的 Chat Completions 参数。
 
@@ -242,6 +261,9 @@ class OpenAICompatProvider(LLMProvider):
         if self.extra_body:
             # 厂商兼容扩展交给 SDK 的 extra_body 注入，避免自己拼 HTTP 请求。
             kwargs["extra_body"] = self.extra_body
+        # 只在调用方明确要求时覆盖这一次请求的等待时间，其它调用仍用客户端默认的 60 秒。
+        if timeout_s is not None and timeout_s > 0:
+            kwargs["timeout"] = float(timeout_s)
         return kwargs
 
     def _request_model_name(self) -> str:

@@ -1,4 +1,4 @@
-# 这个文件管一次运行里共用的并发上限和网络客户端，从 src/graph/runtime_resources.py 挪到这里。
+# 文件作用：管理一次运行中共享的并发上限、网络客户端和后台任务。
 from __future__ import annotations
 
 import asyncio

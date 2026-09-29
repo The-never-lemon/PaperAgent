@@ -1,3 +1,4 @@
+# 文件作用：创建并启动 FastAPI 后端服务，是本地运行项目的入口。
 from src.utils import get_logger, setup_logging
 
 

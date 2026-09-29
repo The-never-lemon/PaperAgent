@@ -1,10 +1,11 @@
+# 文件作用：提供会话创建、列表、消息流、运行、取消和删除接口。
 from __future__ import annotations
 
 import asyncio
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
 from src.repositories.sessions.base import SessionRepository
@@ -60,12 +61,18 @@ def create_sessions_router(
         return fetch_thread(repo, session_key)
 
     @router.get("/{session_key}/artifacts/{artifact_id}")
-    async def get_artifact(session_key: str, artifact_id: str) -> FileResponse:
+    async def get_artifact(
+        session_key: str,
+        artifact_id: str,
+        download: bool = Query(False),
+    ) -> FileResponse:
         """提供指定会话产物文件的预览或下载。
 
         中文说明：
         产物文件路径由仓储层做安全校验，只有位于该会话目录内的文件才会被返回；
         记录不存在、路径越界或文件已被删除时统一返回 404。
+        平时在浏览器里打开是预览；带 download=1 时改成附件，浏览器会把文件存下来。
+        综述抽屉的「下载」按钮走的就是后面这条。
         """
 
         file_path = repo.read_artifact_path(session_key, artifact_id)
@@ -74,7 +81,7 @@ def create_sessions_router(
         return FileResponse(
             file_path,
             filename=file_path.name,
-            content_disposition_type="inline",
+            content_disposition_type="attachment" if download else "inline",
             media_type=_artifact_media_type(file_path),
         )
 

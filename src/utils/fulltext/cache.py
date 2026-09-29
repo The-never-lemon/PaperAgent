@@ -1,4 +1,4 @@
-# 这个文件管论文全文在本机的缓存目录，从 src/utils/read_utils/cache.py 挪到这里。
+# 文件作用：管理论文全文、Markdown 和切片在本机缓存中的位置。
 from __future__ import annotations
 
 import json

@@ -1,4 +1,4 @@
-# 这个文件看摘要判断论文和主题相不相关，从 src/agents/readAgent.py 挪到这里。
+# 文件作用：阅读论文摘要，整理笔记并判断论文与用户主题的相关程度。
 from __future__ import annotations
 
 import asyncio

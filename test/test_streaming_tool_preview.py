@@ -1,3 +1,4 @@
+# 文件作用：验证流式工具调用首次出现时能生成预览卡片。
 import unittest
 
 from src.agents.research.agent import note_streaming_tool_call

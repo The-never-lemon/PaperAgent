@@ -1,3 +1,4 @@
+# 文件作用：定义模型提供商共用的请求、响应、流式回调和重试能力。
 from __future__ import annotations
 
 import asyncio
@@ -290,11 +291,13 @@ class LLMProvider(ABC):
         temperature: float | None = None,
         max_tokens: int | None = None,
         reasoning_effort: str | None = None,
+        timeout_s: float | None = None,
     ) -> LLMResponse:
         """执行一次非流式对话请求。
 
         子类需要把内部统一消息格式转换为目标厂商协议，并把原始响应解析成
         `LLMResponse`。这里定义的是 provider 必须遵守的最小异步接口契约。
+        timeout_s 只覆盖这一次请求的等待时间；不传就用创建客户端时的默认超时。
         """
         raise NotImplementedError
 

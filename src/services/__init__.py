@@ -1,3 +1,4 @@
+# 文件作用：作为应用服务包入口，导出业务层常用对象。
 """应用服务包。
 
 中文说明（阶段6清理）：SessionError 已下沉到 src/models/sessions.py 定义，

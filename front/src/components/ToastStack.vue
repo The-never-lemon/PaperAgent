@@ -1,3 +1,5 @@
+<!-- 文件作用：在页面角落显示成功、失败和提醒消息。 -->
+
 <script setup lang="ts">
 import { notifications, removeToast } from "../stores/notifications";
 </script>

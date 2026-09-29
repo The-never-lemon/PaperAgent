@@ -1,3 +1,4 @@
+# 文件作用：规定本机缓存、构建产物、私有资料等不需要提交到 Git 的文件。
 # Python-generated files
 __pycache__/
 *.py[oc]

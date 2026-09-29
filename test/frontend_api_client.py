@@ -1,3 +1,4 @@
+# 文件作用：为前端相关测试提供轻量的后端接口请求模拟。
 from __future__ import annotations
 
 from typing import Any, Callable

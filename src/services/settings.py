@@ -1,3 +1,4 @@
+# 文件作用：处理模型设置校验、保存、连通性测试和可用模型列表。
 from __future__ import annotations
 
 import asyncio

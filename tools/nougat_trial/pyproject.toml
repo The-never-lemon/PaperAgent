@@ -1,3 +1,4 @@
+# 文件作用：声明 Nougat 试验脚本使用的独立 Python 环境和依赖。
 [project]
 name = "nougat-trial"
 version = "0.0.0"

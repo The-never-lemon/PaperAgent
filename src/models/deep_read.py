@@ -1,3 +1,4 @@
+# 文件作用：定义精读报告、评分维度和报告卡片的保存与读取结构。
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
