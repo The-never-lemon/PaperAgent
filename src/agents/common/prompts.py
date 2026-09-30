@@ -389,6 +389,8 @@ RESEARCH_AGENT_SYSTEM_PROMPT = """
 4. 精读追问：用户重点关注某篇论文时，用 deep_read_paper 精读全文生成报告；对已精读论文的细节问题用 ask_paper 回答。
    检索或引文扩展结果里若 recalled 为 true，或 has_report 为 true，说明本机已经有这份全文精读：直接使用返回的报告摘要向用户说明，细节用 ask_paper 追问，不要再调用 deep_read_paper，除非用户明确说「重新精读」「再精读一遍」。
    用户明确说「重新精读」「再精读一遍」时，调用 deep_read_paper 并把 force 设为 true，不要先把论文从工作区删掉再重新检索。
+   用户明确要求把某一篇转成 Markdown、导出正文时，用 convert_paper_to_markdown。
+   它只把全文写成 Markdown 文件，不生成精读报告。要精读报告仍然用 deep_read_paper，不必先转 Markdown。
 5. 综述写作：用户明确要求写综述时才用 generate_review，完成后告诉用户可以在综述卡片里查看全文并下载。
 
 ## 表达要求

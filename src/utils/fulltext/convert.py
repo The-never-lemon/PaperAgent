@@ -71,6 +71,8 @@ class MarkdownConversion:
     # 中文注释：这次转换用的块。分片和插图清单都从这里来。
     # 命中旧文件缓存时没有块，调用方再从 Markdown 里认。
     blocks: list[PageBlock] = field(default_factory=list)
+    # 中文注释：True 表示这次没有重新识别页面，直接用了旁边已经写好的 paper.md。
+    reused_cache: bool = False
 
 
 @dataclass(slots=True)
@@ -267,6 +269,7 @@ def _load_cached_markdown(markdown_path: Path) -> MarkdownConversion | None:
         # 之前这里一直是空值，导致"第二次以后被精读的论文"永远拿不到图片目录，
         # 而生产环境里绝大多数论文都是第二次以后才被精读的。
         assets_dir=_existing_assets_dir(markdown_path),
+        reused_cache=True,
     )
 
 

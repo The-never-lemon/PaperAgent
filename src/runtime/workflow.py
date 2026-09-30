@@ -297,6 +297,7 @@ _STAGE_DISPLAY: dict[tuple[str, str], RuntimeStageDisplay] = {
     ("tool", "evaluate_papers"): RuntimeStageDisplay("evaluate_papers", "评价论文"),
     ("tool", "remove_papers"): RuntimeStageDisplay("remove_papers", "移除论文"),
     ("tool", "download_paper"): RuntimeStageDisplay("download_paper", "下载论文全文"),
+    ("tool", "convert_paper_to_markdown"): RuntimeStageDisplay("convert_paper_to_markdown", "转换论文全文"),
     ("tool", "deep_read_paper"): RuntimeStageDisplay("deep_read_paper", "精读论文"),
     ("tool", "ask_paper"): RuntimeStageDisplay("ask_paper", "追问论文"),
     ("tool", "generate_review"): RuntimeStageDisplay("generate_review", "生成综述"),

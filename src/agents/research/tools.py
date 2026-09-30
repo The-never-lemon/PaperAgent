@@ -31,6 +31,7 @@ from src.paper_retrieval.models import PaperDocument
 from src.paper_retrieval.service import PaperSearchService
 from src.services.paper_memory import ensure_bound, import_memory_into_session, unbind_session_papers
 from src.utils import get_logger
+from src.utils.fulltext.convert import async_convert_fulltext_to_markdown
 
 from src.agents.reading.deep_read import DeepReadDeps, REPORT_SUMMARY_CHARS, run_deep_read
 from src.agents.reading.paper_qa import PaperQaDeps, run_paper_qa
@@ -391,6 +392,23 @@ DOWNLOAD_PAPER_SPEC = ToolSpec(
     },
 )
 
+CONVERT_PAPER_TO_MARKDOWN_SPEC = ToolSpec(
+    name="convert_paper_to_markdown",
+    description=(
+        "把工作区里某一篇论文的全文转成 Markdown，并写到这篇论文的本地缓存里。"
+        "本地还没有全文时会先下载。已经转过、而且转换规则没变时，直接复用已有文件，不会重跑。"
+        "只产出 Markdown 文件，不生成精读报告。"
+        "用户明确要求转成 Markdown 或导出正文时才调用；要精读报告请用 deep_read_paper，不必先调用本工具。"
+    ),
+    parameters_schema={
+        "type": "object",
+        "properties": {
+            "paper_id": {"type": "string", "description": "论文编号，必须是工作区里已存在的编号"},
+        },
+        "required": ["paper_id"],
+    },
+)
+
 DEEP_READ_PAPER_SPEC = ToolSpec(
     name="deep_read_paper",
     description=(
@@ -515,7 +533,8 @@ def build_research_tool_registry(context: ResearchToolContext) -> ToolRegistry:
     阶段 1：注册 search_papers / list_papers（handler 已实现）。
     阶段 2：已实现 get_paper_details / evaluate_papers / remove_papers。
     阶段 3：已实现 download_paper / deep_read_paper / ask_paper。
-    阶段 4：已实现 generate_review；另有 expand_by_citations（至此十个工具全部注册）。
+    阶段 4：已实现 generate_review；另有 expand_by_citations 与 get_history。
+    全文转写：已实现 convert_paper_to_markdown（至此 12 个工具全部注册）。
     未注册的工具不会出现在模型的可用工具列表里，从根上避免模型调用半成品。
     """
 
@@ -527,6 +546,7 @@ def build_research_tool_registry(context: ResearchToolContext) -> ToolRegistry:
     registry.register(Tool(EVALUATE_PAPERS_SPEC, partial(_handle_evaluate_papers, context)))
     registry.register(Tool(REMOVE_PAPERS_SPEC, partial(_handle_remove_papers, context)))
     registry.register(Tool(DOWNLOAD_PAPER_SPEC, partial(_handle_download_paper, context)))
+    registry.register(Tool(CONVERT_PAPER_TO_MARKDOWN_SPEC, partial(_handle_convert_paper_to_markdown, context)))
     registry.register(Tool(DEEP_READ_PAPER_SPEC, partial(_handle_deep_read_paper, context)))
     registry.register(Tool(ASK_PAPER_SPEC, partial(_handle_ask_paper, context)))
     registry.register(Tool(GENERATE_REVIEW_SPEC, partial(_handle_generate_review, context)))
@@ -1550,6 +1570,120 @@ async def _handle_download_paper(
 
     # 第六步：下载失败如实返回状态和原因，由主 Agent 决定是否降级精读。
     return {"status": downloaded.status, "reason": downloaded.reason}
+
+
+async def _handle_convert_paper_to_markdown(
+    context: ResearchToolContext,
+    *,
+    paper_id: str = "",
+    **_ignored: Any,
+) -> JsonObject:
+    """把一篇论文的全文转成 Markdown，写到这篇论文的本地缓存里。
+
+    本地还没有全文时先下载。已经转好的文件会直接复用。
+    返回给模型的只有页数、字数和文件位置，不带整篇正文。
+    """
+
+    # 第一步：按编号取出论文。工作区里没有就直接告诉主 Agent。
+    cleaned = str(paper_id or "").strip()
+    entry = context.workspace.get_paper(cleaned)
+    if entry is None:
+        return {"error": f"工作区里没有这篇论文：{cleaned}"}
+
+    # 第二步：准备进度上报。卡片标题用工具名，和界面上的「转换论文全文」对上。
+    active = context.get_active_call()
+    reporter = active.reporter if active else context.reporter
+    event_key = active.event_key if active else CONVERT_PAPER_TO_MARKDOWN_SPEC.name
+
+    def _tell_progress(message: str) -> None:
+        reporter.progress(
+            message,
+            stage=CONVERT_PAPER_TO_MARKDOWN_SPEC.name,
+            event_key=event_key,
+        )
+
+    # 第三步：先拿到本地全文。已经下过的会直接用缓存，没有的才去下载。
+    context.check_cancelled()
+    _tell_progress("正在读取本地全文" if entry.fulltext_cached else "正在下载论文全文")
+    read_cfg = SystemConfig.load().read
+    doc = _paper_document_from_dict(entry.paper)
+    logger.info(
+        "工具 convert_paper_to_markdown 开始执行",
+        extra={"session_key": context.session_key, "paper_id": cleaned},
+    )
+    downloaded = await async_download_paper_fulltext(
+        doc,
+        cache_dir=read_cfg.paper_cache_dir,
+        connect_timeout_seconds=read_cfg.connect_timeout_seconds,
+        download_timeout_seconds=read_cfg.download_timeout_seconds,
+        max_file_size_mb=read_cfg.max_file_size_mb,
+        runtime_resources=context.resources,
+    )
+    if downloaded.status != "downloaded" or downloaded.file_path is None:
+        reason = downloaded.reason or "未能获取全文"
+        logger.warning(
+            "工具 convert_paper_to_markdown 未能拿到全文",
+            extra={"session_key": context.session_key, "paper_id": cleaned, "reason": reason},
+        )
+        return {"status": "failed", "reason": reason}
+
+    # 第四步：这次新下载到的全文，要记到工作区，后面就不用再下。
+    if not entry.fulltext_cached:
+        cache_name = downloaded.file_path.parent.name
+        await asyncio.to_thread(
+            partial(
+                ensure_bound,
+                context.session_key,
+                cleaned,
+                entry.paper,
+                cache_dir=cache_name,
+                cache_present=True,
+            )
+        )
+        await asyncio.to_thread(context.workspace.set_fulltext_cached, cleaned, True)
+
+    # 第五步：把全文写成 Markdown。已经写好且规则没变时，转换函数会直接交回旧文件。
+    context.check_cancelled()
+    _tell_progress("正在把全文转成 Markdown")
+    conversion = await async_convert_fulltext_to_markdown(
+        doc,
+        source_path=downloaded.file_path,
+        source_url=downloaded.source_url,
+        on_progress=_tell_progress,
+        raise_if_cancelled=context.cancellation.raise_if_requested if context.cancellation else None,
+    )
+    if conversion.markdown_path is None:
+        reason = "；".join(conversion.warnings) if conversion.warnings else "全文转换失败"
+        logger.warning(
+            "工具 convert_paper_to_markdown 转换失败",
+            extra={"session_key": context.session_key, "paper_id": cleaned, "reason": reason},
+        )
+        return {"status": "failed", "reason": reason}
+
+    # 第六步：只数正文有多长。开头那段论文信息（标题、编号）不算进字数。
+    markdown_text = await asyncio.to_thread(conversion.markdown_path.read_text, encoding="utf-8")
+    body = markdown_text
+    if markdown_text.startswith("---"):
+        header_end = markdown_text.find("\n---", 3)
+        if header_end >= 0:
+            body = markdown_text[header_end + 4 :]
+    logger.info(
+        "工具 convert_paper_to_markdown 执行完成",
+        extra={
+            "session_key": context.session_key,
+            "paper_id": cleaned,
+            "page_count": conversion.page_count,
+            "reused_cache": conversion.reused_cache,
+        },
+    )
+    return {
+        "status": "converted",
+        "paper_id": cleaned,
+        "page_count": conversion.page_count,
+        "char_count": len(body.strip()),
+        "markdown_path": str(conversion.markdown_path),
+        "reused_cache": conversion.reused_cache,
+    }
 
 
 async def _handle_deep_read_paper(
