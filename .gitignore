@@ -114,6 +114,9 @@ logs/*
 # 写成裸的 tools/node/ 会连别处的同名目录一起忽略掉。
 /tools/node/
 
+# 启动器自动下载的 uv.exe，只属于本机，不入库。
+# 中文说明：写成 /tools/uv.exe，只匹配仓库根目录这一份。
+/tools/uv.exe
 
 # AI coding 范式与本地 AI 配置：只属于本机的工作方式约定，不随项目分发
 AI-CODING-PARADIGM.md
